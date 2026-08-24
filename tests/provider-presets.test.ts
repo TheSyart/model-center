@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { getPreset, PROVIDER_PRESETS, presetDisplayName, presetsByCategory } from '../lib/presets/index.ts';
+import { LEGACY_PRESETS } from '../lib/presets/legacy.ts';
 
 test('uses logical generated CC Switch provider groups without legacy duplicates', () => {
   assert.equal(PROVIDER_PRESETS.length, 82);
@@ -17,6 +18,25 @@ test('resolves canonical logical keys and every old low-level variant slug', () 
   assert.equal(getPreset('codex-responses')?.presetKey, codex.presetKey);
   assert.equal(getPreset('openai-official-responses')?.presetKey, codex.presetKey);
   assert.equal(presetsByCategory().flatMap((group) => group.presets).length, 82);
+});
+
+test('preserves every legacy preset slug at its intended protocol and Base URL', () => {
+  for (const legacy of LEGACY_PRESETS) {
+    const resolved = getPreset(legacy.slug);
+    assert.ok(resolved, `missing legacy preset ${legacy.slug}`);
+    assert.equal(resolved.protocol, legacy.protocol, `${legacy.slug} protocol`);
+    assert.equal(resolved.baseUrl, legacy.baseUrl, `${legacy.slug} Base URL`);
+  }
+});
+
+test('resolves every generated low-level variant slug back to its owning logical group', () => {
+  for (const provider of PROVIDER_PRESETS) {
+    for (const slug of provider.legacySlugs) {
+      const resolved = getPreset(slug);
+      assert.ok(resolved, `missing generated legacy slug ${slug}`);
+      assert.equal(resolved.presetKey, provider.presetKey, `${slug} owning preset`);
+    }
+  }
 });
 
 test('marks unsupported OAuth and Bedrock presets in their display labels', () => {

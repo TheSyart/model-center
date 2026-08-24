@@ -7,6 +7,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import ts from 'typescript';
 
+import { LEGACY_PRESET_IDENTITIES } from '../lib/presets/legacy.ts';
 import {
   collectProviderExports,
   groupLogicalProviderPresets,
@@ -274,7 +275,7 @@ function main(): void {
     blobs[iconIndexFile] = command(source.root, 'git', ['rev-parse', `${source.sha}:${iconIndexFile}`]);
     const commitTime = command(source.root, 'git', ['show', '-s', '--format=%cI', source.sha]);
 
-    const logical = groupLogicalProviderPresets(catalog.providers);
+    const logical = groupLogicalProviderPresets(catalog.providers, LEGACY_PRESET_IDENTITIES);
     const logicalCandidateSlugs = logical.logicalProviders.flatMap((provider) =>
       provider.endpoints.flatMap((endpoint) => endpoint.alternateCandidates.map((candidate) => candidate.variantSlug)),
     );

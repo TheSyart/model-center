@@ -3290,8 +3290,8 @@ export const CC_SWITCH_LOGICAL_PRESETS: ProviderPreset[] = [
     "baseUrl": "https://api.teamorouter.cn/v1"
   },
   {
-    "presetKey": "ppio",
-    "slug": "ppio",
+    "presetKey": "ppio-cc-switch",
+    "slug": "ppio-cc-switch",
     "name": "PPIO",
     "category": "aggregator",
     "logo": "/logos/ppio.svg",

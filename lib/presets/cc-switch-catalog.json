@@ -3396,9 +3396,9 @@
       ],
       "logo": "/logos/ppio.svg",
       "name": "PPIO",
-      "presetKey": "ppio",
+      "presetKey": "ppio-cc-switch",
       "protocol": "openai",
-      "slug": "ppio",
+      "slug": "ppio-cc-switch",
       "sourceApps": [
         "claude",
         "claude-desktop",

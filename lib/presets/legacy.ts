@@ -165,6 +165,9 @@ const legacyProviders: LegacyPreset[] = [
   },
 ];
 
+/** Stable local lookup identities used to reserve non-equivalent generated keys. */
+export const LEGACY_PRESET_IDENTITIES = legacyProviders.map(({ slug, protocol, baseUrl }) => ({ slug, protocol, baseUrl }));
+
 export const LEGACY_PRESETS: ProviderPreset[] = legacyProviders.map((preset) => ({
   ...preset,
   presetKey: preset.slug,

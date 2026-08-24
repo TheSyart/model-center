@@ -102,6 +102,12 @@ export interface LogicalProviderPreset {
   baseUrl: string;
 }
 
+export interface LegacyProviderIdentity {
+  slug: string;
+  protocol: NormalizedProtocol;
+  baseUrl: string;
+}
+
 export type NormalizedRecordResult =
   | { status: 'included'; provider: NormalizedProvider }
   | { status: 'excluded'; sourceApp: string; sourceIndex: number; reason: string; name?: string };
@@ -576,7 +582,10 @@ function compareCandidates(left: NormalizedProvider, right: NormalizedProvider, 
  * variants. The input is never modified so the low-level catalog remains a
  * complete auditable source of candidates and legacy aliases.
  */
-export function groupLogicalProviderPresets(providers: NormalizedProvider[]): {
+export function groupLogicalProviderPresets(
+  providers: NormalizedProvider[],
+  legacyPresets: LegacyProviderIdentity[] = [],
+): {
   logicalProviders: LogicalProviderPreset[];
   semanticMergeCount: number;
 } {
@@ -591,8 +600,17 @@ export function groupLogicalProviderPresets(providers: NormalizedProvider[]): {
   const semanticMergeCount = new Set(providers.map((provider) => provider.name).filter((name) => SEMANTIC_PROVIDER_ALIASES[name])).size;
   const presetKeys = new Set<string>();
   const logicalProviders = [...groups.values()].map(({ name, providers: variants }) => {
-    const presetKey = slugify(name);
-    if (presetKeys.has(presetKey)) throw new Error(`逻辑服务商 slug 重复：${presetKey}`);
+    const basePresetKey = slugify(name);
+    const legacy = legacyPresets.find((preset) => preset.slug === basePresetKey);
+    const matchesLegacyEndpoint = legacy
+      ? variants.some(
+          (provider) => provider.protocol === legacy.protocol && cleanUrl(provider.baseUrl).toLowerCase() === cleanUrl(legacy.baseUrl).toLowerCase(),
+        )
+      : false;
+    const preferredPresetKey = legacy && !matchesLegacyEndpoint ? `${basePresetKey}-cc-switch` : basePresetKey;
+    let presetKey = preferredPresetKey;
+    let suffix = 2;
+    while (presetKeys.has(presetKey)) presetKey = `${preferredPresetKey}-${suffix++}`;
     presetKeys.add(presetKey);
 
     const endpoints = [...new Set(variants.map((provider) => provider.protocol))]

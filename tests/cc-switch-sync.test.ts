@@ -12,13 +12,17 @@ import {
   parseModelPricingSource,
   resolveIconAssetFiles,
 } from '../scripts/cc-switch-sync-lib.ts';
+import { LEGACY_PRESETS } from '../lib/presets/legacy.ts';
 
 const currentCatalog = JSON.parse(
   fs.readFileSync(path.join(import.meta.dirname, '..', 'lib', 'presets', 'cc-switch-catalog.json'), 'utf8'),
 ) as { providers: Array<ReturnType<typeof providerOf>> };
 
 type GroupingLibrary = typeof syncLibrary & {
-  groupLogicalProviderPresets(providers: typeof currentCatalog.providers): {
+  groupLogicalProviderPresets(
+    providers: typeof currentCatalog.providers,
+    legacyPresets: Array<{ slug: string; protocol: string; baseUrl: string }>,
+  ): {
     logicalProviders: Array<{
       presetKey: string;
       slug: string;
@@ -42,7 +46,7 @@ type GroupingLibrary = typeof syncLibrary & {
 };
 
 function logicalCatalog() {
-  return (syncLibrary as GroupingLibrary).groupLogicalProviderPresets(currentCatalog.providers);
+  return (syncLibrary as GroupingLibrary).groupLogicalProviderPresets(currentCatalog.providers, LEGACY_PRESETS);
 }
 
 function providerOf(result: ReturnType<typeof normalizeProviderRecord>) {
@@ -234,7 +238,14 @@ test('groups the pinned 255 variants into exactly 82 logical provider presets', 
   assert.deepEqual(grouped.logicalProviders.map((provider) => provider.slug), grouped.logicalProviders.map((provider) => provider.presetKey));
 });
 
-test('applies only the reviewed semantic aliases and keeps disallowed names distinct', () => {
+test('suffixes a generated canonical key that collides with a different legacy endpoint', () => {
+  const ppio = logicalCatalog().logicalProviders.find((provider) => provider.name === 'PPIO');
+  assert.ok(ppio);
+  assert.equal(ppio.presetKey, 'ppio-cc-switch');
+  assert.equal(ppio.slug, 'ppio-cc-switch');
+});
+
+test('applies exactly the eight reviewed semantic merge groups', () => {
   const grouped = logicalCatalog().logicalProviders;
   const provider = (name: string) => {
     const match = grouped.find((candidate) => candidate.name === name);
@@ -242,21 +253,49 @@ test('applies only the reviewed semantic aliases and keeps disallowed names dist
     return match;
   };
 
-  assert.deepEqual(provider('Claude Official').legacySlugs.sort(), ['claude-desktop-official-anthropic', 'claude-official-anthropic']);
-  assert.deepEqual(provider('Gemini Native').legacySlugs.sort(), ['gemini-native-gemini', 'google-official-gemini']);
-  assert.deepEqual(provider('xAI (Grok)').legacySlugs.sort(), ['grok-official-responses', 'xai-grok-oauth-responses', 'xai-grok-responses']);
-  assert.deepEqual(provider('Codex').legacySlugs.sort(), ['codex-responses', 'openai-official-responses']);
-  assert.deepEqual(provider('火山 Coding Plan').legacySlugs.sort(), [
-    'agentplan-openai',
-    'coding-plan-anthropic',
-    'coding-plan-openai',
-    'coding-plan-openai-ark',
-    'coding-plan-responses',
-  ]);
-  assert.ok(grouped.some((candidate) => candidate.name === 'Kimi'));
-  assert.ok(grouped.some((candidate) => candidate.name === 'Kimi For Coding'));
-  assert.ok(grouped.some((candidate) => candidate.name === 'SiliconFlow en'));
-  assert.ok(grouped.some((candidate) => candidate.name === 'AWS Bedrock (API Key)'));
+  const approvedGroups: Array<{ name: string; variants: string[] }> = [
+    { name: 'Claude Official', variants: ['claude-desktop-official-anthropic', 'claude-official-anthropic'] },
+    { name: 'Gemini Native', variants: ['gemini-native-gemini', 'google-official-gemini'] },
+    { name: 'xAI (Grok)', variants: ['grok-official-responses', 'xai-grok-oauth-responses', 'xai-grok-responses'] },
+    { name: 'Codex', variants: ['codex-responses', 'openai-official-responses'] },
+    {
+      name: '火山 Coding Plan',
+      variants: ['agentplan-openai', 'coding-plan-anthropic', 'coding-plan-openai', 'coding-plan-openai-ark', 'coding-plan-responses'],
+    },
+    { name: 'StepFun', variants: ['stepfun-anthropic', 'stepfun-openai', 'stepfun-openai-api', 'stepfun-step-plan-openai'] },
+    { name: 'Bailian', variants: ['bailian-anthropic', 'bailian-openai', 'bailian-responses', 'qwen-coder-openai'] },
+    {
+      name: 'AWS Bedrock (AKSK)',
+      variants: ['aws-bedrock-aksk-anthropic', 'aws-bedrock-anthropic', 'aws-bedrock-anthropic-bedrock-runtime', 'aws-bedrock-anthropic-bedrock-runtime-2'],
+    },
+  ];
+  for (const expected of approvedGroups) {
+    assert.deepEqual([...provider(expected.name).legacySlugs].sort(), expected.variants, `${expected.name} variants`);
+  }
+});
+
+test('keeps prohibited provider identities separate', () => {
+  const grouped = logicalCatalog().logicalProviders;
+  const presetKey = (name: string) => {
+    const provider = grouped.find((candidate) => candidate.name === name);
+    assert.ok(provider, `missing logical provider ${name}`);
+    return provider.presetKey;
+  };
+  const prohibitedPairs: Array<[string, string]> = [
+    ['Kimi', 'Kimi For Coding'],
+    ['SiliconFlow', 'SiliconFlow en'],
+    ['Zhipu GLM', 'Zhipu GLM en'],
+    ['StepFun', 'StepFun en'],
+    ['MiniMax', 'MiniMax en'],
+    ['火山 Coding Plan', '火山 Agent Plan'],
+    ['Bailian', 'Bailian For Coding'],
+    ['Baidu Qianfan Coding Plan', 'Baidu Qianfan Token Plan'],
+    ['Compshare', 'Compshare Coding Plan'],
+    ['AWS Bedrock (AKSK)', 'AWS Bedrock (API Key)'],
+  ];
+  for (const [left, right] of prohibitedPairs) {
+    assert.notEqual(presetKey(left), presetKey(right), `${left} must remain separate from ${right}`);
+  }
 });
 
 test('deduplicates protocols into endpoints and chooses supported source-priority defaults', () => {

@@ -73,6 +73,8 @@ npm run sync:cc-switch -- --ref <SHA>
 
 新增或变更别名时，先人工确认认证方式、地区、套餐与产品身份一致，再添加纯函数测试和固定快照断言；不得凭相似 URL、图标、模型名或厂商名自动合并。Kimi 与 Kimi For Coding、任何 `en` 区域变体、其他 Coding Plan 产品及不同认证模式均默认禁止合并，除非另有明确审查结论。每次同步必须检查 `logicalProviderCount`、`logicalEndpointCount`、`semanticMergeCount`，并确认候选 `variantSlug` 与 `legacySlugs` 各自都对 255 个低层变体形成一次且仅一次的完整覆盖。
 
+生成的 canonical `presetKey` 也必须与本地 legacy slug 比较。仅当同名 legacy 的协议和 Base URL 与该逻辑组任一端点相同时，生成组才能保留该 slug；否则生成 key 必须以稳定的 `-cc-switch` 后缀消歧，本地 slug 继续解析到原本的 legacy 端点。同步测试必须遍历所有 legacy slug，不能只检查已知碰撞。
+
 端点候选选择规则固定为：同协议内先选择受支持变体，再按协议来源优先级（OpenAI：opencode、openclaw、pi、hermes、codex；Responses：codex、grok-build；Anthropic：claude、claude-desktop；Gemini：gemini），之后按源序号和 variant slug 稳定回退。默认端点在受支持端点中按 openai、openai-responses、anthropic、gemini 的协议优先级选择。未选中的同协议 URL 仍必须留在 `alternateCandidates`。
 
 ## 四档定价规则
