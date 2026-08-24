@@ -1,38 +1,19 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { getPreset, presetDisplayName, presetsByCategory } from '@/lib/presets';
+import { getPreset } from '@/lib/presets';
 import { useConfirm } from '@/components/confirm-dialog';
 import { EmptyState, SkeletonRows } from '@/components/empty-state';
 import { CheckIcon, ChevronIcon, CopyIcon, EyeIcon, EyeOffIcon, RefreshIcon } from '@/components/icons';
 import { useToast } from '@/components/toast';
-import { btn, cardCls, inputCls, toggleCls, toggleKnobCls } from '@/components/ui';
+import { btn, cardCls, toggleCls, toggleKnobCls } from '@/components/ui';
 import ModelTable from './model-table';
 import type { ModelItem } from './model-table';
+import ProviderForm from './provider-form';
+import type { ProviderFormState, ProviderView } from './provider-types';
+import { createCustomFormEndpoints, protocolDisplayName, validateFormEndpoints } from '@/lib/services/provider-form';
 
-interface Provider {
-  id: string;
-  slug: string;
-  name: string;
-  protocol: string;
-  base_url: string;
-  enabled: boolean;
-  priority: number;
-  remark: string | null;
-  has_key: boolean;
-}
-
-interface FormState {
-  id: string | null; // null = 新建
-  slug: string;
-  name: string;
-  protocol: string;
-  base_url: string;
-  api_key: string;
-  remark: string;
-}
-
-const EMPTY_FORM: FormState = { id: null, slug: '', name: '', protocol: 'openai', base_url: '', api_key: '', remark: '' };
+const EMPTY_FORM: ProviderFormState = { id: null, preset_key: null, slug: '', name: '', api_key: '', remark: '', endpoints: createCustomFormEndpoints() };
 
 function quotaTone(tiers?: { utilization: number }[]): string {
   if (!tiers?.length) return 'text-success';
@@ -43,9 +24,9 @@ function quotaTone(tiers?: { utilization: number }[]): string {
 }
 
 /** 厂商 logo；无 logo 或加载失败时用首字母占位图 */
-function ProviderLogo({ slug, name }: { slug: string; name: string }) {
+function ProviderLogo({ presetKey, slug, name }: { presetKey: string | null; slug: string; name: string }) {
   const [err, setErr] = useState(false);
-  const logo = getPreset(slug)?.logo;
+  const logo = getPreset(presetKey ?? slug)?.logo;
   if (!logo || err) {
     return (
       <span className="flex h-7 w-7 items-center justify-center rounded-md bg-muted text-xs font-medium text-muted-foreground">
@@ -79,11 +60,11 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
-export default function ProvidersClient({ initialProviders }: { initialProviders: Provider[] }) {
-  const [providers, setProviders] = useState<Provider[]>(initialProviders);
+export default function ProvidersClient({ initialProviders }: { initialProviders: ProviderView[] }) {
+  const [providers, setProviders] = useState<ProviderView[]>(initialProviders);
   const [models, setModels] = useState<ModelItem[]>([]);
   const [modelsLoaded, setModelsLoaded] = useState(false);
-  const [form, setForm] = useState<FormState | null>(null);
+  const [form, setForm] = useState<ProviderFormState | null>(null);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -96,7 +77,6 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
   const [testResults, setTestResults] = useState<Record<string, { ms: number; ok: boolean; detail: string }>>({});
   const [revealedKeys, setRevealedKeys] = useState<Record<string, string>>({});
   const [copiedKeys, setCopiedKeys] = useState<Record<string, boolean>>({});
-  const [showKeyInput, setShowKeyInput] = useState(false);
 
   const notify = useCallback((text: string, error = false) => toast(text, error ? 'error' : 'success'), [toast]);
 
@@ -157,7 +137,7 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
     };
   }, [refreshAllBalances]);
 
-  async function refreshBalance(p: Provider) {
+  async function refreshBalance(p: ProviderView) {
     setBalances((b) => ({ ...b, [p.id]: { text: '查询中…', loading: true } }));
     const res = await fetch(`/api/admin/providers/${p.id}/balance`);
     const data = await res.json();
@@ -167,7 +147,7 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
     else setBalances((b) => ({ ...b, [p.id]: { text: data.summary, tiers: data.tiers, plan: data.plan } }));
   }
 
-  async function testProvider(p: Provider) {
+  async function testProvider(p: ProviderView) {
     setTestResults((t) => ({ ...t, [p.id]: { ms: -1, ok: false, detail: '测速中…' } }));
     const res = await fetch(`/api/admin/providers/${p.id}/test`, { method: 'POST' });
     const data = await res.json();
@@ -179,7 +159,7 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
       }));
   }
 
-  async function revealKey(p: Provider): Promise<string | null> {
+  async function revealKey(p: ProviderView): Promise<string | null> {
     if (revealedKeys[p.id]) return revealedKeys[p.id];
     const res = await fetch(`/api/admin/providers/${p.id}/key`);
     if (!res.ok) return null;
@@ -188,7 +168,7 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
     return data.api_key as string;
   }
 
-  async function toggleRevealKey(p: Provider) {
+  async function toggleRevealKey(p: ProviderView) {
     if (revealedKeys[p.id]) {
       setRevealedKeys((k) => {
         const next = { ...k };
@@ -200,7 +180,7 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
     await revealKey(p);
   }
 
-  async function copyKey(p: Provider) {
+  async function copyKey(p: ProviderView) {
     const key = await revealKey(p);
     if (!key) return;
     if (await copyText(key)) {
@@ -213,20 +193,28 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
     setExpanded((e) => ({ ...e, [id]: !e[id] }));
   }
 
-  function onSelectPreset(slug: string) {
-    const preset = getPreset(slug);
-    if (!preset || !form) return;
-    setForm({ ...form, slug: preset.slug, name: preset.name, protocol: preset.protocol, base_url: preset.baseUrl });
-  }
-
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!form) return;
     setError('');
+    let endpoints;
+    try {
+      endpoints = validateFormEndpoints(form.endpoints);
+    } catch (validationError) {
+      setError(validationError instanceof Error ? validationError.message : '端点配置无效');
+      return;
+    }
     setSaving(true);
     try {
       const isEdit = form.id !== null;
-      const payload: Record<string, unknown> = { name: form.name, protocol: form.protocol, base_url: form.base_url, remark: form.remark };
+      const defaultEndpoint = endpoints.find((endpoint) => endpoint.is_default);
+      const payload: Record<string, unknown> = {
+        name: form.name,
+        remark: form.remark,
+        preset_key: form.preset_key,
+        endpoints,
+        default_protocol: defaultEndpoint?.protocol,
+      };
       if (form.api_key) payload.api_key = form.api_key;
       if (!isEdit) payload.slug = form.slug;
       const res = await fetch(isEdit ? `/api/admin/providers/${form.id}` : '/api/admin/providers', {
@@ -260,7 +248,7 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
     }
   }
 
-  async function toggleEnabled(p: Provider) {
+  async function toggleEnabled(p: ProviderView) {
     await fetch(`/api/admin/providers/${p.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -269,7 +257,7 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
     await load();
   }
 
-  async function onDelete(p: Provider) {
+  async function onDelete(p: ProviderView) {
     const ok = await confirm({ title: `删除服务商「${p.name}」？`, description: '其下模型与关联配置将一并删除，操作不可恢复。', confirmText: '删除' });
     if (!ok) return;
     await fetch(`/api/admin/providers/${p.id}`, { method: 'DELETE' });
@@ -286,129 +274,14 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
       </div>
 
       {form && (
-        <form onSubmit={onSubmit} className={`mb-6 ${cardCls} p-6`}>
-          <h2 className="mb-4 text-lg font-medium">{form.id ? '编辑服务商' : '新建服务商'}</h2>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            {!form.id && (
-              <div className="block">
-                <span className="mb-1.5 block text-sm font-medium text-muted-foreground">从预设选择</span>
-                <div className="flex items-center gap-2">
-                  {getPreset(form.slug)?.logo && <img src={getPreset(form.slug)!.logo} alt="" className="h-6 w-6 rounded object-contain" />}
-                  <select
-                    aria-label="服务商预设"
-                    defaultValue=""
-                    onChange={(e) => onSelectPreset(e.target.value)}
-                    className={`w-full ${inputCls}`}
-                  >
-                    <option value="" disabled>
-                      选择预设…
-                    </option>
-                    {presetsByCategory().map((g) => (
-                      <optgroup key={g.category} label={g.label}>
-                        {g.presets.map((p) => (
-                          <option key={p.slug} value={p.slug} disabled={p.supported === false}>
-                            {presetDisplayName(p)}
-                          </option>
-                        ))}
-                      </optgroup>
-                    ))}
-                  </select>
-                </div>
-              </div>
-            )}
-            <label className="block">
-              <span className="mb-1.5 block text-sm font-medium text-muted-foreground">Slug（唯一标识）</span>
-              <input
-                value={form.slug}
-                onChange={(e) => setForm({ ...form, slug: e.target.value })}
-                disabled={form.id !== null}
-                placeholder="deepseek"
-                className={`w-full ${inputCls}`}
-                required
-              />
-            </label>
-            <label className="block">
-              <span className="mb-1.5 block text-sm font-medium text-muted-foreground">名称</span>
-              <input
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-                className={`w-full ${inputCls}`}
-                required
-              />
-            </label>
-            <label className="block">
-              <span className="mb-1.5 block text-sm font-medium text-muted-foreground">协议</span>
-              <select
-                value={form.protocol}
-                onChange={(e) => setForm({ ...form, protocol: e.target.value })}
-                className={`w-full ${inputCls}`}
-              >
-                <option value="openai">OpenAI Chat 兼容</option>
-                <option value="openai-responses">OpenAI Responses</option>
-                <option value="anthropic">Anthropic</option>
-                <option value="gemini">Gemini</option>
-              </select>
-            </label>
-            <label className="block md:col-span-2">
-              <span className="mb-1.5 block text-sm font-medium text-muted-foreground">Base URL（须 https）</span>
-              <input
-                value={form.base_url}
-                onChange={(e) => setForm({ ...form, base_url: e.target.value })}
-                placeholder="https://api.deepseek.com/v1"
-                className={`w-full ${inputCls}`}
-                required
-              />
-            </label>
-            <label className="block md:col-span-2">
-              <span className="mb-1.5 block text-sm font-medium text-muted-foreground">
-                API Key{form.id ? '（留空则不修改，加密存储，永不回显）' : '（加密存储）'}
-              </span>
-              <div className="relative">
-                <input
-                  type={showKeyInput ? 'text' : 'password'}
-                  value={form.api_key}
-                  onChange={(e) => setForm({ ...form, api_key: e.target.value })}
-                  placeholder={form.id ? '留空则不修改' : 'sk-...'}
-                  className={`w-full ${inputCls} pr-10`}
-                  required={form.id === null}
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowKeyInput(!showKeyInput)}
-                  className="absolute right-1 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-md text-subtle-foreground transition-colors hover:bg-muted hover:text-foreground"
-                  title={showKeyInput ? '隐藏' : '显示'}
-                  aria-label={showKeyInput ? '隐藏 API Key' : '显示 API Key'}
-                >
-                  {showKeyInput ? <EyeOffIcon /> : <EyeIcon />}
-                </button>
-              </div>
-            </label>
-            <label className="block md:col-span-2">
-              <span className="mb-1.5 block text-sm font-medium text-muted-foreground">备注</span>
-              <input
-                value={form.remark}
-                onChange={(e) => setForm({ ...form, remark: e.target.value })}
-                className={`w-full ${inputCls}`}
-              />
-            </label>
-          </div>
-          {error && <p className="mt-3 text-sm text-destructive" role="alert">{error}</p>}
-          <div className="mt-4 flex gap-2">
-            <button type="submit" disabled={saving} className={btn.primary}>
-              {saving ? '保存中…' : '保存'}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setForm(null);
-                setError('');
-              }}
-              className={btn.ghost}
-            >
-              取消
-            </button>
-          </div>
-        </form>
+        <ProviderForm
+          value={form}
+          error={error}
+          saving={saving}
+          onChange={setForm}
+          onSubmit={onSubmit}
+          onCancel={() => { setForm(null); setError(''); }}
+        />
       )}
 
       {/* 服务商卡片列表 */}
@@ -435,11 +308,11 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
             return (
               <div key={p.id} className={`overflow-hidden ${cardCls}`}>
                 <div className="flex items-center gap-3 px-4 py-4 sm:gap-4 sm:px-5">
-                  <ProviderLogo slug={p.slug} name={p.name} />
+                  <ProviderLogo presetKey={p.preset_key} slug={p.slug} name={p.name} />
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
                       <span className="font-medium tracking-[-0.01em]">{p.name}</span>
-                      <span className="text-xs text-muted-foreground">{p.protocol}</span>
+                      <span className="text-xs text-muted-foreground">{p.endpoints.length} 种接入格式 · 默认 {protocolDisplayName(p.default_protocol)}</span>
                     </div>
                     <div className="truncate text-xs text-subtle-foreground" title={p.base_url}>
                       {p.slug} · {p.base_url}
@@ -534,7 +407,20 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
                           {test && test.ms < 0 ? '测速中…' : '测速'}
                         </button>
                         <button
-                          onClick={() => setForm({ id: p.id, slug: p.slug, name: p.name, protocol: p.protocol, base_url: p.base_url, api_key: '', remark: p.remark ?? '' })}
+                          onClick={() => setForm({
+                            id: p.id,
+                            preset_key: p.preset_key,
+                            slug: p.slug,
+                            name: p.name,
+                            api_key: '',
+                            remark: p.remark ?? '',
+                            endpoints: p.endpoints.map((endpoint) => ({
+                              protocol: endpoint.protocol,
+                              base_url: endpoint.base_url,
+                              enabled: endpoint.enabled,
+                              is_default: endpoint.is_default,
+                            })),
+                          })}
                           className={btn.ghost}
                         >
                           编辑
@@ -584,6 +470,19 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
                         </div>
                       </div>
                     )}
+                    <div className="border-t border-border px-4 py-5 sm:px-5">
+                      <div className="text-xs font-medium text-muted-foreground">接入端点</div>
+                      <div className="minimal-scrollbar mt-3 overflow-x-auto">
+                        <table className="min-w-[34rem] w-full text-left text-xs">
+                          <thead className="text-subtle-foreground"><tr><th className="pb-2 font-medium">协议</th><th className="pb-2 font-medium">Base URL</th><th className="pb-2 text-right font-medium">状态</th></tr></thead>
+                          <tbody className="divide-y divide-border">
+                            {p.endpoints.map((endpoint) => (
+                              <tr key={endpoint.protocol}><td className="py-2 text-muted-foreground">{protocolDisplayName(endpoint.protocol)}{endpoint.is_default && <span className="ml-2 rounded-full bg-primary-soft px-1.5 py-0.5 text-[10px] text-primary">默认</span>}</td><td className="py-2 font-mono text-subtle-foreground">{endpoint.base_url}</td><td className="py-2 text-right">{endpoint.enabled ? <span className="text-success">启用</span> : <span className="text-subtle-foreground">停用</span>}</td></tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
                     <ModelTable providerId={p.id} models={models.filter((m) => m.provider_id === p.id)} onChanged={load} onToast={notify} />
                   </div>
                 )}

@@ -1,6 +1,7 @@
 import { listProviders, serializeProvider } from '@/lib/services/provider';
 import { PageHeader } from '@/components/page-header';
 import ProvidersClient from './providers-client';
+import type { ProviderView } from './provider-types';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,7 +11,7 @@ export default function ProvidersPage() {
   return (
     <div>
       <PageHeader heading="服务商" description="连接上游模型服务，管理凭据、套餐额度和可调用模型。" />
-      <ProvidersClient initialProviders={initialProviders} />
+      <ProvidersClient initialProviders={initialProviders as ProviderView[]} />
     </div>
   );
 }

@@ -130,7 +130,7 @@ export default function SettingsPage() {
 
         <section className={`${cardCls} p-5 sm:p-6`}>
           <h2 className={sectionTitleCls}>导入 / 导出</h2>
-          <p className="mt-2 text-sm leading-6 text-muted-foreground">迁移服务商、模型、别名和提示词配置；API Key 默认脱敏。</p>
+          <p className="mt-2 text-sm leading-6 text-muted-foreground">迁移服务商、端点、模型、别名和提示词配置；API Key 默认脱敏，旧版单端点文件仍可导入。</p>
           <div className="mt-5"><ExportImport /></div>
         </section>
       </div>
