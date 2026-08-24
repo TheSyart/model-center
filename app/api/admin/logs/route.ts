@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { queryLogs } from '@/lib/services/log';
 
-// GET /api/admin/logs?provider=&model=&token=&client=&status=2xx|error&stream=1|0&from=&to=&q=&page=&page_size=
+// GET /api/admin/logs?provider=&model=&token=&entry=&client=&status=2xx|error&stream=1|0&from=&to=&q=&page=&page_size=
 export async function GET(req: NextRequest) {
 
   const sp = req.nextUrl.searchParams;
@@ -16,6 +16,7 @@ export async function GET(req: NextRequest) {
     provider: sp.get('provider') || undefined,
     model: sp.get('model') || undefined,
     token: sp.get('token') || undefined,
+    entry: sp.get('entry') || undefined,
     client: sp.get('client') || undefined,
     status: sp.get('status') || undefined,
     stream: sp.get('stream') || undefined,

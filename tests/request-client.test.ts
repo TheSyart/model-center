@@ -25,9 +25,18 @@ test('preserves source while classifying SDKs, curl and unknown clients', () => 
   assert.deepEqual(detectRequestClient('strange-agent/1.0'), { key: 'unknown', name: '未知客户端' });
 });
 
-test('log UI exposes clients as entry and never protocol labels', () => {
-  const source = fs.readFileSync(new URL('../app/(admin)/logs/logs-client.tsx', import.meta.url), 'utf8');
-  assert.match(source, /请求客户端/);
-  assert.match(source, /log\.client_name/);
-  assert.doesNotMatch(source, /入口协议|>Chat<|>Responses<|>Messages</);
+test('log UI and API expose request protocols as entry while preserving user agent source', () => {
+  const ui = fs.readFileSync(new URL('../app/(admin)/logs/logs-client.tsx', import.meta.url), 'utf8');
+  const route = fs.readFileSync(new URL('../app/api/admin/logs/route.ts', import.meta.url), 'utf8');
+  const service = fs.readFileSync(new URL('../lib/services/log.ts', import.meta.url), 'utf8');
+
+  assert.match(ui, /入口协议/);
+  assert.match(ui, /<option value="openai">Chat<\/option>/);
+  assert.match(ui, /<option value="responses">Responses<\/option>/);
+  assert.match(ui, /<option value="anthropic">Messages<\/option>/);
+  assert.match(ui, /log\.entry_protocol/);
+  assert.doesNotMatch(ui, /log\.client_name/);
+  assert.match(ui, /log\.source/);
+  assert.match(route, /entry: sp\.get\('entry'\)/);
+  assert.match(service, /l\.entry_protocol =/);
 });

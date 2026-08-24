@@ -8,6 +8,7 @@ export interface LogFilters {
   provider?: string; // provider_id
   model?: string;
   token?: string;
+  entry?: string;
   client?: string;
   status?: string; // '2xx' | 'error'
   stream?: string; // '1' | '0'
@@ -55,6 +56,7 @@ function buildWhere(f: LogFilters) {
     (${f.provider ? sql`l.provider_id = ${f.provider}` : sql`1=1`})
     AND (${f.model ? sql`l.model_id = ${f.model}` : sql`1=1`})
     AND (${f.token ? sql`l.token_id = ${f.token}` : sql`1=1`})
+    AND (${f.entry ? sql`l.entry_protocol = ${f.entry}` : sql`1=1`})
     AND (${f.client ? sql`l.client_key = ${f.client}` : sql`1=1`})
     AND (${f.status === '2xx' ? sql`l.status BETWEEN 200 AND 299` : f.status === 'error' ? sql`NOT (l.status BETWEEN 200 AND 299)` : sql`1=1`})
     AND (${f.stream === '1' ? sql`l.stream = 1` : f.stream === '0' ? sql`l.stream = 0` : sql`1=1`})

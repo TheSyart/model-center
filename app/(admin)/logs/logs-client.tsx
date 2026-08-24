@@ -3,7 +3,6 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { EmptyState, SkeletonRows } from '@/components/empty-state';
 import { btn, inputCls, tableHeadCls, tableWrapCls } from '@/components/ui';
-import { REQUEST_CLIENT_OPTIONS } from '@/lib/services/usage-metrics';
 
 interface Provider { id: string; name: string; slug: string; }
 interface Token { id: string; name: string; prefix: string; }
@@ -41,6 +40,11 @@ interface LogRow {
 }
 
 const DAY = 86_400_000;
+const ENTRY_LABELS: Record<string, string> = {
+  openai: 'Chat',
+  responses: 'Responses',
+  anthropic: 'Messages',
+};
 
 function rangeFrom(range: string): number | undefined {
   const now = new Date();
@@ -75,7 +79,7 @@ export default function LogsClient() {
   const [loadError, setLoadError] = useState('');
   const [page, setPage] = useState(1);
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [filters, setFilters] = useState({ provider: '', token: '', client: '', status: '', range: 'today', q: '' });
+  const [filters, setFilters] = useState({ provider: '', token: '', entry: '', status: '', range: 'today', q: '' });
   const logRequestId = useRef(0);
   const pageSize = 50;
 
@@ -96,7 +100,7 @@ export default function LogsClient() {
     const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
     if (filters.provider) params.set('provider', filters.provider);
     if (filters.token) params.set('token', filters.token);
-    if (filters.client) params.set('client', filters.client);
+    if (filters.entry) params.set('entry', filters.entry);
     if (filters.status) params.set('status', filters.status);
     if (filters.q) params.set('q', filters.q);
     const from = rangeFrom(filters.range);
@@ -130,7 +134,7 @@ export default function LogsClient() {
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_auto_auto_auto_1.1fr]">
           <select aria-label="网关令牌" value={filters.token} onChange={(event) => applyFilters({ token: event.target.value })} className={inputCls}><option value="">全部令牌</option>{tokens.map((token) => <option key={token.id} value={token.id}>{token.name} · {token.prefix}</option>)}</select>
           <select aria-label="服务商" value={filters.provider} onChange={(event) => applyFilters({ provider: event.target.value })} className={inputCls}><option value="">全部服务商</option>{providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select>
-          <select aria-label="请求客户端" value={filters.client} onChange={(event) => applyFilters({ client: event.target.value })} className={inputCls}><option value="">全部入口</option>{REQUEST_CLIENT_OPTIONS.map((client) => <option key={client.key} value={client.key}>{client.name}</option>)}</select>
+          <select aria-label="入口协议" value={filters.entry} onChange={(event) => applyFilters({ entry: event.target.value })} className={inputCls}><option value="">全部入口</option><option value="openai">Chat</option><option value="responses">Responses</option><option value="anthropic">Messages</option></select>
           <select aria-label="请求状态" value={filters.status} onChange={(event) => applyFilters({ status: event.target.value })} className={inputCls}><option value="">全部状态</option><option value="2xx">成功</option><option value="error">失败</option></select>
           <select aria-label="时间范围" value={filters.range} onChange={(event) => applyFilters({ range: event.target.value })} className={inputCls}><option value="today">当天</option><option value="7d">近 7 天</option><option value="30d">近 30 天</option><option value="">全部时间</option></select>
           <input aria-label="搜索错误摘要" value={filters.q} onChange={(event) => applyFilters({ q: event.target.value })} placeholder="搜索错误摘要…" className={inputCls} />
@@ -152,7 +156,7 @@ export default function LogsClient() {
                   <tr className={`${log.error && !success ? 'bg-destructive-soft/25' : ''} hover:bg-muted/35`}>
                     <td className="px-4 py-3 whitespace-nowrap"><button type="button" aria-expanded={expanded === log.id} onClick={() => setExpanded(expanded === log.id ? null : log.id)} className="text-left text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">{new Date(log.ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })}</button></td>
                     <td className="px-4 py-3"><div className="font-medium">{log.token_name ?? '已删除令牌'}</div><div className="mt-0.5 font-mono text-[11px] text-subtle-foreground">{log.token_prefix ?? '—'}</div></td>
-                    <td className="px-4 py-3"><span className="rounded border border-border bg-muted px-2 py-1 text-[11px] text-muted-foreground">{log.client_name ?? '未知客户端'}</span></td>
+                    <td className="px-4 py-3"><span className="rounded border border-border bg-muted px-2 py-1 text-[11px] text-muted-foreground">{ENTRY_LABELS[log.entry_protocol ?? ''] ?? log.entry_protocol ?? '旧记录'}</span></td>
                     <td className="px-4 py-3"><div>{log.provider_name ?? log.provider_slug ?? '—'}</div><div className="mt-0.5 max-w-64 truncate font-mono text-[11px] text-muted-foreground" title={log.model_id ?? ''}>{log.model_id ?? '—'}</div></td>
                     <td className="px-4 py-3 text-right tabular-nums"><div>{fmtTokens(input)}</div><div className="mt-0.5 text-[10px] text-subtle-foreground">{log.cache_metrics_observed === 1 ? `读 ${fmtTokens(log.cache_read_tokens)} · 写 ${fmtTokens(log.cache_write_tokens)}` : '缓存未知'}</div></td>
                     <td className="px-4 py-3 text-right tabular-nums">{fmtTokens(log.completion_tokens)}</td>
