@@ -213,7 +213,7 @@ test('endpoint request parsing rejects malformed boolean, protocol, and base_url
   }
 });
 
-test('configuration-only endpoint replacement preserves sync catalog state and models', () => {
+test('configuration-only replacement preserves sync catalog state for the same normalized Base URL', () => {
   const sqlite = database();
   replaceProviderEndpoints(sqlite, 'provider-1', [
     { protocol: 'openai', base_url: 'https://chat.example/v1', enabled: true, is_default: true },
@@ -224,15 +224,39 @@ test('configuration-only endpoint replacement preserves sync catalog state and m
     .run(endpointId, 'synced-model', 'sync', 601);
 
   replaceProviderEndpoints(sqlite, 'provider-1', [
-    { protocol: 'openai', base_url: 'https://chat.example/v2', enabled: true, is_default: true },
+    { protocol: 'openai', base_url: 'https://chat.example/v1/', enabled: true, is_default: true },
   ], 602);
   assert.deepEqual(
     sqlite.prepare('SELECT base_url, model_catalog_complete, models_observed_at FROM provider_endpoints WHERE id = ?').get(endpointId),
-    { base_url: 'https://chat.example/v2', model_catalog_complete: 1, models_observed_at: 601 },
+    { base_url: 'https://chat.example/v1/', model_catalog_complete: 1, models_observed_at: 601 },
   );
   assert.deepEqual(
     sqlite.prepare('SELECT model_id, source FROM provider_endpoint_models WHERE endpoint_id = ?').all(endpointId),
     [{ model_id: 'synced-model', source: 'sync' }],
+  );
+  sqlite.close();
+});
+
+test('changing an endpoint Base URL invalidates sync-derived catalog knowledge in the same transaction', () => {
+  const sqlite = database();
+  replaceProviderEndpoints(sqlite, 'provider-1', [
+    { protocol: 'openai', base_url: 'https://chat.example/v1', enabled: true, is_default: true },
+  ], 610);
+  const endpointId = (sqlite.prepare('SELECT id FROM provider_endpoints WHERE provider_id = ?').get('provider-1') as { id: string }).id;
+  sqlite.prepare('UPDATE provider_endpoints SET model_catalog_complete = 1, models_observed_at = 611 WHERE id = ?').run(endpointId);
+  sqlite.prepare('INSERT INTO provider_endpoint_models (endpoint_id, model_id, source, observed_at) VALUES (?, ?, ?, ?)')
+    .run(endpointId, 'old-upstream-model', 'sync', 611);
+
+  replaceProviderEndpoints(sqlite, 'provider-1', [
+    { protocol: 'openai', base_url: 'https://other-upstream.example/v1', enabled: true, is_default: true },
+  ], 612);
+  assert.deepEqual(
+    sqlite.prepare('SELECT base_url, model_catalog_complete, models_observed_at FROM provider_endpoints WHERE id = ?').get(endpointId),
+    { base_url: 'https://other-upstream.example/v1', model_catalog_complete: 0, models_observed_at: null },
+  );
+  assert.deepEqual(
+    sqlite.prepare('SELECT model_id, source FROM provider_endpoint_models WHERE endpoint_id = ?').all(endpointId),
+    [],
   );
   sqlite.close();
 });

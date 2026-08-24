@@ -373,7 +373,7 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
                             {bal?.link && (
                               <a href={bal.link} target="_blank" rel="noreferrer" className={btn.link}>控制台</a>
                             )}
-                            <button onClick={() => refreshBalance(p)} className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-surface hover:text-foreground" title="立即刷新余额">
+                            <button onClick={() => refreshBalance(p)} aria-label="立即刷新余额" className="flex h-11 w-11 items-center justify-center rounded-md text-muted-foreground hover:bg-surface hover:text-foreground sm:h-8 sm:w-8" title="立即刷新余额">
                               <RefreshIcon className="h-3.5 w-3.5" />
                             </button>
                           </div>
@@ -398,8 +398,10 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
 
                       <div className="flex flex-wrap items-center gap-2 sm:justify-end">
                         <div className="mr-2 flex items-center gap-2 text-xs text-muted-foreground">
-                          <button type="button" onClick={() => toggleEnabled(p)} className={toggleCls(p.enabled)} aria-label={p.enabled ? '禁用服务商' : '启用服务商'}>
-                            <span className={toggleKnobCls(p.enabled)} />
+                          <button type="button" onClick={() => toggleEnabled(p)} className="flex h-11 w-11 items-center justify-center rounded-md sm:h-10" aria-label={p.enabled ? '禁用服务商' : '启用服务商'}>
+                            <span className={toggleCls(p.enabled)} aria-hidden="true">
+                              <span className={toggleKnobCls(p.enabled)} />
+                            </span>
                           </button>
                           {p.enabled ? '已启用' : '已停用'}
                         </div>

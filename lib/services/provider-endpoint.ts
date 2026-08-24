@@ -54,6 +54,13 @@ function endpointFromRow(row: Record<string, unknown>): ProviderEndpoint {
   };
 }
 
+function catalogIdentityUrl(baseUrl: string): string {
+  const url = new URL(baseUrl);
+  url.hash = '';
+  url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+  return url.toString();
+}
+
 /** Validate and normalize the complete, client-visible endpoint set. */
 export function validateCompleteEndpointSet(
   inputs: EndpointInput[],
@@ -207,7 +214,7 @@ export function replaceProviderEndpoints(
         updated_at = excluded.updated_at
     `);
     const existingEndpoint = sqlite.prepare(`
-      SELECT id, model_catalog_complete, models_observed_at
+      SELECT id, base_url, model_catalog_complete, models_observed_at
       FROM provider_endpoints WHERE provider_id = ? AND protocol = ?
     `);
     const seedModel = sqlite.prepare(`
@@ -226,18 +233,34 @@ export function replaceProviderEndpoints(
         END
     `);
     const deletePresetModels = sqlite.prepare("DELETE FROM provider_endpoint_models WHERE endpoint_id = ? AND source = 'preset'");
+    const deleteSyncModels = sqlite.prepare("DELETE FROM provider_endpoint_models WHERE endpoint_id = ? AND source = 'sync'");
+    const resetSyncCatalog = sqlite.prepare(`
+      UPDATE provider_endpoints
+      SET model_catalog_complete = 0, models_observed_at = NULL
+      WHERE id = ?
+    `);
 
     for (const endpoint of endpoints) {
       const existing = existingEndpoint.get(providerId, endpoint.protocol) as
-        | { id: string; model_catalog_complete: number; models_observed_at: number | null }
+        | { id: string; base_url: string; model_catalog_complete: number; models_observed_at: number | null }
         | undefined;
-      const modelCatalogComplete = endpoint.model_catalog_complete ?? (existing?.model_catalog_complete === 1);
-      const modelsObservedAt = endpoint.models_observed_at ?? existing?.models_observed_at ?? (endpoint.models ? now : null);
+      const catalogIdentityChanged = !!existing
+        && catalogIdentityUrl(existing.base_url) !== catalogIdentityUrl(endpoint.base_url);
+      const modelCatalogComplete = catalogIdentityChanged
+        ? false
+        : endpoint.model_catalog_complete ?? (existing?.model_catalog_complete === 1);
+      const modelsObservedAt = catalogIdentityChanged
+        ? null
+        : endpoint.models_observed_at ?? existing?.models_observed_at ?? (endpoint.models ? now : null);
       upsert.run(
         cryptoRandomId(sqlite), providerId, endpoint.protocol, endpoint.base_url, endpoint.enabled ? 1 : 0, endpoint.is_default ? 1 : 0,
         endpoint.preset_variant_slug ?? null, endpoint.source_ref ?? null, modelCatalogComplete ? 1 : 0,
         modelsObservedAt, now, now,
       );
+      if (catalogIdentityChanged && existing) {
+        resetSyncCatalog.run(existing.id);
+        deleteSyncModels.run(existing.id);
+      }
       if (endpoint.models) {
         const id = (existingEndpoint.get(providerId, endpoint.protocol) as { id: string }).id;
         if (endpoint.source_ref !== undefined) deletePresetModels.run(id);
