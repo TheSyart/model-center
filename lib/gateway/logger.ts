@@ -19,6 +19,10 @@ export interface RequestLogFields {
   tokenName?: string | null;
   tokenPrefix?: string | null;
   entryProtocol: 'openai' | 'anthropic' | 'responses';
+  /** 实际选中的上游端点，允许历史日志为空。 */
+  providerEndpointId?: string | null;
+  /** 实际请求上游所用协议；入口协议继续单独保留。 */
+  upstreamProtocol?: string | null;
   source?: string | null;
   status: number;
   latencyMs: number;
@@ -80,6 +84,8 @@ export function writeRequestLog(f: RequestLogFields): void {
           tokenName: f.tokenName ?? null,
           tokenPrefix: f.tokenPrefix ?? null,
           entryProtocol: f.entryProtocol,
+          providerEndpointId: f.providerEndpointId ?? null,
+          upstreamProtocol: f.upstreamProtocol ?? null,
           source,
           clientKey: client.key,
           clientName: client.name,

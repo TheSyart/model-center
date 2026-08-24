@@ -6,8 +6,10 @@ import { migrateProviderEndpointSchema } from '../lib/db/provider-endpoint-migra
 import {
   EndpointValidationError,
   getEnabledDefaultEndpoint,
+  listProviderEndpointModelObservations,
   listProviderEndpoints,
   materializePresetEndpoints,
+  replaceEndpointModelCatalog,
   replaceProviderEndpoints,
   validateCompleteEndpointSet,
 } from '../lib/services/provider-endpoint.ts';
@@ -334,4 +336,44 @@ test('provider serialization exposes endpoint defaults without leaking encrypted
   assert.equal(serialized.has_key, true);
   assert.equal('apiKeyEnc' in serialized, false);
   assert.equal('api_key_enc' in serialized, false);
+});
+
+test('model synchronization atomically replaces only the default endpoint catalog', () => {
+  const sqlite = database();
+  replaceProviderEndpoints(sqlite, 'provider-1', [
+    { protocol: 'openai', base_url: 'https://chat.example/v1', enabled: true, is_default: true },
+    { protocol: 'anthropic', base_url: 'https://claude.example', enabled: true, is_default: false,
+      models: [{ model_id: 'preset-claude', source: 'preset' }] },
+  ], 900);
+  const defaultId = (sqlite.prepare("SELECT id FROM provider_endpoints WHERE provider_id = ? AND protocol = 'openai'").get('provider-1') as { id: string }).id;
+  sqlite.prepare('INSERT INTO provider_endpoint_models (endpoint_id, model_id, source, observed_at) VALUES (?, ?, ?, ?)')
+    .run(defaultId, 'stale-sync-model', 'sync', 901);
+
+  replaceEndpointModelCatalog(sqlite, defaultId, ['fresh-a', 'fresh-b'], 902);
+
+  assert.deepEqual(
+    sqlite.prepare('SELECT model_catalog_complete, models_observed_at FROM provider_endpoints WHERE id = ?').get(defaultId),
+    { model_catalog_complete: 1, models_observed_at: 902 },
+  );
+  assert.deepEqual(
+    sqlite.prepare('SELECT model_id, source FROM provider_endpoint_models WHERE endpoint_id = ? ORDER BY model_id').all(defaultId),
+    [{ model_id: 'fresh-a', source: 'sync' }, { model_id: 'fresh-b', source: 'sync' }],
+  );
+  assert.deepEqual(
+    sqlite.prepare("SELECT model_id, source FROM provider_endpoint_models WHERE model_id = 'preset-claude'").all(),
+    [{ model_id: 'preset-claude', source: 'preset' }],
+  );
+  sqlite.close();
+});
+
+test('endpoint model observations use the selector field names', () => {
+  const sqlite = database();
+  replaceProviderEndpoints(sqlite, 'provider-1', [
+    { protocol: 'openai', base_url: 'https://chat.example/v1', enabled: true, is_default: true,
+      models: [{ model_id: 'known-model', source: 'preset' }] },
+  ], 950);
+
+  const endpointId = (sqlite.prepare('SELECT id FROM provider_endpoints WHERE provider_id = ?').get('provider-1') as { id: string }).id;
+  assert.deepEqual(listProviderEndpointModelObservations(sqlite, 'provider-1'), [{ endpointId, modelId: 'known-model' }]);
+  sqlite.close();
 });

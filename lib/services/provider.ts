@@ -2,7 +2,7 @@ import { asc, eq } from 'drizzle-orm';
 import { db, schema, sqlite } from '@/lib/db';
 import type { providers } from '@/lib/db/schema';
 import { getSetting } from '@/lib/settings';
-import { listProviderEndpoints } from './provider-endpoint';
+import { getEnabledDefaultEndpoint, listProviderEndpoints } from './provider-endpoint';
 import { serializeProviderRecord } from './provider-serialization';
 import { validateProviderBaseUrl } from './provider-url';
 
@@ -19,6 +19,16 @@ export function listProviders() {
 
 export function getProvider(id: string): ProviderRow | undefined {
   return db.select().from(schema.providers).where(eq(schema.providers.id, id)).get();
+}
+
+/**
+ * Returns the provider compatibility view projected from its enabled default
+ * endpoint. Existing single-endpoint rows safely fall back to their legacy
+ * protocol/base_url projection.
+ */
+export function withDefaultProviderEndpoint(provider: ProviderRow): ProviderRow {
+  const endpoint = getEnabledDefaultEndpoint(sqlite, provider.id);
+  return endpoint ? { ...provider, protocol: endpoint.protocol, baseUrl: endpoint.baseUrl } : provider;
 }
 
 /**

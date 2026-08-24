@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { db, schema } from '@/lib/db';
 import { getPreset } from '@/lib/presets';
 import { formatQuotaSummary, queryCodingPlan, type QuotaTier } from './coding-plan';
-import type { ProviderRow } from './provider';
+import { withDefaultProviderEndpoint, type ProviderRow } from './provider';
 import { detectCcSwitchBalanceProvider, type CcSwitchBalanceProvider } from './balance-provider';
 
 /** §8 余额查询统一抽象。 */
@@ -128,6 +128,7 @@ const BUILTIN_PARSERS: Record<CcSwitchBalanceProvider | 'kimi', BalanceParser> =
  * > Coding Plan 套餐（预设 codingPlan 标记或 base_url 模式检测）> 不支持。
  */
 export async function queryBalance(provider: ProviderRow, apiKey: string): Promise<BalanceResult> {
+  provider = withDefaultProviderEndpoint(provider);
   const base = provider.baseUrl.replace(/\/+$/, '');
   const preset = getPreset(provider.slug);
 

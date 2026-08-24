@@ -103,7 +103,9 @@ CREATE TABLE IF NOT EXISTS request_logs (
   error        TEXT,
   stream       INTEGER,
   client_key   TEXT,
-  client_name  TEXT
+  client_name  TEXT,
+  provider_endpoint_id TEXT,
+  upstream_protocol TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_logs_ts ON request_logs(ts);
 CREATE TABLE IF NOT EXISTS balance_snapshots (

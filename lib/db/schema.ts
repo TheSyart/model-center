@@ -129,6 +129,8 @@ export const requestLogs = sqliteTable(
     cacheMetricsObserved: integer('cache_metrics_observed'),
     firstTokenMs: integer('first_token_ms'),
     durationMs: integer('duration_ms'),
+    providerEndpointId: text('provider_endpoint_id'),
+    upstreamProtocol: text('upstream_protocol'),
   },
   (t) => [
     index('idx_logs_ts').on(t.ts),
@@ -136,6 +138,7 @@ export const requestLogs = sqliteTable(
     index('idx_logs_provider_ts').on(t.providerId, t.ts),
     index('idx_logs_model_ts').on(t.modelId, t.ts),
     index('idx_logs_entry_ts').on(t.entryProtocol, t.ts),
+    index('idx_logs_endpoint_ts').on(t.providerEndpointId, t.ts),
   ],
 );
 

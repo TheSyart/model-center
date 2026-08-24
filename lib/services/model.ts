@@ -1,8 +1,9 @@
 import crypto from 'node:crypto';
 import { asc, eq } from 'drizzle-orm';
-import { db, schema } from '@/lib/db';
+import { db, schema, sqlite } from '@/lib/db';
 import type { models } from '@/lib/db/schema';
-import type { ProviderRow } from './provider';
+import { withDefaultProviderEndpoint, type ProviderRow } from './provider';
+import { getEnabledDefaultEndpoint, replaceEndpointModelCatalogInTransaction } from './provider-endpoint';
 import { CC_SWITCH_PRICING_SOURCE_REF, lookupBundledPricing } from './model-pricing';
 
 export type ModelRow = typeof models.$inferSelect;
@@ -70,8 +71,9 @@ export function createModel(input: ModelInput): ModelRow | 'conflict' | 'alias_c
     input.output_price !== undefined ||
     input.cache_read_price !== undefined ||
     input.cache_write_price !== undefined;
-  const bundled = !hasManualPricing && provider
-    ? lookupBundledPricing(provider.baseUrl, provider.protocol, input.model_id)
+  const pricedProvider = provider ? withDefaultProviderEndpoint(provider) : undefined;
+  const bundled = !hasManualPricing && pricedProvider
+    ? lookupBundledPricing(pricedProvider.baseUrl, pricedProvider.protocol, input.model_id)
     : null;
   const row: ModelRow = {
     id: crypto.randomUUID(),
@@ -135,7 +137,8 @@ export function restoreModelPricing(id: string): ModelRow | null {
   if (!existing) return null;
   const provider = db.select().from(schema.providers).where(eq(schema.providers.id, existing.providerId)).get();
   if (!provider) return null;
-  const pricing = lookupBundledPricing(provider.baseUrl, provider.protocol, existing.modelId);
+  const defaultProvider = withDefaultProviderEndpoint(provider);
+  const pricing = lookupBundledPricing(defaultProvider.baseUrl, defaultProvider.protocol, existing.modelId);
   db.update(schema.models)
     .set({
       inputPrice: pricing?.input ?? null,
@@ -168,6 +171,7 @@ export interface TestResult {
 
 /** 连通性测速（F10）：向 provider 模型列表端点发一次轻量 GET，测延迟与可用性。 */
 export async function testProviderConnection(provider: ProviderRow, apiKey: string): Promise<TestResult> {
+  provider = withDefaultProviderEndpoint(provider);
   const base = provider.baseUrl.replace(/\/+$/, '');
   let url: string;
   let headers: Record<string, string>;
@@ -244,29 +248,36 @@ export interface SyncResult {
  * 手动添加的（synced=0）不动。
  */
 export async function syncModels(provider: ProviderRow, apiKey: string): Promise<SyncResult> {
+  provider = withDefaultProviderEndpoint(provider);
+  const defaultEndpoint = getEnabledDefaultEndpoint(sqlite, provider.id);
+  if (!defaultEndpoint) throw new Error('服务商没有启用的默认端点');
   const upstreamIds = await fetchUpstreamModels(provider, apiKey);
   const upstreamSet = new Set(upstreamIds);
   const existingRows = listModels(provider.id);
   const existingIds = new Set(existingRows.map((m) => m.modelId));
 
   let added = 0;
-  for (const modelId of upstreamIds) {
-    if (existingIds.has(modelId)) continue;
-    const pricing = lookupBundledPricing(provider.baseUrl, provider.protocol, modelId);
-    db.insert(schema.models)
-      .values({
-        id: crypto.randomUUID(), providerId: provider.id, modelId, enabled: 1, synced: 1,
-        inputPrice: pricing?.input ?? null,
-        outputPrice: pricing?.output ?? null,
-        cacheReadPrice: pricing?.cacheRead ?? null,
-        cacheWritePrice: pricing?.cacheWrite ?? null,
-        pricingSource: pricing?.source ?? null,
-        pricingSourceRef: pricing ? CC_SWITCH_PRICING_SOURCE_REF : null,
-        pricingSyncedAt: pricing ? Date.now() : null,
-      })
-      .run();
-    added++;
-  }
+  const observedAt = Date.now();
+  sqlite.transaction(() => {
+    for (const modelId of upstreamIds) {
+      if (existingIds.has(modelId)) continue;
+      const pricing = lookupBundledPricing(provider.baseUrl, provider.protocol, modelId);
+      db.insert(schema.models)
+        .values({
+          id: crypto.randomUUID(), providerId: provider.id, modelId, enabled: 1, synced: 1,
+          inputPrice: pricing?.input ?? null,
+          outputPrice: pricing?.output ?? null,
+          cacheReadPrice: pricing?.cacheRead ?? null,
+          cacheWritePrice: pricing?.cacheWrite ?? null,
+          pricingSource: pricing?.source ?? null,
+          pricingSourceRef: pricing ? CC_SWITCH_PRICING_SOURCE_REF : null,
+          pricingSyncedAt: pricing ? observedAt : null,
+        })
+        .run();
+      added++;
+    }
+    replaceEndpointModelCatalogInTransaction(sqlite, defaultEndpoint.id, upstreamIds, observedAt);
+  })();
   const removedNotInUpstream = existingRows.filter((m) => m.synced === 1 && !upstreamSet.has(m.modelId)).length;
   return {
     added,

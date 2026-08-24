@@ -13,6 +13,8 @@ const REQUEST_LOG_COLUMNS: Array<[string, string]> = [
   ['duration_ms', 'INTEGER'],
   ['client_key', 'TEXT'],
   ['client_name', 'TEXT'],
+  ['provider_endpoint_id', 'TEXT'],
+  ['upstream_protocol', 'TEXT'],
 ];
 
 /**
@@ -33,6 +35,7 @@ export function migrateUsageSchema(sqlite: Database.Database): void {
       CREATE INDEX IF NOT EXISTS idx_logs_model_ts ON request_logs(model_id, ts);
       CREATE INDEX IF NOT EXISTS idx_logs_entry_ts ON request_logs(entry_protocol, ts);
       CREATE INDEX IF NOT EXISTS idx_logs_client_ts ON request_logs(client_key, ts);
+      CREATE INDEX IF NOT EXISTS idx_logs_endpoint_ts ON request_logs(provider_endpoint_id, ts);
 
       CREATE TABLE IF NOT EXISTS usage_daily (
         id TEXT PRIMARY KEY,

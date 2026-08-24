@@ -117,6 +117,51 @@ export function getEnabledDefaultEndpoint(sqlite: Database.Database, providerId:
   return row ? endpointFromRow(row) : undefined;
 }
 
+export function listProviderEndpointModelObservations(
+  sqlite: Database.Database,
+  providerId: string,
+): Array<{ endpointId: string; modelId: string }> {
+  return sqlite.prepare(`
+    SELECT m.endpoint_id AS endpointId, m.model_id AS modelId
+    FROM provider_endpoint_models m
+    INNER JOIN provider_endpoints e ON e.id = m.endpoint_id
+    WHERE e.provider_id = ?
+  `).all(providerId) as Array<{ endpointId: string; modelId: string }>;
+}
+
+/** Replace a successful default endpoint's synchronized model catalog atomically. */
+export function replaceEndpointModelCatalog(
+  sqlite: Database.Database,
+  endpointId: string,
+  modelIds: readonly string[],
+  observedAt = Date.now(),
+): void {
+  sqlite.transaction(() => replaceEndpointModelCatalogInTransaction(sqlite, endpointId, modelIds, observedAt))();
+}
+
+/** Caller owns the SQLite transaction, allowing model rows and catalog state to commit together. */
+export function replaceEndpointModelCatalogInTransaction(
+  sqlite: Database.Database,
+  endpointId: string,
+  modelIds: readonly string[],
+  observedAt = Date.now(),
+): void {
+  const ids = [...new Set(modelIds.map((modelId) => modelId.trim()).filter(Boolean))];
+  const endpoint = sqlite.prepare('SELECT id FROM provider_endpoints WHERE id = ?').get(endpointId) as { id: string } | undefined;
+  if (!endpoint) throw new Error('端点不存在');
+  sqlite.prepare('DELETE FROM provider_endpoint_models WHERE endpoint_id = ?').run(endpointId);
+  const insert = sqlite.prepare(`
+    INSERT INTO provider_endpoint_models (endpoint_id, model_id, source, observed_at)
+    VALUES (?, ?, 'sync', ?)
+  `);
+  for (const modelId of ids) insert.run(endpointId, modelId, observedAt);
+  sqlite.prepare(`
+    UPDATE provider_endpoints
+    SET model_catalog_complete = 1, models_observed_at = ?, updated_at = ?
+    WHERE id = ?
+  `).run(observedAt, observedAt, endpointId);
+}
+
 export function serializeEndpoint(endpoint: ProviderEndpoint) {
   return {
     id: endpoint.id,

@@ -56,6 +56,8 @@ test('usage migration clears historical logs once and keeps later logs on repeat
     'duration_ms',
     'client_key',
     'client_name',
+    'provider_endpoint_id',
+    'upstream_protocol',
   ]) {
     assert.equal(columns.some((column) => column.name === name), true, `missing ${name}`);
   }

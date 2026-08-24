@@ -49,6 +49,8 @@ export interface LogRow {
   cache_metrics_observed: number | null;
   first_token_ms: number | null;
   duration_ms: number | null;
+  provider_endpoint_id: string | null;
+  upstream_protocol: string | null;
 }
 
 function buildWhere(f: LogFilters) {
@@ -77,7 +79,8 @@ export function queryLogs(f: LogFilters): { logs: LogRow[]; total: number } {
       COALESCE(l.token_prefix, t.prefix) AS token_prefix,
       l.client_key, l.client_name, l.entry_protocol, l.source,
       l.uncached_input_tokens, l.cache_read_tokens,
-      l.cache_write_tokens, l.cache_metrics_observed, l.first_token_ms, l.duration_ms
+      l.cache_write_tokens, l.cache_metrics_observed, l.first_token_ms, l.duration_ms,
+      l.provider_endpoint_id, l.upstream_protocol
     FROM request_logs l
     LEFT JOIN providers p ON p.id = l.provider_id
     LEFT JOIN gateway_tokens t ON t.id = l.token_id

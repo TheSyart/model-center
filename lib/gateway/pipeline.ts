@@ -1,14 +1,12 @@
 import { after } from 'next/server';
-import { getAdapter } from '@/lib/adapters';
-import type { AdapterContext, ProtocolAdapter } from '@/lib/adapters/types';
-import { decrypt } from '@/lib/crypto';
-import { GatewayError, protocolNotImplemented } from './errors';
+import { GatewayError } from './errors';
 import { fetchUpstream } from './forward';
 import { writeRequestLog } from './logger';
 import type { UsageInfo } from './logger';
 import { observeReadableStream } from './stream-observer';
 import { resolveModel } from './router';
-import type { RouteTarget } from './router';
+import { buildAttemptForEndpoint, shouldFailoverStatus } from './attempt-builder';
+import { selectProviderEndpoint } from './provider-endpoint-selector';
 import { getPromptById, getPromptByName, renderPrompt } from '@/lib/services/prompt';
 import { checkSpendLimit, SPEND_WINDOW_LABELS } from '@/lib/services/token';
 import type { TokenRow } from '@/lib/services/token';
@@ -26,6 +24,8 @@ import {
   responsesUsageFromJson,
 } from '@/lib/protocols/responses';
 import { normalizeOpenAIUsage } from '@/lib/services/usage-metrics';
+import { sqlite } from '@/lib/db';
+import { listProviderEndpointModelObservations, listProviderEndpoints } from '@/lib/services/provider-endpoint';
 
 type Json = Record<string, any>;
 
@@ -58,46 +58,6 @@ const SSE_HEADERS = {
   'Content-Type': 'text/event-stream; charset=utf-8',
   'Cache-Control': 'no-cache',
 } as const;
-
-/** 入口协议对应的服务商原生协议（一致则原生透传，§3.2）。 */
-const ENTRY_NATIVE_PROTOCOL: Record<EntryProtocol, string> = {
-  openai: 'openai',
-  anthropic: 'anthropic',
-  responses: 'openai-responses',
-};
-
-/** 是否可 failover 的上游失败：网络错误（本网关记 502）/ 5xx / 429；其它 4xx 属客户端错误不降级。 */
-function isFailoverable(status: number): boolean {
-  return status === 429 || status >= 500;
-}
-
-/** 原生透传时的上游请求（仅改写 model + 鉴权头）。 */
-function passthroughRequest(
-  entry: EntryProtocol,
-  base: string,
-  apiKey: string,
-  rawBody: Json,
-  modelId: string,
-  anthropicVersion: string | null | undefined,
-): { url: string; headers: Record<string, string>; body: Json } {
-  if (entry === 'anthropic') {
-    return {
-      url: `${base}/v1/messages`,
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': anthropicVersion ?? '2023-06-01',
-      },
-      body: { ...rawBody, model: modelId },
-    };
-  }
-  // openai → /chat/completions；responses → /responses，均为 Bearer
-  return {
-    url: entry === 'responses' ? `${base}/responses` : `${base}/chat/completions`,
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-    body: { ...rawBody, model: modelId },
-  };
-}
 
 /** 原生透传非流式响应的 usage 提取（按入口协议解析）。 */
 function passthroughUsageFromJson(entry: EntryProtocol, json: Json): UsageInfo | null {
@@ -171,38 +131,6 @@ function injectPrompt(entry: EntryProtocol, rawBody: Json, ir: Json, text: strin
     // responses
     rawBody.instructions = rawBody.instructions ? text + '\n\n' + String(rawBody.instructions) : text;
   }
-}
-
-interface AttemptContext {
-  url: string;
-  headers: Record<string, string>;
-  body: unknown;
-  adapter: ProtocolAdapter | undefined;
-  ctx: AdapterContext;
-  passthrough: boolean;
-}
-
-/** 为某个路由目标构造上游请求（原生透传或适配器转换）。 */
-function buildAttempt(entry: EntryProtocol, input: PipelineInput, target: RouteTarget): AttemptContext {
-  const provider = target.provider;
-  const apiKey = decrypt(provider.apiKeyEnc);
-  const base = provider.baseUrl.replace(/\/+$/, '');
-  const ctx: AdapterContext = {
-    provider,
-    apiKey,
-    modelId: target.modelId,
-    stream: input.stream,
-    includeUsage: input.includeUsage,
-  };
-  const passthrough = provider.protocol === ENTRY_NATIVE_PROTOCOL[entry];
-  if (passthrough) {
-    const built = passthroughRequest(entry, base, apiKey, input.rawBody, target.modelId, input.anthropicVersion);
-    return { ...built, adapter: undefined, ctx, passthrough: true };
-  }
-  const adapter = getAdapter(provider.protocol);
-  if (!adapter) throw protocolNotImplemented(provider.protocol);
-  const built = adapter.buildRequest(input.ir, ctx);
-  return { url: built.url, headers: built.headers, body: built.body, adapter, ctx, passthrough: false };
 }
 
 /**
@@ -280,8 +208,23 @@ export async function runGatewayPipeline(input: PipelineInput): Promise<Response
     for (let i = 0; i < route.targets.length; i++) {
       const target = route.targets[i];
       const isLast = i === route.targets.length - 1;
-      const attemptBase = { ...logBase, providerId: target.provider.id, modelId: target.modelId };
-      const attempt = buildAttempt(entry, input, target);
+      const endpoint = selectProviderEndpoint(
+        listProviderEndpoints(sqlite, target.provider.id),
+        entry,
+        target.modelId,
+        listProviderEndpointModelObservations(sqlite, target.provider.id),
+      );
+      if (!endpoint) {
+        throw new GatewayError(503, `服务商 "${target.provider.slug}" 没有可用的协议端点`, 'provider_endpoint_unavailable', 'server_error');
+      }
+      const attemptBase = {
+        ...logBase,
+        providerId: target.provider.id,
+        modelId: target.modelId,
+        providerEndpointId: endpoint.id,
+        upstreamProtocol: endpoint.protocol,
+      };
+      const attempt = buildAttemptForEndpoint(input, target, endpoint);
 
       const fetched = await fetchUpstream({
         url: attempt.url,
@@ -292,7 +235,7 @@ export async function runGatewayPipeline(input: PipelineInput): Promise<Response
 
       if (!fetched.ok) {
         const failNote = `目标 ${target.provider.slug}/${target.modelId} 失败`;
-        if (isFailoverable(fetched.status) && !isLast) {
+        if (shouldFailoverStatus(fetched.status) && !isLast) {
           // 降级到下一目标
           const durationMs = Date.now() - startedAt;
           after(() => log(attemptBase, { status: fetched.status, latencyMs: fetched.latencyMs, durationMs, usage: null, error: `${failNote}（failover 到下一目标）: ${fetched.error}` }));
