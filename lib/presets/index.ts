@@ -40,14 +40,22 @@ function applyLocalOverrides(preset: ProviderPreset): ProviderPreset {
 export const PROVIDER_PRESETS: ProviderPreset[] = CC_SWITCH_PRESETS.map(applyLocalOverrides);
 
 export function getPreset(slug: string): ProviderPreset | undefined {
-  const generated = PROVIDER_PRESETS.find((p) => p.slug === slug);
+  const generated = PROVIDER_PRESETS.find((p) => p.slug === slug || p.presetKey === slug || p.legacySlugs.includes(slug));
   if (generated) return generated;
   const legacy = LEGACY_PRESETS.find((p) => p.slug === slug);
   if (!legacy) return undefined;
   const replacement = PROVIDER_PRESETS.find(
     (candidate) => candidate.protocol === legacy.protocol && canonicalUrl(candidate.baseUrl) === canonicalUrl(legacy.baseUrl),
   );
-  return replacement ? { ...replacement, ...legacy, recommended: true } : { ...legacy, recommended: true };
+  return replacement
+    ? {
+        ...replacement,
+        recommended: true,
+        balance: legacy.balance ?? replacement.balance,
+        codingPlan: legacy.codingPlan ?? replacement.codingPlan,
+        consoleUrl: legacy.consoleUrl ?? replacement.consoleUrl,
+      }
+    : { ...legacy, recommended: true };
 }
 
 /** 协议后缀标签（同名多端点消歧用） */

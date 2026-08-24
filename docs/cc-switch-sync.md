@@ -10,7 +10,7 @@
 - 清单：`lib/presets/cc-switch-manifest.json`
 - 完整规范化目录及排除账本：`lib/presets/cc-switch-catalog.json`
 
-当前提交有 539 条数组预设，另有 `grokBuildOfficialPreset` 这一条独立导出，因此完整原始记录数是 **540**，不是 539。规范化结果为 255 个协议/Base URL 变体、4 个明确排除项、192 条最终模型定价和 99 个图标。
+当前提交有 539 条数组预设，另有 `grokBuildOfficialPreset` 这一条独立导出，因此完整原始记录数是 **540**，不是 539。规范化结果为 255 个协议/Base URL 变体、4 个明确排除项、192 条最终模型定价和 99 个图标。基于这 255 个变体，当前运行时目录再生成 **82** 个逻辑服务商（218 个协议端点，9 次显式语义合并）。
 
 ## 源码位置与映射
 
@@ -31,7 +31,12 @@
 | 余额 | `src-tauri/src/services/balance.rs` | manifest 能力清单及 `lib/services/balance-provider.ts`/`balance.ts` |
 | Coding Plan | `src/config/codingPlanProviders.ts`、后端 `coding_plan.rs` | manifest 能力清单及本项目套餐适配器 |
 
-生成的 `lib/presets/cc-switch.ts` 只保留选择器需要的轻量字段；模型上下文窗口、最大输出、模态、推理等级、能力/兼容配置、端点候选和原始来源等完整信息在 catalog 中。图标逻辑键先按 `iconUrls` 映射到真实 PNG/JPG/WebP/SVG 文件，再匹配同名 SVG；找不到物理资源时使用前端文字占位，禁止生成不存在的路径。所有源文件的 Git blob SHA 都写入 manifest，方便确认上游是否只改了无关文件。
+生成目录有两层，二者都必须保留：
+
+- `cc-switch-catalog.json.providers` 是完整的 255 条低层协议/Base URL 变体，供审计、模型信息和来源追溯使用，禁止删除或以逻辑组替换。
+- `cc-switch-catalog.json.logicalProviders` 与 `cc-switch.ts` 是运行时的 82 个逻辑服务商。每项包含稳定的 `presetKey`/`slug`、默认端点兼容字段 `protocol`/`baseUrl`、`defaultProtocol`、每协议一个 `endpoints` 条目及所有 `legacySlugs`。端点的 `alternateCandidates` 必须逐一列出其低层变体；`knownModels` 是预设知识，`modelCatalogComplete` 固定为 `false`，不可宣称完整模型目录。
+
+生成的 `lib/presets/cc-switch.ts` 只保留选择器需要的逻辑组和端点字段；模型上下文窗口、最大输出、模态、推理等级、能力/兼容配置、端点候选和原始来源等完整信息仍在 catalog 的低层 `providers` 中。图标逻辑键先按 `iconUrls` 映射到真实 PNG/JPG/WebP/SVG 文件，再匹配同名 SVG；找不到物理资源时使用前端文字占位，禁止生成不存在的路径。所有源文件的 Git blob SHA 都写入 manifest，方便确认上游是否只改了无关文件。
 
 ## 获取不可变源码
 
@@ -62,6 +67,14 @@ npm run sync:cc-switch -- --ref <SHA>
 5. OAuth-only、Bedrock 或其他当前网关无法鉴权的预设保留在 catalog，选择器中禁用并给出 `disabledReason`。
 6. 无 Base URL 的自定义模板进入 `exclusions`。每条原始记录必须记为 included、merged 或 excluded，三类数量之和必须等于 rawProviderCount，禁止静默丢弃。
 
+## 逻辑服务商分组与别名审查
+
+低层变体先按原有“身份 + 协议 + Base URL”规则规范化，再按显示名称形成逻辑服务商；跨名称合并只能使用 `scripts/cc-switch-sync-lib.ts` 中的显式语义别名表。当前批准的别名是：Claude Official/Claude Desktop Official、Gemini Native/Google Official、xAI (Grok)/xAI (Grok) OAuth/Grok Official、Codex/OpenAI Official、火山 Coding Plan/火山Agentplan、StepFun/StepFun Step Plan、Bailian/Qwen Coder，以及 AWS Bedrock/AWS Bedrock (AKSK)。AWS Bedrock (API Key) 必须保持独立。
+
+新增或变更别名时，先人工确认认证方式、地区、套餐与产品身份一致，再添加纯函数测试和固定快照断言；不得凭相似 URL、图标、模型名或厂商名自动合并。Kimi 与 Kimi For Coding、任何 `en` 区域变体、其他 Coding Plan 产品及不同认证模式均默认禁止合并，除非另有明确审查结论。每次同步必须检查 `logicalProviderCount`、`logicalEndpointCount`、`semanticMergeCount`，并确认候选 `variantSlug` 与 `legacySlugs` 各自都对 255 个低层变体形成一次且仅一次的完整覆盖。
+
+端点候选选择规则固定为：同协议内先选择受支持变体，再按协议来源优先级（OpenAI：opencode、openclaw、pi、hermes、codex；Responses：codex、grok-build；Anthropic：claude、claude-desktop；Gemini：gemini），之后按源序号和 variant slug 稳定回退。默认端点在受支持端点中按 openai、openai-responses、anthropic、gemini 的协议优先级选择。未选中的同协议 URL 仍必须留在 `alternateCandidates`。
+
 ## 四档定价规则
 
 CC Switch 在 SQLite 初始化时先执行 `pricing_data` seed，再按源码顺序执行 `pricing_fixes`。repair 只有在当前四档价格同时匹配它携带的旧值守卫时才生效。本项目的解析器严格复现这个顺序：
@@ -90,7 +103,7 @@ npm run build
 git diff -- lib/presets/cc-switch.ts lib/presets/cc-switch-catalog.json lib/presets/cc-switch-manifest.json lib/pricing/cc-switch.ts public/logos
 ```
 
-审查至少确认：SHA 和 blob SHA 正确；10 类来源都存在；数量变化有上游证据；覆盖账本闭合；slug 无重复；OAuth/不支持项仍被禁用；定价 repair 后数量和关键价格正确；图标数量及 checksum 正确；重复运行 `--check` 无差异。
+审查至少确认：SHA 和 blob SHA 正确；10 类来源都存在；255 个低层变体、82 个逻辑服务商、9 次语义合并和逻辑候选/旧 slug 覆盖均符合基线；数量变化有上游证据；覆盖账本闭合；canonical slug 无重复；OAuth/不支持项仍被禁用；定价 repair 后数量和关键价格正确；图标数量及 checksum 正确；重复运行 `--check` 无差异。
 
 当前基线数量：Claude 77、Claude Desktop 74、Codex 72、Gemini 23、Grok Build 38（含独立 Official）、OpenCode 65、OpenClaw 65、Hermes 66、Pi 58、Universal 2。上游数量变化不是自动错误，但必须先审查结构与语义，再更新脚本断言和本文基线。
 

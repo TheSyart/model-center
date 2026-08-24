@@ -63,6 +63,45 @@ export interface NormalizedProvider {
   extra?: Record<string, unknown>;
 }
 
+export interface LogicalProviderCandidate {
+  variantSlug: string;
+  baseUrl: string;
+  sourceApps: string[];
+  supported: boolean;
+  authMode: 'api-key' | 'oauth';
+}
+
+export interface LogicalProviderEndpoint {
+  protocol: NormalizedProtocol;
+  baseUrl: string;
+  selectedVariantSlug: string;
+  sourceApps: string[];
+  knownModels: NormalizedModel[];
+  modelCatalogComplete: false;
+  alternateCandidates: LogicalProviderCandidate[];
+}
+
+export interface LogicalProviderPreset {
+  presetKey: string;
+  slug: string;
+  name: string;
+  category: string;
+  logo?: string;
+  websiteUrl?: string;
+  consoleUrl?: string;
+  supported: boolean;
+  disabledReason?: string;
+  authMode: 'api-key' | 'oauth';
+  sourceApps: string[];
+  extra?: Record<string, unknown>;
+  defaultProtocol: NormalizedProtocol;
+  endpoints: LogicalProviderEndpoint[];
+  legacySlugs: string[];
+  /** Default-endpoint compatibility fields consumed by existing callers. */
+  protocol: NormalizedProtocol;
+  baseUrl: string;
+}
+
 export type NormalizedRecordResult =
   | { status: 'included'; provider: NormalizedProvider }
   | { status: 'excluded'; sourceApp: string; sourceIndex: number; reason: string; name?: string };
@@ -484,4 +523,130 @@ export function mergeProviderRecords(records: NormalizedRecordResult[]): {
     exclusions,
     coverage: { included, merged: mergedCount, excluded: exclusions.length },
   };
+}
+
+const SEMANTIC_PROVIDER_ALIASES: Record<string, string> = {
+  'Claude Desktop Official': 'Claude Official',
+  'Google Official': 'Gemini Native',
+  'xAI (Grok) OAuth': 'xAI (Grok)',
+  'Grok Official': 'xAI (Grok)',
+  'OpenAI Official': 'Codex',
+  '火山Agentplan': '火山 Coding Plan',
+  'StepFun Step Plan': 'StepFun',
+  'Qwen Coder': 'Bailian',
+  'AWS Bedrock': 'AWS Bedrock (AKSK)',
+};
+
+const DEFAULT_PROTOCOL_PRIORITY: NormalizedProtocol[] = ['openai', 'openai-responses', 'anthropic', 'gemini'];
+
+const SOURCE_PRIORITY: Record<NormalizedProtocol, string[]> = {
+  openai: ['opencode', 'openclaw', 'pi', 'hermes', 'codex'],
+  'openai-responses': ['codex', 'grok-build'],
+  anthropic: ['claude', 'claude-desktop'],
+  gemini: ['gemini'],
+};
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+function sourceRank(provider: NormalizedProvider, protocol: NormalizedProtocol): [number, number] {
+  const priorities = SOURCE_PRIORITY[protocol];
+  const records = provider.sourceRecords.length
+    ? provider.sourceRecords
+    : provider.sourceApps.map((app, index) => ({ app, index }));
+  return records.reduce<[number, number]>((best, record) => {
+    const priority = priorities.indexOf(record.app);
+    const candidate: [number, number] = [priority === -1 ? priorities.length : priority, record.index];
+    return candidate[0] < best[0] || (candidate[0] === best[0] && candidate[1] < best[1]) ? candidate : best;
+  }, [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]);
+}
+
+function compareCandidates(left: NormalizedProvider, right: NormalizedProvider, protocol: NormalizedProtocol): number {
+  if (left.supported !== right.supported) return left.supported ? -1 : 1;
+  const leftRank = sourceRank(left, protocol);
+  const rightRank = sourceRank(right, protocol);
+  if (leftRank[0] !== rightRank[0]) return leftRank[0] - rightRank[0];
+  if (leftRank[1] !== rightRank[1]) return leftRank[1] - rightRank[1];
+  return left.slug.localeCompare(right.slug);
+}
+
+/**
+ * Creates stable logical provider cards from CC Switch's protocol/Base URL
+ * variants. The input is never modified so the low-level catalog remains a
+ * complete auditable source of candidates and legacy aliases.
+ */
+export function groupLogicalProviderPresets(providers: NormalizedProvider[]): {
+  logicalProviders: LogicalProviderPreset[];
+  semanticMergeCount: number;
+} {
+  const groups = new Map<string, { name: string; providers: NormalizedProvider[] }>();
+  for (const provider of providers) {
+    const name = SEMANTIC_PROVIDER_ALIASES[provider.name] ?? provider.name;
+    const group = groups.get(name);
+    if (group) group.providers.push(provider);
+    else groups.set(name, { name, providers: [provider] });
+  }
+
+  const semanticMergeCount = new Set(providers.map((provider) => provider.name).filter((name) => SEMANTIC_PROVIDER_ALIASES[name])).size;
+  const presetKeys = new Set<string>();
+  const logicalProviders = [...groups.values()].map(({ name, providers: variants }) => {
+    const presetKey = slugify(name);
+    if (presetKeys.has(presetKey)) throw new Error(`逻辑服务商 slug 重复：${presetKey}`);
+    presetKeys.add(presetKey);
+
+    const endpoints = [...new Set(variants.map((provider) => provider.protocol))]
+      .map((protocol) => {
+        const candidates = variants.filter((provider) => provider.protocol === protocol).sort((left, right) => compareCandidates(left, right, protocol));
+        const selected = candidates[0];
+        if (!selected) throw new Error(`逻辑服务商 ${name} 缺少 ${protocol} 端点候选`);
+        return {
+          protocol,
+          baseUrl: selected.baseUrl,
+          selectedVariantSlug: selected.slug,
+          sourceApps: uniqueStrings(candidates.flatMap((candidate) => candidate.sourceApps)),
+          knownModels: [...selected.models],
+          modelCatalogComplete: false as const,
+          alternateCandidates: candidates.map((candidate) => ({
+            variantSlug: candidate.slug,
+            baseUrl: candidate.baseUrl,
+            sourceApps: [...candidate.sourceApps],
+            supported: candidate.supported,
+            authMode: candidate.authMode,
+          })),
+        } satisfies LogicalProviderEndpoint;
+      })
+      .sort((left, right) => DEFAULT_PROTOCOL_PRIORITY.indexOf(left.protocol) - DEFAULT_PROTOCOL_PRIORITY.indexOf(right.protocol));
+    const defaultEndpoint = [...endpoints].sort((left, right) => {
+      const leftSupported = variants.find((provider) => provider.slug === left.selectedVariantSlug)?.supported ?? false;
+      const rightSupported = variants.find((provider) => provider.slug === right.selectedVariantSlug)?.supported ?? false;
+      if (leftSupported !== rightSupported) return leftSupported ? -1 : 1;
+      return DEFAULT_PROTOCOL_PRIORITY.indexOf(left.protocol) - DEFAULT_PROTOCOL_PRIORITY.indexOf(right.protocol);
+    })[0];
+    if (!defaultEndpoint) throw new Error(`逻辑服务商 ${name} 缺少默认端点`);
+    const selected = variants.find((provider) => provider.slug === defaultEndpoint.selectedVariantSlug);
+    if (!selected) throw new Error(`逻辑服务商 ${name} 缺少默认变体`);
+
+    return {
+      presetKey,
+      slug: presetKey,
+      name,
+      category: selected.category,
+      logo: selected.logo,
+      websiteUrl: selected.websiteUrl,
+      consoleUrl: selected.consoleUrl,
+      supported: selected.supported,
+      disabledReason: selected.disabledReason,
+      authMode: selected.authMode,
+      sourceApps: uniqueStrings(variants.flatMap((provider) => provider.sourceApps)),
+      extra: selected.extra,
+      defaultProtocol: defaultEndpoint.protocol,
+      endpoints,
+      legacySlugs: endpoints.flatMap((endpoint) => endpoint.alternateCandidates.map((candidate) => candidate.variantSlug)),
+      protocol: defaultEndpoint.protocol,
+      baseUrl: defaultEndpoint.baseUrl,
+    } satisfies LogicalProviderPreset;
+  });
+
+  return { logicalProviders, semanticMergeCount };
 }

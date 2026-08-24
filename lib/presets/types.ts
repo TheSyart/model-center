@@ -11,11 +11,50 @@ export const CATEGORY_LABELS: Record<PresetCategory, string> = {
   other: '其他',
 };
 
+export type ProviderProtocol = 'openai' | 'openai-responses' | 'anthropic' | 'gemini';
+
+export interface ProviderPresetKnownModel {
+  id: string;
+  displayName?: string;
+  contextWindow?: number;
+  maxOutputTokens?: number;
+  modalities?: unknown;
+  reasoningLevels?: string[];
+  defaultReasoningLevel?: string;
+  capabilities?: Record<string, unknown>;
+  pricing?: { input: number | null; output: number | null; cacheRead: number | null; cacheWrite: number | null };
+}
+
+export interface ProviderPresetEndpointCandidate {
+  variantSlug: string;
+  baseUrl: string;
+  sourceApps: string[];
+  supported: boolean;
+  authMode: 'api-key' | 'oauth';
+}
+
+export interface ProviderPresetEndpoint {
+  protocol: ProviderProtocol;
+  baseUrl: string;
+  selectedVariantSlug: string;
+  sourceApps: string[];
+  knownModels: ProviderPresetKnownModel[];
+  modelCatalogComplete: false;
+  alternateCandidates: ProviderPresetEndpointCandidate[];
+}
+
 export interface ProviderPreset {
+  /** Stable logical-provider key; `slug` remains the canonical lookup alias. */
+  presetKey: string;
   slug: string;
   name: string;
-  protocol: 'openai' | 'openai-responses' | 'anthropic' | 'gemini';
+  /** Default-endpoint compatibility fields for existing consumers. */
+  protocol: ProviderProtocol;
   baseUrl: string;
+  defaultProtocol: ProviderProtocol;
+  endpoints: ProviderPresetEndpoint[];
+  /** Every historic CC Switch protocol/Base URL variant key for this provider. */
+  legacySlugs: string[];
   category: PresetCategory;
   /** 厂商 logo 路径（public/logos/ 下），无则前端用首字母占位 */
   logo?: string;

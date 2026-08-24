@@ -105,11 +105,20 @@
   "exclusionCount": 4,
   "iconChecksum": "72fbb4997719b4e19541b871f1687f9f236cc98c49acb3c68f39841c430f5e78",
   "iconCount": 99,
+  "logicalCoverage": {
+    "candidateVariantCount": 255,
+    "legacySlugCount": 255,
+    "uniqueCandidateVariantCount": 255,
+    "uniqueLegacySlugCount": 255
+  },
+  "logicalEndpointCount": 218,
+  "logicalProviderCount": 82,
   "pricingCount": 192,
   "providerCount": 255,
   "rawProviderCount": 540,
   "repository": "https://github.com/farion1231/cc-switch.git",
-  "schemaVersion": 2,
+  "schemaVersion": 3,
+  "semanticMergeCount": 9,
   "sourceCounts": {
     "claude": 77,
     "claude-desktop": 74,

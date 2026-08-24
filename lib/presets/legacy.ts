@@ -4,7 +4,9 @@
  */
 import type { ProviderPreset } from './types';
 
-export const LEGACY_PRESETS: ProviderPreset[] = [
+type LegacyPreset = Omit<ProviderPreset, 'presetKey' | 'defaultProtocol' | 'endpoints' | 'legacySlugs'>;
+
+const legacyProviders: LegacyPreset[] = [
   {
     slug: 'openai',
     name: 'OpenAI',
@@ -162,3 +164,29 @@ export const LEGACY_PRESETS: ProviderPreset[] = [
     consoleUrl: 'https://ppinfra.com/user/key',
   },
 ];
+
+export const LEGACY_PRESETS: ProviderPreset[] = legacyProviders.map((preset) => ({
+  ...preset,
+  presetKey: preset.slug,
+  defaultProtocol: preset.protocol,
+  endpoints: [
+    {
+      protocol: preset.protocol,
+      baseUrl: preset.baseUrl,
+      selectedVariantSlug: preset.slug,
+      sourceApps: [],
+      knownModels: [],
+      modelCatalogComplete: false,
+      alternateCandidates: [
+        {
+          variantSlug: preset.slug,
+          baseUrl: preset.baseUrl,
+          sourceApps: [],
+          supported: preset.supported ?? true,
+          authMode: preset.authMode ?? 'api-key',
+        },
+      ],
+    },
+  ],
+  legacySlugs: [preset.slug],
+}));

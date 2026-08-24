@@ -9,6 +9,7 @@ import ts from 'typescript';
 
 import {
   collectProviderExports,
+  groupLogicalProviderPresets,
   mergeProviderRecords,
   normalizeProviderRecord,
   parseModelPricingSource,
@@ -273,29 +274,21 @@ function main(): void {
     blobs[iconIndexFile] = command(source.root, 'git', ['rev-parse', `${source.sha}:${iconIndexFile}`]);
     const commitTime = command(source.root, 'git', ['show', '-s', '--format=%cI', source.sha]);
 
+    const logical = groupLogicalProviderPresets(catalog.providers);
+    const logicalCandidateSlugs = logical.logicalProviders.flatMap((provider) =>
+      provider.endpoints.flatMap((endpoint) => endpoint.alternateCandidates.map((candidate) => candidate.variantSlug)),
+    );
+    const logicalLegacySlugs = logical.logicalProviders.flatMap((provider) => provider.legacySlugs);
+    const variantSlugs = catalog.providers.map((provider) => provider.slug);
+    const hasExactLogicalCoverage = (slugs: string[]) =>
+      slugs.length === variantSlugs.length && new Set(slugs).size === variantSlugs.length && [...slugs].sort().every((slug, index) => slug === [...variantSlugs].sort()[index]);
+    if (!hasExactLogicalCoverage(logicalCandidateSlugs) || !hasExactLogicalCoverage(logicalLegacySlugs)) {
+      throw new Error('逻辑服务商候选或旧 slug 覆盖不完整');
+    }
+
     const header = `/** GENERATED FILE — DO NOT EDIT. Source: farion1231/cc-switch@${source.sha}; commit time: ${commitTime}. Run npm run sync:cc-switch. */`;
-    const summaries = catalog.providers.map((provider) => ({
-      slug: provider.slug,
-      name: provider.name,
-      protocol: provider.protocol,
-      baseUrl: provider.baseUrl,
-      category: provider.category,
-      logo: provider.logo,
-      websiteUrl: provider.websiteUrl,
-      consoleUrl: provider.consoleUrl,
-      supported: provider.supported,
-      disabledReason: provider.disabledReason,
-      authMode: provider.authMode,
-      sourceApps: provider.sourceApps,
-      extra: {
-        endpoint_candidates: provider.endpointCandidates,
-        api_key_field: provider.apiKeyField,
-        official: provider.official,
-        partner: provider.partner,
-      },
-    }));
     const manifest = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       repository: REPOSITORY,
       commit: source.sha,
       commitTime,
@@ -304,6 +297,15 @@ function main(): void {
       rawProviderCount: rawRecords.length,
       arrayProviderCount: rawRecords.length - 1,
       providerCount: catalog.providers.length,
+      logicalProviderCount: logical.logicalProviders.length,
+      logicalEndpointCount: logical.logicalProviders.reduce((count, provider) => count + provider.endpoints.length, 0),
+      semanticMergeCount: logical.semanticMergeCount,
+      logicalCoverage: {
+        candidateVariantCount: logicalCandidateSlugs.length,
+        uniqueCandidateVariantCount: new Set(logicalCandidateSlugs).size,
+        legacySlugCount: logicalLegacySlugs.length,
+        uniqueLegacySlugCount: new Set(logicalLegacySlugs).size,
+      },
       coverage: catalog.coverage,
       exclusionCount: catalog.exclusions.length,
       pricingCount: pricing.length,
@@ -317,7 +319,7 @@ function main(): void {
 
     writeOrCheck(
       path.join(PROJECT_ROOT, 'lib/presets/cc-switch.ts'),
-      generatedTs(header, 'CC_SWITCH_PRESETS', summaries, 'ProviderPreset', './types'),
+      `${generatedTs(header, 'CC_SWITCH_LOGICAL_PRESETS', logical.logicalProviders, 'ProviderPreset', './types')}\nexport const CC_SWITCH_PRESETS: ProviderPreset[] = CC_SWITCH_LOGICAL_PRESETS;\n`,
       args.check,
     );
     writeOrCheck(
@@ -325,9 +327,9 @@ function main(): void {
       generatedTs(header, 'CC_SWITCH_PRICING', pricing, 'ModelPricingRow', '../../scripts/cc-switch-sync-lib'),
       args.check,
     );
-    writeOrCheck(path.join(PROJECT_ROOT, 'lib/presets/cc-switch-catalog.json'), stableJson({ manifest, providers: catalog.providers, exclusions: catalog.exclusions }), args.check);
+    writeOrCheck(path.join(PROJECT_ROOT, 'lib/presets/cc-switch-catalog.json'), stableJson({ manifest, providers: catalog.providers, logicalProviders: logical.logicalProviders, exclusions: catalog.exclusions }), args.check);
     writeOrCheck(path.join(PROJECT_ROOT, 'lib/presets/cc-switch-manifest.json'), stableJson(manifest), args.check);
-    process.stdout.write(`${args.check ? 'checked' : 'generated'} ${rawRecords.length} raw providers -> ${catalog.providers.length} variants, ${catalog.exclusions.length} exclusions, ${pricing.length} prices, ${icons.count} icons @ ${source.sha}\n`);
+    process.stdout.write(`${args.check ? 'checked' : 'generated'} ${rawRecords.length} raw providers -> ${catalog.providers.length} variants -> ${logical.logicalProviders.length} logical providers, ${catalog.exclusions.length} exclusions, ${pricing.length} prices, ${icons.count} icons @ ${source.sha}\n`);
   } finally {
     source.cleanup?.();
   }

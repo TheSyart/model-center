@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import test from 'node:test';
 
+import * as syncLibrary from '../scripts/cc-switch-sync-lib.ts';
 import {
   applyPricingRepairs,
   collectProviderExports,
@@ -9,6 +12,38 @@ import {
   parseModelPricingSource,
   resolveIconAssetFiles,
 } from '../scripts/cc-switch-sync-lib.ts';
+
+const currentCatalog = JSON.parse(
+  fs.readFileSync(path.join(import.meta.dirname, '..', 'lib', 'presets', 'cc-switch-catalog.json'), 'utf8'),
+) as { providers: Array<ReturnType<typeof providerOf>> };
+
+type GroupingLibrary = typeof syncLibrary & {
+  groupLogicalProviderPresets(providers: typeof currentCatalog.providers): {
+    logicalProviders: Array<{
+      presetKey: string;
+      slug: string;
+      name: string;
+      defaultProtocol: string;
+      protocol: string;
+      baseUrl: string;
+      legacySlugs: string[];
+      endpoints: Array<{
+        protocol: string;
+        baseUrl: string;
+        selectedVariantSlug: string;
+        sourceApps: string[];
+        knownModels: unknown[];
+        modelCatalogComplete: boolean;
+        alternateCandidates: Array<{ variantSlug: string; baseUrl: string }>;
+      }>;
+    }>;
+    semanticMergeCount: number;
+  };
+};
+
+function logicalCatalog() {
+  return (syncLibrary as GroupingLibrary).groupLogicalProviderPresets(currentCatalog.providers);
+}
 
 function providerOf(result: ReturnType<typeof normalizeProviderRecord>) {
   if (result.status !== 'included') throw new Error('unexpected provider exclusion');
@@ -189,4 +224,65 @@ test('resolves CC Switch icon keys to real copied asset filenames', () => {
   assert.equal(icons.get('ccsub'), 'ccsub.svg');
   assert.equal(icons.get('amux'), 'amuxapi-icon.svg');
   assert.equal(icons.get('aigocode'), 'algocode.svg');
+});
+
+test('groups the pinned 255 variants into exactly 82 logical provider presets', () => {
+  const grouped = logicalCatalog();
+  assert.equal(grouped.logicalProviders.length, 82);
+  assert.equal(grouped.semanticMergeCount, 9);
+  assert.equal(new Set(grouped.logicalProviders.map((provider) => provider.presetKey)).size, 82);
+  assert.deepEqual(grouped.logicalProviders.map((provider) => provider.slug), grouped.logicalProviders.map((provider) => provider.presetKey));
+});
+
+test('applies only the reviewed semantic aliases and keeps disallowed names distinct', () => {
+  const grouped = logicalCatalog().logicalProviders;
+  const provider = (name: string) => {
+    const match = grouped.find((candidate) => candidate.name === name);
+    assert.ok(match, `missing logical provider ${name}`);
+    return match;
+  };
+
+  assert.deepEqual(provider('Claude Official').legacySlugs.sort(), ['claude-desktop-official-anthropic', 'claude-official-anthropic']);
+  assert.deepEqual(provider('Gemini Native').legacySlugs.sort(), ['gemini-native-gemini', 'google-official-gemini']);
+  assert.deepEqual(provider('xAI (Grok)').legacySlugs.sort(), ['grok-official-responses', 'xai-grok-oauth-responses', 'xai-grok-responses']);
+  assert.deepEqual(provider('Codex').legacySlugs.sort(), ['codex-responses', 'openai-official-responses']);
+  assert.deepEqual(provider('火山 Coding Plan').legacySlugs.sort(), [
+    'agentplan-openai',
+    'coding-plan-anthropic',
+    'coding-plan-openai',
+    'coding-plan-openai-ark',
+    'coding-plan-responses',
+  ]);
+  assert.ok(grouped.some((candidate) => candidate.name === 'Kimi'));
+  assert.ok(grouped.some((candidate) => candidate.name === 'Kimi For Coding'));
+  assert.ok(grouped.some((candidate) => candidate.name === 'SiliconFlow en'));
+  assert.ok(grouped.some((candidate) => candidate.name === 'AWS Bedrock (API Key)'));
+});
+
+test('deduplicates protocols into endpoints and chooses supported source-priority defaults', () => {
+  const bailian = logicalCatalog().logicalProviders.find((provider) => provider.name === 'Bailian');
+  assert.ok(bailian);
+  assert.equal(bailian.defaultProtocol, 'openai');
+  assert.equal(bailian.protocol, 'openai');
+  assert.equal(bailian.baseUrl, 'https://dashscope.aliyuncs.com/compatible-mode/v1');
+  assert.deepEqual(bailian.endpoints.map((endpoint) => endpoint.protocol).sort(), ['anthropic', 'openai', 'openai-responses']);
+  assert.equal(new Set(bailian.endpoints.map((endpoint) => endpoint.protocol)).size, bailian.endpoints.length);
+  const openai = bailian.endpoints.find((endpoint) => endpoint.protocol === 'openai');
+  assert.ok(openai);
+  assert.equal(openai.selectedVariantSlug, 'bailian-openai');
+  assert.equal(openai.modelCatalogComplete, false);
+  assert.ok(openai.alternateCandidates.some((candidate) => candidate.variantSlug === 'qwen-coder-openai'));
+});
+
+test('covers every low-level variant exactly once as a logical group candidate and legacy alias', () => {
+  const grouped = logicalCatalog().logicalProviders;
+  const candidates = grouped.flatMap((provider) => provider.endpoints.flatMap((endpoint) => endpoint.alternateCandidates.map((candidate) => candidate.variantSlug)));
+  const aliases = grouped.flatMap((provider) => provider.legacySlugs);
+  const variants = currentCatalog.providers.map((provider) => provider.slug);
+  assert.equal(candidates.length, 255);
+  assert.equal(new Set(candidates).size, 255);
+  assert.deepEqual([...candidates].sort(), [...variants].sort());
+  assert.equal(aliases.length, 255);
+  assert.equal(new Set(aliases).size, 255);
+  assert.deepEqual([...aliases].sort(), [...variants].sort());
 });
