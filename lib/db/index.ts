@@ -7,6 +7,7 @@ import { encrypt } from '@/lib/crypto';
 import * as schema from './schema';
 import { migrateUsageSchema } from './usage-migration';
 import { migrateModelPricingSchema } from './pricing-migration';
+import { migrateProviderEndpointSchema } from './provider-endpoint-migration';
 import { lookupBundledPricing } from '@/lib/services/model-pricing';
 import ccSwitchManifest from '@/lib/presets/cc-switch-manifest.json';
 
@@ -21,6 +22,7 @@ CREATE TABLE IF NOT EXISTS providers (
   name          TEXT NOT NULL,
   protocol      TEXT NOT NULL,
   base_url      TEXT NOT NULL,
+  preset_key    TEXT,
   api_key_enc   TEXT NOT NULL,
   enabled       INTEGER NOT NULL DEFAULT 1,
   priority      INTEGER NOT NULL DEFAULT 0,
@@ -28,6 +30,30 @@ CREATE TABLE IF NOT EXISTS providers (
   remark        TEXT,
   created_at    INTEGER,
   updated_at    INTEGER
+);
+CREATE TABLE IF NOT EXISTS provider_endpoints (
+  id TEXT PRIMARY KEY,
+  provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+  protocol TEXT NOT NULL,
+  base_url TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  is_default INTEGER NOT NULL DEFAULT 0,
+  preset_variant_slug TEXT,
+  source_ref TEXT,
+  model_catalog_complete INTEGER NOT NULL DEFAULT 0,
+  models_observed_at INTEGER,
+  created_at INTEGER,
+  updated_at INTEGER,
+  UNIQUE(provider_id, protocol)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_provider_endpoints_provider_protocol ON provider_endpoints(provider_id, protocol);
+CREATE INDEX IF NOT EXISTS idx_provider_endpoints_provider_default ON provider_endpoints(provider_id, is_default);
+CREATE TABLE IF NOT EXISTS provider_endpoint_models (
+  endpoint_id TEXT NOT NULL REFERENCES provider_endpoints(id) ON DELETE CASCADE,
+  model_id TEXT NOT NULL,
+  source TEXT NOT NULL,
+  observed_at INTEGER,
+  PRIMARY KEY(endpoint_id, model_id)
 );
 CREATE TABLE IF NOT EXISTS models (
   id            TEXT PRIMARY KEY,
@@ -143,6 +169,7 @@ function migrate(sqlite: Database.Database) {
 
   migrateUsageSchema(sqlite);
   migrateModelPricingSchema(sqlite, lookupBundledPricing, ccSwitchManifest.commit);
+  migrateProviderEndpointSchema(sqlite);
 }
 
 function createClient() {
@@ -173,7 +200,7 @@ function createClient() {
         Date.now(),
       );
   }
-  return drizzle(sqlite, { schema });
+  return { sqlite, drizzle: drizzle(sqlite, { schema }) };
 }
 
 // dev 模式 HMR 下缓存单例，避免重复打开数据库文件
@@ -184,8 +211,11 @@ const globalForDb = globalThis as unknown as { __modelCenterDb?: ReturnType<type
 // 因此构建阶段跳过 DB 初始化（导出占位，运行时不会走到）。
 const IS_BUILD = process.env.NEXT_PHASE === 'phase-production-build';
 
-export const db = IS_BUILD
-  ? (null as unknown as ReturnType<typeof createClient>)
+const client = IS_BUILD
+  ? null
   : (globalForDb.__modelCenterDb ?? (globalForDb.__modelCenterDb = createClient()));
+
+export const db = IS_BUILD ? (null as unknown as ReturnType<typeof createClient>['drizzle']) : client!.drizzle;
+export const sqlite = IS_BUILD ? (null as unknown as Database.Database) : client!.sqlite;
 
 export { schema };

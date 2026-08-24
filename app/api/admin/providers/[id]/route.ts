@@ -1,14 +1,19 @@
 import { eq } from 'drizzle-orm';
 import { NextRequest, NextResponse } from 'next/server';
 import { encrypt } from '@/lib/crypto';
-import { db, schema } from '@/lib/db';
-import { PROTOCOLS, getProvider, serializeProvider, validateBaseUrl } from '@/lib/services/provider';
-import type { Protocol } from '@/lib/services/provider';
+import { db, schema, sqlite } from '@/lib/db';
+import { getPreset } from '@/lib/presets';
+import { EndpointValidationError, listProviderEndpoints, replaceProviderEndpoints } from '@/lib/services/provider-endpoint';
+import { resolveEndpointSetForPatch } from '@/lib/services/provider-endpoint-request';
+import { getProvider, serializeProvider, validateBaseUrl } from '@/lib/services/provider';
 
 interface PatchBody {
   name?: string;
   protocol?: string;
   base_url?: string;
+  preset_key?: string;
+  endpoints?: unknown[];
+  default_protocol?: string;
   api_key?: string;
   enabled?: boolean;
   priority?: number;
@@ -32,23 +37,21 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     return NextResponse.json({ error: '请求体非法' }, { status: 400 });
   }
 
+  let endpoints;
+  try {
+    endpoints = resolveEndpointSetForPatch(body, listProviderEndpoints(sqlite, id), getPreset, validateBaseUrl);
+  } catch (error) {
+    if (error instanceof EndpointValidationError) return NextResponse.json({ error: error.message }, { status: 400 });
+    throw error;
+  }
+
   const updates: Record<string, unknown> = { updatedAt: Date.now() };
   if (body.name !== undefined) {
     if (!body.name.trim()) return NextResponse.json({ error: 'name 不能为空' }, { status: 400 });
     updates.name = body.name.trim();
   }
-  if (body.protocol !== undefined) {
-    if (!(PROTOCOLS as readonly string[]).includes(body.protocol)) {
-      return NextResponse.json({ error: `protocol 必须是 ${PROTOCOLS.join(' / ')}` }, { status: 400 });
-    }
-    updates.protocol = body.protocol as Protocol;
-  }
-  if (body.base_url !== undefined) {
-    const baseUrl = body.base_url.trim();
-    if (!baseUrl) return NextResponse.json({ error: 'base_url 不能为空' }, { status: 400 });
-    const urlError = validateBaseUrl(baseUrl);
-    if (urlError) return NextResponse.json({ error: urlError }, { status: 400 });
-    updates.baseUrl = baseUrl;
+  if (body.preset_key !== undefined) {
+    updates.presetKey = typeof body.preset_key === 'string' ? body.preset_key.trim() : null;
   }
   if (body.api_key !== undefined && body.api_key.trim() !== '') {
     updates.apiKeyEnc = encrypt(body.api_key.trim());
@@ -66,7 +69,10 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     updates.balanceConfig = body.balance_config;
   }
 
-  db.update(schema.providers).set(updates).where(eq(schema.providers.id, id)).run();
+  sqlite.transaction(() => {
+    db.update(schema.providers).set(updates).where(eq(schema.providers.id, id)).run();
+    if (endpoints) replaceProviderEndpoints(sqlite, id, endpoints, Date.now(), validateBaseUrl);
+  })();
   return NextResponse.json({ provider: serializeProvider(getProvider(id)!) });
 }
 

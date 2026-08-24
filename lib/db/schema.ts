@@ -1,4 +1,4 @@
-import { integer, real, sqliteTable, text, uniqueIndex, index } from 'drizzle-orm/sqlite-core';
+import { integer, real, sqliteTable, text, uniqueIndex, index, primaryKey } from 'drizzle-orm/sqlite-core';
 
 // 服务商（文档 §6）
 export const providers = sqliteTable('providers', {
@@ -7,6 +7,7 @@ export const providers = sqliteTable('providers', {
   name: text('name').notNull(),
   protocol: text('protocol').notNull(), // 'openai' | 'openai-responses' | 'anthropic' | 'gemini'
   baseUrl: text('base_url').notNull(),
+  presetKey: text('preset_key'),
   apiKeyEnc: text('api_key_enc').notNull(), // AES-GCM 密文
   enabled: integer('enabled').notNull().default(1),
   priority: integer('priority').notNull().default(0),
@@ -15,6 +16,44 @@ export const providers = sqliteTable('providers', {
   createdAt: integer('created_at'),
   updatedAt: integer('updated_at'),
 });
+
+// 服务商的协议/Base URL 端点集合；providers.protocol/base_url 保持默认端点的兼容投影。
+export const providerEndpoints = sqliteTable(
+  'provider_endpoints',
+  {
+    id: text('id').primaryKey(),
+    providerId: text('provider_id')
+      .notNull()
+      .references(() => providers.id, { onDelete: 'cascade' }),
+    protocol: text('protocol').notNull(),
+    baseUrl: text('base_url').notNull(),
+    enabled: integer('enabled').notNull().default(1),
+    isDefault: integer('is_default').notNull().default(0),
+    presetVariantSlug: text('preset_variant_slug'),
+    sourceRef: text('source_ref'),
+    modelCatalogComplete: integer('model_catalog_complete').notNull().default(0),
+    modelsObservedAt: integer('models_observed_at'),
+    createdAt: integer('created_at'),
+    updatedAt: integer('updated_at'),
+  },
+  (t) => [
+    uniqueIndex('uq_provider_endpoints_provider_protocol').on(t.providerId, t.protocol),
+    index('idx_provider_endpoints_provider_default').on(t.providerId, t.isDefault),
+  ],
+);
+
+export const providerEndpointModels = sqliteTable(
+  'provider_endpoint_models',
+  {
+    endpointId: text('endpoint_id')
+      .notNull()
+      .references(() => providerEndpoints.id, { onDelete: 'cascade' }),
+    modelId: text('model_id').notNull(),
+    source: text('source').notNull(), // 'preset' | 'sync'
+    observedAt: integer('observed_at'),
+  },
+  (t) => [primaryKey({ columns: [t.endpointId, t.modelId] })],
+);
 
 // 模型（同步或手动添加）
 export const models = sqliteTable(
