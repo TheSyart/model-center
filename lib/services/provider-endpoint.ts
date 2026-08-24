@@ -12,6 +12,7 @@ export interface EndpointInput {
   preset_variant_slug?: string | null;
   source_ref?: string | null;
   model_catalog_complete?: boolean;
+  models_observed_at?: number | null;
   models?: Array<{ model_id: string; source: 'preset' | 'sync'; observed_at?: number | null }>;
 }
 
@@ -61,12 +62,15 @@ export function validateCompleteEndpointSet(
   if (!Array.isArray(inputs) || inputs.length < 1 || inputs.length > 4) invalid('endpoints 必须包含 1–4 个端点');
   const protocols = new Set<string>();
   const normalized = inputs.map((input) => {
-    if (!input || !(ENDPOINT_PROTOCOLS as readonly string[]).includes(input.protocol)) {
+    if (!input || typeof input.protocol !== 'string' || !(ENDPOINT_PROTOCOLS as readonly string[]).includes(input.protocol)) {
       invalid(`endpoint protocol 必须是 ${ENDPOINT_PROTOCOLS.join(' / ')}`);
     }
+    if (input.enabled !== undefined && typeof input.enabled !== 'boolean') invalid('endpoint enabled 必须是 boolean');
+    if (input.is_default !== undefined && typeof input.is_default !== 'boolean') invalid('endpoint is_default 必须是 boolean');
     if (protocols.has(input.protocol)) invalid('endpoints 中 protocol 不能重复');
     protocols.add(input.protocol);
-    const baseUrl = typeof input.base_url === 'string' ? input.base_url.trim() : '';
+    if (typeof input.base_url !== 'string') invalid('endpoint base_url 必须是字符串');
+    const baseUrl = input.base_url.trim();
     if (!baseUrl) invalid('endpoint base_url 不能为空');
     const urlError = validateUrl(baseUrl);
     if (urlError) invalid(urlError);
@@ -157,21 +161,41 @@ export function replaceProviderEndpoints(
         models_observed_at = COALESCE(excluded.models_observed_at, provider_endpoints.models_observed_at),
         updated_at = excluded.updated_at
     `);
-    const endpointId = sqlite.prepare('SELECT id FROM provider_endpoints WHERE provider_id = ? AND protocol = ?');
+    const existingEndpoint = sqlite.prepare(`
+      SELECT id, model_catalog_complete, models_observed_at
+      FROM provider_endpoints WHERE provider_id = ? AND protocol = ?
+    `);
     const seedModel = sqlite.prepare(`
       INSERT INTO provider_endpoint_models (endpoint_id, model_id, source, observed_at)
       VALUES (?, ?, ?, ?)
-      ON CONFLICT(endpoint_id, model_id) DO UPDATE SET source = excluded.source, observed_at = excluded.observed_at
+      ON CONFLICT(endpoint_id, model_id) DO UPDATE SET
+        source = CASE
+          WHEN excluded.source = 'sync' THEN 'sync'
+          WHEN provider_endpoint_models.source = 'sync' THEN 'sync'
+          ELSE excluded.source
+        END,
+        observed_at = CASE
+          WHEN excluded.source = 'sync' THEN excluded.observed_at
+          WHEN provider_endpoint_models.source = 'sync' THEN provider_endpoint_models.observed_at
+          ELSE excluded.observed_at
+        END
     `);
+    const deletePresetModels = sqlite.prepare("DELETE FROM provider_endpoint_models WHERE endpoint_id = ? AND source = 'preset'");
 
     for (const endpoint of endpoints) {
+      const existing = existingEndpoint.get(providerId, endpoint.protocol) as
+        | { id: string; model_catalog_complete: number; models_observed_at: number | null }
+        | undefined;
+      const modelCatalogComplete = endpoint.model_catalog_complete ?? (existing?.model_catalog_complete === 1);
+      const modelsObservedAt = endpoint.models_observed_at ?? existing?.models_observed_at ?? (endpoint.models ? now : null);
       upsert.run(
         cryptoRandomId(sqlite), providerId, endpoint.protocol, endpoint.base_url, endpoint.enabled ? 1 : 0, endpoint.is_default ? 1 : 0,
-        endpoint.preset_variant_slug ?? null, endpoint.source_ref ?? null, endpoint.model_catalog_complete ? 1 : 0,
-        endpoint.models?.length ? now : null, now, now,
+        endpoint.preset_variant_slug ?? null, endpoint.source_ref ?? null, modelCatalogComplete ? 1 : 0,
+        modelsObservedAt, now, now,
       );
       if (endpoint.models) {
-        const id = (endpointId.get(providerId, endpoint.protocol) as { id: string }).id;
+        const id = (existingEndpoint.get(providerId, endpoint.protocol) as { id: string }).id;
+        if (endpoint.source_ref !== undefined) deletePresetModels.run(id);
         for (const model of endpoint.models) {
           if (!model.model_id.trim()) continue;
           seedModel.run(id, model.model_id, model.source, model.observed_at ?? now);

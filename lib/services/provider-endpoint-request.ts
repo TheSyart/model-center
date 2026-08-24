@@ -36,22 +36,26 @@ function rawEndpoints(value: unknown): EndpointInput[] {
   return value.map((endpoint) => {
     if (!endpoint || typeof endpoint !== 'object') reject('endpoint 必须是对象');
     const value = endpoint as Record<string, unknown>;
+    if (typeof value.protocol !== 'string') reject('endpoint protocol 必须是字符串');
+    if (typeof value.base_url !== 'string') reject('endpoint base_url 必须是字符串');
+    if (value.enabled !== undefined && typeof value.enabled !== 'boolean') reject('endpoint enabled 必须是 boolean');
+    if (value.is_default !== undefined && typeof value.is_default !== 'boolean') reject('endpoint is_default 必须是 boolean');
     return {
       protocol: value.protocol as ProviderProtocol,
-      base_url: value.base_url as string,
-      enabled: value.enabled as boolean | undefined,
-      is_default: value.is_default as boolean | undefined,
+      base_url: value.base_url,
+      enabled: value.enabled,
+      is_default: value.is_default,
     };
   });
 }
 
-function applyDefaultProtocol(endpoints: EndpointInput[], defaultProtocol: unknown): EndpointInput[] {
+function applyDefaultProtocol(endpoints: EndpointInput[], defaultProtocol: unknown, replaceExistingDefault = false): EndpointInput[] {
   if (defaultProtocol === undefined) return endpoints;
   if (typeof defaultProtocol !== 'string' || !(ENDPOINT_PROTOCOLS as readonly string[]).includes(defaultProtocol)) {
     reject(`default_protocol 必须是 ${ENDPOINT_PROTOCOLS.join(' / ')}`);
   }
   if (!endpoints.some((endpoint) => endpoint.protocol === defaultProtocol)) reject('default_protocol 必须存在于 endpoints');
-  if (endpoints.some((endpoint) => endpoint.is_default === true && endpoint.protocol !== defaultProtocol)) {
+  if (!replaceExistingDefault && endpoints.some((endpoint) => endpoint.is_default === true && endpoint.protocol !== defaultProtocol)) {
     reject('default_protocol 与 endpoints 的默认端点冲突');
   }
   return endpoints.map((endpoint) => ({ ...endpoint, is_default: endpoint.protocol === defaultProtocol }));
@@ -67,12 +71,15 @@ function addPresetKnowledge(endpoints: EndpointInput[], preset: ProviderPreset |
       ...endpoint,
       preset_variant_slug: source.selectedVariantSlug,
       source_ref: preset.presetKey,
-      model_catalog_complete: false,
       models: source.knownModels
         .filter((model) => model.id.trim().length > 0)
         .map((model) => ({ model_id: model.id, source: 'preset' as const })),
     };
   });
+}
+
+function materializePresetEndpointsForPatch(preset: ProviderPreset): EndpointInput[] {
+  return materializePresetEndpoints(preset).map(({ model_catalog_complete: _catalogComplete, ...endpoint }) => endpoint);
 }
 
 /** Resolve POST's preset, new multi-endpoint, and legacy protocol/base_url shapes into one complete set. */
@@ -106,9 +113,9 @@ export function resolveEndpointSetForPatch(
     return validateCompleteEndpointSet(applyDefaultProtocol(addPresetKnowledge(rawEndpoints(body.endpoints), preset), body.default_protocol), validateUrl);
   }
   if (preset) {
-    return validateCompleteEndpointSet(applyDefaultProtocol(materializePresetEndpoints(preset), body.default_protocol), validateUrl);
+    return validateCompleteEndpointSet(applyDefaultProtocol(materializePresetEndpointsForPatch(preset), body.default_protocol), validateUrl);
   }
-  if (body.protocol === undefined && body.base_url === undefined) return undefined;
+  if (body.protocol === undefined && body.base_url === undefined && body.default_protocol === undefined) return undefined;
   const currentDefault = current.find((endpoint) => endpoint.enabled && endpoint.isDefault);
   if (!currentDefault) reject('服务商没有可用默认端点');
   const endpoints = current.map((endpoint) => ({
@@ -119,6 +126,7 @@ export function resolveEndpointSetForPatch(
     preset_variant_slug: endpoint.presetVariantSlug,
     source_ref: endpoint.sourceRef,
     model_catalog_complete: endpoint.modelCatalogComplete,
+    models_observed_at: endpoint.modelsObservedAt,
   }));
-  return validateCompleteEndpointSet(applyDefaultProtocol(endpoints, body.default_protocol), validateUrl);
+  return validateCompleteEndpointSet(applyDefaultProtocol(endpoints, body.default_protocol, body.default_protocol !== undefined), validateUrl);
 }
