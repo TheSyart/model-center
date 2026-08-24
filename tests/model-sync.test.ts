@@ -105,6 +105,35 @@ test('Gemini synchronization follows nextPageToken using pageToken', async () =>
   ]);
 });
 
+for (const invalidName of ['models/', '  models/   ']) {
+  test(`Gemini synchronization rejects an empty normalized model name (${JSON.stringify(invalidName)}) without database writes`, async () => {
+    const { sqlite, legacyId } = database();
+    sqlite.prepare(`
+      UPDATE provider_endpoints SET protocol = 'gemini', base_url = 'https://gemini.example' WHERE id = ?
+    `).run(legacyId);
+    sqlite.prepare(`
+      UPDATE providers SET protocol = 'gemini', base_url = 'https://gemini.example' WHERE id = 'provider-1'
+    `).run();
+    const fetchImpl = (async () => Response.json({ models: [{ name: invalidName }] })) as typeof fetch;
+
+    await assert.rejects(
+      syncProviderModels(provider as any, 'key', dependencies(sqlite, fetchImpl)),
+      /有效模型 ID/,
+    );
+
+    assert.equal((sqlite.prepare('SELECT COUNT(*) AS n FROM models').get() as { n: number }).n, 0);
+    assert.deepEqual(
+      sqlite.prepare('SELECT model_id, source FROM provider_endpoint_models WHERE endpoint_id = ?').all(legacyId),
+      [{ model_id: 'old-model', source: 'sync' }],
+    );
+    assert.deepEqual(
+      sqlite.prepare('SELECT model_catalog_complete, models_observed_at FROM provider_endpoints WHERE id = ?').get(legacyId),
+      { model_catalog_complete: 1, models_observed_at: 101 },
+    );
+    sqlite.close();
+  });
+}
+
 test('a valid empty array replaces the synchronized catalog and marks it complete', async () => {
   const { sqlite, legacyId } = database();
   const fetchImpl = (async () => Response.json({ data: [] })) as typeof fetch;
@@ -178,6 +207,34 @@ test('default endpoint is resolved once before fetch and results are written bac
 
   assert.deepEqual(sqlite.prepare('SELECT model_id FROM provider_endpoint_models WHERE endpoint_id = ?').all(legacyId), [{ model_id: 'raced-model' }]);
   assert.equal((sqlite.prepare("SELECT COUNT(*) AS n FROM provider_endpoint_models WHERE endpoint_id = 'responses-id'").get() as { n: number }).n, 0);
+  sqlite.close();
+});
+
+test('same endpoint ID changing URL during fetch aborts before model or catalog writes', async () => {
+  const { sqlite, legacyId } = database();
+  const fetchImpl = (async (input: string | URL | Request) => {
+    assert.equal(String(input), 'https://chat.example/v1/models');
+    sqlite.prepare('UPDATE provider_endpoints SET base_url = ? WHERE id = ?')
+      .run('https://changed.example/v1', legacyId);
+    sqlite.prepare('UPDATE providers SET base_url = ? WHERE id = ?')
+      .run('https://changed.example/v1', 'provider-1');
+    return Response.json({ data: [{ id: 'stale-origin-model' }] });
+  }) as typeof fetch;
+
+  await assert.rejects(
+    syncProviderModels(provider as any, 'key', dependencies(sqlite, fetchImpl)),
+    /端点配置已变更，请重试/,
+  );
+
+  assert.equal((sqlite.prepare('SELECT COUNT(*) AS n FROM models').get() as { n: number }).n, 0);
+  assert.deepEqual(
+    sqlite.prepare('SELECT model_id, source FROM provider_endpoint_models WHERE endpoint_id = ?').all(legacyId),
+    [{ model_id: 'old-model', source: 'sync' }],
+  );
+  assert.deepEqual(
+    sqlite.prepare('SELECT base_url, model_catalog_complete, models_observed_at FROM provider_endpoints WHERE id = ?').get(legacyId),
+    { base_url: 'https://changed.example/v1', model_catalog_complete: 1, models_observed_at: 101 },
+  );
   sqlite.close();
 });
 

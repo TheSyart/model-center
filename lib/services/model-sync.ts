@@ -64,8 +64,10 @@ function parseModelPage(provider: SyncProviderRow, json: unknown): { ids: string
     const rawId = provider.protocol === 'gemini'
       ? (item as Record<string, unknown>).name
       : (item as Record<string, unknown>).id;
-    if (typeof rawId !== 'string' || !rawId.trim()) throw new Error(`${field}[${index}] 缺少有效模型 ID`);
-    return provider.protocol === 'gemini' ? rawId.trim().replace(/^models\//, '') : rawId.trim();
+    if (typeof rawId !== 'string') throw new Error(`${field}[${index}] 缺少有效模型 ID`);
+    const normalizedId = (provider.protocol === 'gemini' ? rawId.trim().replace(/^models\//, '') : rawId).trim();
+    if (!normalizedId) throw new Error(`${field}[${index}] 缺少有效模型 ID`);
+    return normalizedId;
   });
 
   if (provider.protocol === 'gemini') {
@@ -120,7 +122,13 @@ export async function syncProviderModels(
 ): Promise<SyncResult> {
   const defaultEndpoint = getEnabledDefaultEndpoint(dependencies.sqlite, provider.id);
   if (!defaultEndpoint) throw new Error('服务商没有启用的默认端点');
-  const requestProvider = providerForEndpoint(provider, defaultEndpoint);
+  const endpointSnapshot = {
+    id: defaultEndpoint.id,
+    providerId: defaultEndpoint.providerId,
+    protocol: defaultEndpoint.protocol,
+    baseUrl: defaultEndpoint.baseUrl,
+  };
+  const requestProvider = providerForEndpoint(provider, endpointSnapshot);
   const upstreamIds = await fetchAllUpstreamModels(requestProvider, apiKey, dependencies.fetch);
   const upstreamSet = new Set(upstreamIds);
   const existingRows = dependencies.sqlite.prepare(`
@@ -131,6 +139,19 @@ export async function syncProviderModels(
   let added = 0;
 
   dependencies.sqlite.transaction(() => {
+    const currentEndpoint = dependencies.sqlite.prepare(`
+      SELECT id, provider_id AS providerId, protocol, base_url AS baseUrl
+      FROM provider_endpoints WHERE id = ?
+    `).get(endpointSnapshot.id) as typeof endpointSnapshot | undefined;
+    if (
+      !currentEndpoint ||
+      currentEndpoint.id !== endpointSnapshot.id ||
+      currentEndpoint.providerId !== endpointSnapshot.providerId ||
+      currentEndpoint.protocol !== endpointSnapshot.protocol ||
+      currentEndpoint.baseUrl !== endpointSnapshot.baseUrl
+    ) {
+      throw new Error('端点配置已变更，请重试');
+    }
     const insert = dependencies.sqlite.prepare(`
       INSERT INTO models (
         id, provider_id, model_id, enabled, synced,
@@ -148,7 +169,7 @@ export async function syncProviderModels(
       );
       added++;
     }
-    replaceEndpointModelCatalogInTransaction(dependencies.sqlite, defaultEndpoint.id, upstreamIds, observedAt);
+    replaceEndpointModelCatalogInTransaction(dependencies.sqlite, endpointSnapshot.id, upstreamIds, observedAt);
   })();
 
   return {
