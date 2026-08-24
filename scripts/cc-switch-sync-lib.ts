@@ -607,10 +607,8 @@ export function groupLogicalProviderPresets(
           (provider) => provider.protocol === legacy.protocol && cleanUrl(provider.baseUrl).toLowerCase() === cleanUrl(legacy.baseUrl).toLowerCase(),
         )
       : false;
-    const preferredPresetKey = legacy && !matchesLegacyEndpoint ? `${basePresetKey}-cc-switch` : basePresetKey;
-    let presetKey = preferredPresetKey;
-    let suffix = 2;
-    while (presetKeys.has(presetKey)) presetKey = `${preferredPresetKey}-${suffix++}`;
+    const presetKey = legacy && !matchesLegacyEndpoint ? `${basePresetKey}-cc-switch` : basePresetKey;
+    if (presetKeys.has(presetKey)) throw new Error(`逻辑服务商 canonical key 冲突：${presetKey}`);
     presetKeys.add(presetKey);
 
     const endpoints = [...new Set(variants.map((provider) => provider.protocol))]

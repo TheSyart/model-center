@@ -245,6 +245,24 @@ test('suffixes a generated canonical key that collides with a different legacy e
   assert.equal(ppio.slug, 'ppio-cc-switch');
 });
 
+test('fails fast for generated canonical key collisions in either input order', () => {
+  const ppio = currentCatalog.providers.find((provider) => provider.slug === 'ppio-openai');
+  assert.ok(ppio);
+  const ppioCcSwitch = {
+    ...ppio,
+    slug: 'ppio-cc-switch-openai',
+    name: 'PPIO CC Switch',
+    baseUrl: 'https://ppio-cc-switch.example/v1',
+  };
+  const legacyPpio = [{ slug: 'ppio', protocol: 'openai', baseUrl: 'https://legacy-ppio.example/v1' }];
+  const grouping = (variants: typeof currentCatalog.providers) =>
+    (syncLibrary as GroupingLibrary).groupLogicalProviderPresets(variants, legacyPpio);
+
+  for (const variants of [[ppio, ppioCcSwitch], [ppioCcSwitch, ppio]]) {
+    assert.throws(() => grouping(variants), /逻辑服务商 canonical key 冲突：ppio-cc-switch/);
+  }
+});
+
 test('applies exactly the eight reviewed semantic merge groups', () => {
   const grouped = logicalCatalog().logicalProviders;
   const provider = (name: string) => {
