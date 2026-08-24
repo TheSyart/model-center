@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { deleteModel, serializeModel, updateModel } from '@/lib/services/model';
+import { deleteModel, restoreModelPricing, serializeModel, updateModel } from '@/lib/services/model';
 
 interface PatchBody {
   alias?: string | null;
@@ -7,6 +7,9 @@ interface PatchBody {
   enabled?: boolean;
   input_price?: number | null;
   output_price?: number | null;
+  cache_read_price?: number | null;
+  cache_write_price?: number | null;
+  restore_pricing?: boolean;
   context_window?: number | null;
 }
 
@@ -24,7 +27,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     return NextResponse.json({ error: 'alias 格式非法' }, { status: 400 });
   }
 
-  const row = updateModel(id, body);
+  const row = body.restore_pricing ? restoreModelPricing(id) : updateModel(id, body);
   if (row === 'alias_conflict') {
     return NextResponse.json({ error: `别名 "${body.alias}" 已被占用` }, { status: 409 });
   }

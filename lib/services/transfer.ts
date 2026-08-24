@@ -17,7 +17,7 @@ export function exportConfig(includeKeys: boolean) {
   const slugById = new Map(providers.map((p) => [p.id, p.slug]));
 
   return {
-    version: 1,
+    version: 2,
     exported_at: new Date().toISOString(),
     providers: providers.map((p) => ({
       slug: p.slug,
@@ -38,6 +38,11 @@ export function exportConfig(includeKeys: boolean) {
       enabled: m.enabled === 1,
       input_price: m.inputPrice,
       output_price: m.outputPrice,
+      cache_read_price: m.cacheReadPrice,
+      cache_write_price: m.cacheWritePrice,
+      pricing_source: m.pricingSource,
+      pricing_source_ref: m.pricingSourceRef,
+      pricing_synced_at: m.pricingSyncedAt,
       context_window: m.contextWindow,
       synced: m.synced === 1,
     })),
@@ -141,6 +146,11 @@ export function importConfig(data: Record<string, any>): ImportReport {
         enabled: m.enabled === false ? 0 : 1,
         inputPrice: m.input_price ?? null,
         outputPrice: m.output_price ?? null,
+        cacheReadPrice: m.cache_read_price ?? null,
+        cacheWritePrice: m.cache_write_price ?? null,
+        pricingSource: m.pricing_source ?? ((m.input_price != null || m.output_price != null) ? 'manual' : null),
+        pricingSourceRef: m.pricing_source_ref ?? null,
+        pricingSyncedAt: m.pricing_synced_at ?? null,
         contextWindow: m.context_window ?? null,
         synced: m.synced ? 1 : 0,
       })

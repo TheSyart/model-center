@@ -13,6 +13,11 @@ export interface ModelItem {
   enabled: boolean;
   input_price: number | null;
   output_price: number | null;
+  cache_read_price: number | null;
+  cache_write_price: number | null;
+  pricing_source: string | null;
+  pricing_source_ref: string | null;
+  pricing_synced_at: number | null;
   context_window: number | null;
   synced: boolean;
 }
@@ -31,7 +36,8 @@ export default function ModelTable({ providerId, models, onChanged, onToast }: P
   const [syncNotice, setSyncNotice] = useState('');
   const [showAdd, setShowAdd] = useState(false);
   const [addForm, setAddForm] = useState({ model_id: '', alias: '', display_name: '' });
-  const [edits, setEdits] = useState<Record<string, { alias: string; input_price: string; output_price: string }>>({});
+  type ModelEdit = { alias: string; input_price: string; output_price: string; cache_read_price: string; cache_write_price: string };
+  const [edits, setEdits] = useState<Record<string, ModelEdit>>({});
   const { confirm } = useConfirm();
 
   async function sync() {
@@ -71,11 +77,13 @@ export default function ModelTable({ providerId, models, onChanged, onToast }: P
         alias: m.alias ?? '',
         input_price: m.input_price?.toString() ?? '',
         output_price: m.output_price?.toString() ?? '',
+        cache_read_price: m.cache_read_price?.toString() ?? '',
+        cache_write_price: m.cache_write_price?.toString() ?? '',
       }
     );
   }
 
-  function setEdit(m: ModelItem, patch: Partial<{ alias: string; input_price: string; output_price: string }>) {
+  function setEdit(m: ModelItem, patch: Partial<ModelEdit>) {
     setEdits({ ...edits, [m.id]: { ...editOf(m), ...patch } });
   }
 
@@ -85,6 +93,8 @@ export default function ModelTable({ providerId, models, onChanged, onToast }: P
       alias: e.alias.trim() || null,
       input_price: e.input_price.trim() === '' ? null : Number(e.input_price),
       output_price: e.output_price.trim() === '' ? null : Number(e.output_price),
+      cache_read_price: e.cache_read_price.trim() === '' ? null : Number(e.cache_read_price),
+      cache_write_price: e.cache_write_price.trim() === '' ? null : Number(e.cache_write_price),
     });
     if (ok) {
       onToast('已保存');
@@ -93,6 +103,23 @@ export default function ModelTable({ providerId, models, onChanged, onToast }: P
       setEdits(next);
       await onChanged();
     }
+  }
+
+  async function restorePricing(m: ModelItem) {
+    const ok = await patchModel(m.id, { restore_pricing: true });
+    if (!ok) return;
+    onToast('已恢复 CC Switch 定价');
+    const next = { ...edits };
+    delete next[m.id];
+    setEdits(next);
+    await onChanged();
+  }
+
+  function pricingSourceLabel(source: string | null) {
+    if (source === 'manual') return '手动';
+    if (source === 'cc-switch-provider') return 'CC Switch · 服务商';
+    if (source === 'cc-switch-global') return 'CC Switch · 全局';
+    return '未定价';
   }
 
   async function removeModel(m: ModelItem) {
@@ -181,13 +208,13 @@ export default function ModelTable({ providerId, models, onChanged, onToast }: P
         <div className="py-6 text-center text-xs text-subtle-foreground">暂无模型，可从上游同步或手动添加</div>
       ) : (
         <div className="minimal-scrollbar -mx-4 overflow-x-auto px-4 sm:-mx-5 sm:px-5">
-        <table className="w-full min-w-[760px] text-sm">
+        <table className="w-full min-w-[980px] text-sm">
           <thead className={tableHeadCls}>
             <tr>
               <th className="px-3 py-2 font-medium">模型 ID</th>
               <th className="px-3 py-2 font-medium">别名</th>
-              <th className="px-3 py-2 font-medium">输入 / 输出单价（$/M tokens）</th>
-              <th className="px-3 py-2 font-medium">来源</th>
+              <th className="px-3 py-2 font-medium">四档单价（$/M tokens）</th>
+              <th className="px-3 py-2 font-medium">定价来源</th>
               <th className="px-3 py-2 font-medium">启用</th>
               <th className="px-3 py-2 font-medium">操作</th>
             </tr>
@@ -208,21 +235,30 @@ export default function ModelTable({ providerId, models, onChanged, onToast }: P
                     />
                   </td>
                   <td className="px-3 py-2.5">
-                    <input
-                      value={e.input_price}
-                      onChange={(ev) => setEdit(m, { input_price: ev.target.value })}
-                      className={`${inputCls} min-h-8 w-20 py-1 text-xs`}
-                      placeholder="0"
-                    />
-                    {' / '}
-                    <input
-                      value={e.output_price}
-                      onChange={(ev) => setEdit(m, { output_price: ev.target.value })}
-                      className={`${inputCls} min-h-8 w-20 py-1 text-xs`}
-                      placeholder="0"
-                    />
+                    <div className="grid grid-cols-4 gap-1.5">
+                      {([
+                        ['输入', 'input_price'],
+                        ['输出', 'output_price'],
+                        ['缓存读', 'cache_read_price'],
+                        ['缓存写', 'cache_write_price'],
+                      ] as const).map(([label, key]) => (
+                        <label key={key} className="block">
+                          <span className="mb-1 block text-[10px] text-subtle-foreground">{label}</span>
+                          <input
+                            value={e[key]}
+                            onChange={(ev) => setEdit(m, { [key]: ev.target.value })}
+                            className={`${inputCls} min-h-8 w-20 py-1 text-xs`}
+                            placeholder="—"
+                            inputMode="decimal"
+                          />
+                        </label>
+                      ))}
+                    </div>
                   </td>
-                  <td className="px-3 py-2.5 text-xs text-subtle-foreground">{m.synced ? '同步' : '手动'}</td>
+                  <td className="px-3 py-2.5 text-xs text-subtle-foreground" title={m.pricing_source_ref ?? undefined}>
+                    <div>{pricingSourceLabel(m.pricing_source)}</div>
+                    <div className="mt-1 text-[10px]">模型：{m.synced ? '上游同步' : '手动添加'}</div>
+                  </td>
                   <td className="px-3 py-2.5">
                     {/* 小开关（统一样式：36px 轨道 / 16px 圆点 / 位移 18px） */}
                     <button
@@ -244,6 +280,9 @@ export default function ModelTable({ providerId, models, onChanged, onToast }: P
                           保存
                         </button>
                       )}
+                      <button type="button" onClick={() => restorePricing(m)} className={btn.link}>
+                        恢复定价
+                      </button>
                       <button type="button" onClick={() => removeModel(m)} className={btn.linkDanger}>
                         删除
                       </button>

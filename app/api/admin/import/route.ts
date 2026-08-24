@@ -10,8 +10,8 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ error: '请求体不是合法 JSON' }, { status: 400 });
   }
-  if (!body || typeof body !== 'object' || body.version !== 1) {
-    return NextResponse.json({ error: '不是合法的导出文件（缺少 version: 1）' }, { status: 400 });
+  if (!body || typeof body !== 'object' || ![1, 2].includes(Number(body.version))) {
+    return NextResponse.json({ error: '不是合法的导出文件（仅支持 version: 1 或 2）' }, { status: 400 });
   }
   try {
     const report = importConfig(body);

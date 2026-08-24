@@ -4,7 +4,7 @@ import { GatewayError, gatewayErrorToResponse, openaiErrorResponse } from '@/lib
 import { extractPromptExtension } from '@/lib/gateway/extensions';
 import { runGatewayPipeline } from '@/lib/gateway/pipeline';
 import { responsesRequestToIR } from '@/lib/protocols/responses';
-import { detectRequestSource } from '@/lib/services/usage-metrics';
+import { normalizeRequestSource } from '@/lib/services/usage-metrics';
 
 /**
  * POST /api/v1/responses（对外 /v1/responses）：OpenAI Responses API 出口（Codex 类客户端）。
@@ -44,7 +44,7 @@ export async function POST(req: NextRequest) {
       clientSignal: req.signal,
       prompt,
       token: auth.token,
-      source: detectRequestSource(req.headers.get('user-agent')),
+      source: normalizeRequestSource(req.headers.get('user-agent')),
     });
   } catch (e) {
     if (e instanceof GatewayError) return gatewayErrorToResponse(e);

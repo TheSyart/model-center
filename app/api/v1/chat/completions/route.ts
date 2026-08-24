@@ -3,7 +3,7 @@ import { checkGatewayAuth } from '@/lib/gateway/auth';
 import { GatewayError, gatewayErrorToResponse, openaiErrorResponse } from '@/lib/gateway/errors';
 import { extractPromptExtension } from '@/lib/gateway/extensions';
 import { runGatewayPipeline } from '@/lib/gateway/pipeline';
-import { detectRequestSource } from '@/lib/services/usage-metrics';
+import { normalizeRequestSource } from '@/lib/services/usage-metrics';
 
 // POST /api/v1/chat/completions（对外经 rewrite 暴露为 /v1/chat/completions）
 export async function POST(req: NextRequest) {
@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
       clientSignal: req.signal,
       prompt,
       token: auth.token,
-      source: detectRequestSource(req.headers.get('user-agent')),
+      source: normalizeRequestSource(req.headers.get('user-agent')),
     });
   } catch (e) {
     if (e instanceof GatewayError) return gatewayErrorToResponse(e);

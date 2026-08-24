@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-// @ts-expect-error TS5097: runtime import intentionally includes the TypeScript extension.
 import { observeReadableStream } from '../lib/gateway/stream-observer.ts';
 
 test('records the first non-empty client chunk and stream completion without changing bytes', async () => {

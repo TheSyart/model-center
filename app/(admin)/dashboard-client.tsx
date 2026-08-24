@@ -1,9 +1,10 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { SkeletonRows } from '@/components/empty-state';
 import { cardCls, inputCls, tableHeadCls, tableWrapCls } from '@/components/ui';
 import { getPreset } from '@/lib/presets';
+import { buildActivityCalendar, chartY, monthLabelGridColumn, nearestTrendIndex, smoothLinePath, type ChartPoint } from '@/lib/services/usage-chart';
 
 type RangePreset = 'today' | '7d' | '30d' | 'custom';
 type Breakdown = 'token' | 'provider' | 'model';
@@ -105,23 +106,19 @@ function rangeBounds(range: RangePreset, customFrom: string, customTo: string) {
   return { from, to, bucket: to - from <= 48 * 3_600_000 ? ('hour' as const) : ('day' as const) };
 }
 
-function pathFor(values: number[], width: number, height: number, left: number, top: number, max: number): string {
-  if (!values.length) return '';
-  const usableWidth = width - left - 58;
-  const usableHeight = height - top - 40;
-  return values.map((value, index) => {
-    const x = left + (values.length === 1 ? usableWidth / 2 : (index / (values.length - 1)) * usableWidth);
-    const y = top + usableHeight - (value / Math.max(1, max)) * usableHeight;
-    return `${index === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`;
-  }).join(' ');
-}
-
 function TrendChart({ data, bucket }: { data: TrendPoint[]; bucket: 'hour' | 'day' }) {
   const width = 1000;
-  const height = 300;
+  const height = 320;
   const left = 58;
-  const tokenMax = Math.max(1, ...data.flatMap((point) => [point.input_tokens, point.output_tokens, point.cache_read_tokens, point.cache_write_tokens]));
-  const costMax = Math.max(0.000001, ...data.map((point) => point.cost));
+  const right = width - 58;
+  const top = 22;
+  const bottom = height - 44;
+  const tokenMax = Math.max(1, ...data.flatMap((point) => [point.input_tokens, point.output_tokens, point.cache_read_tokens, point.cache_write_tokens])) * 1.08;
+  const costMax = Math.max(0.000001, ...data.map((point) => point.cost)) * 1.08;
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const gradientId = `cache-area-${useId().replaceAll(':', '')}`;
+  const shadowId = `tooltip-shadow-${useId().replaceAll(':', '')}`;
+  const liveRegionId = `trend-live-${useId().replaceAll(':', '')}`;
   const series = [
     { key: 'input_tokens' as const, label: '输入', color: 'var(--chart-input)' },
     { key: 'output_tokens' as const, label: '输出', color: 'var(--chart-output)' },
@@ -129,22 +126,106 @@ function TrendChart({ data, bucket }: { data: TrendPoint[]; bucket: 'hour' | 'da
     { key: 'cache_write_tokens' as const, label: '缓存创建', color: 'var(--chart-cache-write)' },
   ];
   const labelEvery = Math.max(1, Math.ceil(data.length / 8));
+  const pointsFor = (values: number[], max: number): ChartPoint[] => values.map((value, index) => ({
+    x: left + (values.length === 1 ? (right - left) / 2 : (index / (values.length - 1)) * (right - left)),
+    y: chartY(value, max, top, bottom),
+  }));
+  const plottedSeries = series.map((item) => ({ ...item, points: pointsFor(data.map((point) => point[item.key]), tokenMax) }));
+  const costPoints = pointsFor(data.map((point) => point.cost), costMax);
+  const cachePoints = plottedSeries.find((item) => item.key === 'cache_read_tokens')?.points ?? [];
+  const cacheArea = cachePoints.length
+    ? `${smoothLinePath(cachePoints)} L ${cachePoints.at(-1)!.x.toFixed(2)} ${bottom} L ${cachePoints[0].x.toFixed(2)} ${bottom} Z`
+    : '';
+  const hoveredPoint = hoveredIndex == null ? null : data[hoveredIndex];
+  const hoverX = hoveredIndex == null ? 0 : plottedSeries[0]?.points[hoveredIndex]?.x ?? left;
+  const hoverYs = hoveredIndex == null
+    ? []
+    : [...plottedSeries.map((item) => item.points[hoveredIndex]?.y ?? bottom), costPoints[hoveredIndex]?.y ?? bottom];
+  const tooltipWidth = 196;
+  const tooltipHeight = 124;
+  const tooltipX = hoverX + 14 + tooltipWidth > right ? hoverX - tooltipWidth - 14 : hoverX + 14;
+  const tooltipY = Math.max(top + 4, Math.min(bottom - tooltipHeight - 4, Math.min(...hoverYs, bottom) + 10));
+  const axisLabel = (start: string) => bucket === 'hour'
+    ? `${start.slice(5, 10).replace('-', '/')} ${start.slice(11, 16)}`
+    : start.slice(5, 10).replace('-', '/');
+  const tooltipLabel = (start: string) => bucket === 'hour'
+    ? `${start.slice(0, 10).replaceAll('-', '/')} ${start.slice(11, 16)}`
+    : start.slice(0, 10).replaceAll('-', '/');
+  const trendA11yText = hoveredPoint
+    ? `${tooltipLabel(hoveredPoint.start)}，输入 ${fmtTokens(hoveredPoint.input_tokens)}，输出 ${fmtTokens(hoveredPoint.output_tokens)}，缓存命中 ${fmtTokens(hoveredPoint.cache_read_tokens)}，缓存创建 ${fmtTokens(hoveredPoint.cache_write_tokens)}，成本 ${fmtCost(hoveredPoint.cost)}`
+    : '使用左右方向键查看各时间点明细';
+  const updateHoveredIndex = (clientX: number, svg: SVGSVGElement | null) => {
+    const rect = svg?.getBoundingClientRect();
+    if (!rect) return;
+    const pointerX = ((clientX - rect.left) / rect.width) * width;
+    setHoveredIndex(nearestTrendIndex(pointerX, left, right, data.length));
+  };
 
   return (
     <div className="minimal-scrollbar overflow-x-auto">
-      <svg viewBox={`0 0 ${width} ${height}`} className="h-[300px] min-w-[760px] w-full" role="img" aria-label="Token 用量与成本趋势">
+      <svg viewBox={`0 0 ${width} ${height}`} className="h-[320px] min-w-[760px] w-full select-none" role="group" aria-label="Token 用量与成本趋势">
+        <defs>
+          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="var(--chart-cache-read)" stopOpacity="0.28" />
+            <stop offset="100%" stopColor="var(--chart-cache-read)" stopOpacity="0.01" />
+          </linearGradient>
+          <filter id={shadowId} x="-20%" y="-20%" width="140%" height="150%">
+            <feDropShadow dx="0" dy="4" stdDeviation="5" floodColor="#000" floodOpacity="0.16" />
+          </filter>
+        </defs>
         {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
-          const y = 22 + (height - 62) * ratio;
-          return <g key={ratio}><line x1={left} x2={width - 58} y1={y} y2={y} stroke="var(--border)" strokeDasharray="2 6" /><text x={left - 9} y={y + 4} textAnchor="end" fill="var(--subtle-foreground)" fontSize="10">{fmtTokens(Math.round(tokenMax * (1 - ratio)))}</text><text x={width - 52} y={y + 4} fill="var(--subtle-foreground)" fontSize="10">{fmtCost(costMax * (1 - ratio))}</text></g>;
+          const y = top + (bottom - top) * ratio;
+          return <g key={ratio}><line x1={left} x2={right} y1={y} y2={y} stroke="var(--border)" strokeDasharray="2 6" /><text x={left - 9} y={y + 4} textAnchor="end" fill="var(--subtle-foreground)" fontSize="10">{fmtTokens(Math.round(tokenMax * (1 - ratio)))}</text><text x={right + 7} y={y + 4} fill="var(--subtle-foreground)" fontSize="10">{fmtCost(costMax * (1 - ratio))}</text></g>;
         })}
-        {series.map((item) => <path key={item.key} d={pathFor(data.map((point) => point[item.key]), width, height, left, 22, tokenMax)} fill="none" stroke={item.color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />)}
-        <path d={pathFor(data.map((point) => point.cost), width, height, left, 22, costMax)} fill="none" stroke="var(--chart-cost)" strokeWidth="1.8" strokeDasharray="5 5" strokeLinejoin="round" />
+        {cacheArea && <path d={cacheArea} fill={`url(#${gradientId})`} pointerEvents="none" />}
+        {plottedSeries.map((item) => <path key={item.key} d={smoothLinePath(item.points)} fill="none" stroke={item.color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" pointerEvents="none" />)}
+        <path d={smoothLinePath(costPoints)} fill="none" stroke="var(--chart-cost)" strokeWidth="1.8" strokeDasharray="5 5" strokeLinejoin="round" strokeLinecap="round" pointerEvents="none" />
         {data.map((point, index) => {
-          const x = left + (data.length === 1 ? (width - left - 58) / 2 : (index / (data.length - 1)) * (width - left - 58));
-          const label = bucket === 'hour' ? point.start.slice(11, 16) : point.start.slice(5);
-          return <g key={point.start}>{index % labelEvery === 0 && <text x={x} y={height - 15} textAnchor="middle" fill="var(--subtle-foreground)" fontSize="10">{label}</text>}<circle cx={x} cy={height / 2} r="13" fill="transparent"><title>{`${point.start} · ${point.requests} 次 · ${fmtTokens(point.effective_tokens)} Tokens · ${fmtCost(point.cost)}`}</title></circle></g>;
+          const x = plottedSeries[0]?.points[index]?.x ?? left;
+          return (index % labelEvery === 0 || index === data.length - 1) && <text key={point.start} x={x} y={height - 16} textAnchor="middle" fill="var(--subtle-foreground)" fontSize="10">{axisLabel(point.start)}</text>;
         })}
+        <rect
+          x={left}
+          y={top}
+          width={right - left}
+          height={bottom - top}
+          fill="transparent"
+          pointerEvents="all"
+          tabIndex={0}
+          role="slider"
+          aria-valuemin={0}
+          aria-valuemax={Math.max(0, data.length - 1)}
+          aria-valuenow={hoveredIndex ?? Math.max(0, data.length - 1)}
+          aria-valuetext={trendA11yText}
+          aria-describedby={liveRegionId}
+          aria-label="悬停或使用左右方向键查看各时间点明细"
+          onPointerMove={(event) => updateHoveredIndex(event.clientX, event.currentTarget.ownerSVGElement)}
+          onMouseMove={(event) => updateHoveredIndex(event.clientX, event.currentTarget.ownerSVGElement)}
+          onPointerLeave={() => setHoveredIndex(null)}
+          onMouseLeave={() => setHoveredIndex(null)}
+          onFocus={() => setHoveredIndex(data.length ? data.length - 1 : null)}
+          onBlur={() => setHoveredIndex(null)}
+          onKeyDown={(event) => {
+            if (!data.length) return;
+            if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+            event.preventDefault();
+            const delta = event.key === 'ArrowLeft' ? -1 : 1;
+            setHoveredIndex((current) => Math.min(data.length - 1, Math.max(0, (current ?? data.length - 1) + delta)));
+          }}
+        />
+        {hoveredPoint && hoveredIndex != null && <g role="tooltip" aria-label={`${tooltipLabel(hoveredPoint.start)} 用量明细`} pointerEvents="none">
+          <line x1={hoverX} x2={hoverX} y1={top} y2={bottom} stroke="var(--muted-foreground)" strokeWidth="1" opacity="0.75" />
+          {plottedSeries.map((item) => <circle key={item.key} cx={item.points[hoveredIndex].x} cy={item.points[hoveredIndex].y} r="4" fill={item.color} stroke="var(--surface)" strokeWidth="2" />)}
+          <circle cx={costPoints[hoveredIndex].x} cy={costPoints[hoveredIndex].y} r="4" fill="var(--chart-cost)" stroke="var(--surface)" strokeWidth="2" />
+          <g transform={`translate(${tooltipX} ${tooltipY})`} filter={`url(#${shadowId})`}>
+            <rect width={tooltipWidth} height={tooltipHeight} rx="8" fill="var(--surface)" stroke="var(--muted-foreground)" />
+            <text x="12" y="21" fill="var(--foreground)" fontSize="12" fontWeight="600">{tooltipLabel(hoveredPoint.start)}</text>
+            {plottedSeries.map((item, row) => <g key={item.key} transform={`translate(0 ${35 + row * 18})`}><circle cx="13" cy="0" r="3" fill={item.color} /><text x="22" y="4" fill={item.color} fontSize="11">{item.label}: {fmtTokens(hoveredPoint[item.key])}</text></g>)}
+            <g transform="translate(0 107)"><circle cx="13" cy="0" r="3" fill="var(--chart-cost)" /><text x="22" y="4" fill="var(--chart-cost)" fontSize="11">成本: {fmtCost(hoveredPoint.cost)}</text></g>
+          </g>
+        </g>}
       </svg>
+      <div id={liveRegionId} className="sr-only" aria-live="polite">{trendA11yText}</div>
       <div className="flex flex-wrap justify-center gap-x-5 gap-y-2 text-xs text-muted-foreground">
         {series.map((item) => <span key={item.key} className="flex items-center gap-1.5"><i className="h-0.5 w-4" style={{ background: item.color }} />{item.label}</span>)}
         <span className="flex items-center gap-1.5"><i className="h-0 w-4 border-t border-dashed border-chart-cost" />成本</span>
@@ -154,12 +235,74 @@ function TrendChart({ data, bucket }: { data: TrendPoint[]; bucket: 'hour' | 'da
 }
 
 function ActivityHeatmap({ data }: { data: UsageData['activity'] }) {
+  const calendar = useMemo(() => buildActivityCalendar(data), [data]);
   const max = Math.max(1, ...data.map((day) => day.effective_tokens));
-  const leading = data.length ? new Date(`${data[0].day}T00:00:00`).getDay() : 0;
-  const cells = [...Array.from({ length: leading }, () => null), ...data];
+  const containerRef = useRef<HTMLDivElement>(null);
+  const cellRefs = useRef(new Map<string, HTMLButtonElement>());
+  const [focusedDay, setFocusedDay] = useState(data.at(-1)?.day ?? '');
+  const [hovered, setHovered] = useState<{ day: UsageData['activity'][number]; left: number; top: number; below: boolean } | null>(null);
   const level = (tokens: number) => tokens === 0 ? 0 : Math.min(4, Math.max(1, Math.ceil(Math.sqrt(tokens / max) * 4)));
   const tones = ['bg-muted', 'bg-primary/20', 'bg-primary/40', 'bg-primary/65', 'bg-primary'];
-  return <div className="minimal-scrollbar overflow-x-auto pb-2"><div className="grid w-max grid-flow-col grid-rows-7 gap-[3px]">{cells.map((day, index) => day ? <div key={day.day} className={`h-2.5 w-2.5 rounded-[2px] ${tones[level(day.effective_tokens)]}`} title={`${day.day} · ${day.requests} 次 · ${fmtTokens(day.effective_tokens)} Tokens · ${fmtCost(day.cost)}`} /> : <span key={`blank-${index}`} className="h-2.5 w-2.5" aria-hidden="true" />)}</div></div>;
+  const showTooltip = (element: HTMLElement, day: UsageData['activity'][number]) => {
+    const root = containerRef.current?.getBoundingClientRect();
+    const cell = element.getBoundingClientRect();
+    if (!root) return;
+    setHovered({
+      day,
+      left: Math.max(92, Math.min(root.width - 92, cell.left - root.left + cell.width / 2)),
+      top: cell.top - root.top < 66 ? cell.bottom - root.top + 8 : cell.top - root.top - 8,
+      below: cell.top - root.top < 66,
+    });
+  };
+  const moveFocus = (currentDay: string, key: string) => {
+    const current = data.findIndex((item) => item.day === currentDay);
+    if (current < 0) return;
+    const offsets: Record<string, number> = { ArrowUp: -1, ArrowDown: 1, ArrowLeft: -7, ArrowRight: 7 };
+    const targetIndex = key === 'Home'
+      ? 0
+      : key === 'End'
+        ? data.length - 1
+        : Math.min(data.length - 1, Math.max(0, current + (offsets[key] ?? 0)));
+    const target = data[targetIndex];
+    if (!target || targetIndex === current) return;
+    setFocusedDay(target.day);
+    window.requestAnimationFrame(() => cellRefs.current.get(target.day)?.focus());
+  };
+
+  return <div ref={containerRef} className="relative w-full pt-1">
+    <div className="grid w-full gap-0.5 sm:gap-[3px]" style={{ gridTemplateColumns: `repeat(${Math.max(1, calendar.weeks.length)}, minmax(0, 1fr))` }}>
+      {calendar.weeks.map((week, weekIndex) => <div key={weekIndex} className="grid min-w-0 grid-rows-7 gap-0.5 sm:gap-[3px]">
+        {week.map((day, weekday) => day ? <button
+          key={day.day}
+          type="button"
+          ref={(node) => { if (node) cellRefs.current.set(day.day, node); else cellRefs.current.delete(day.day); }}
+          tabIndex={focusedDay === day.day ? 0 : -1}
+          className={`aspect-square w-full min-w-0 rounded-[2px] outline-none transition-[filter,transform] duration-150 hover:brightness-90 focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1 focus-visible:ring-offset-surface ${tones[level(day.effective_tokens)]}`}
+          aria-label={`${day.day}，当日 Token 总数 ${fmtTokens(day.effective_tokens)}`}
+          onMouseEnter={(event) => showTooltip(event.currentTarget, day)}
+          onMouseLeave={() => setHovered(null)}
+          onFocus={(event) => { setFocusedDay(day.day); showTooltip(event.currentTarget, day); }}
+          onBlur={() => setHovered(null)}
+          onKeyDown={(event) => {
+            if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            moveFocus(day.day, event.key);
+          }}
+        /> : <span key={`${weekIndex}-${weekday}`} className="aspect-square w-full" aria-hidden="true" />)}
+      </div>)}
+    </div>
+    <div className="mt-2 grid h-4 w-full gap-0.5 text-[10px] text-subtle-foreground sm:gap-[3px]" style={{ gridTemplateColumns: `repeat(${Math.max(1, calendar.weeks.length)}, minmax(0, 1fr))` }}>
+      {calendar.months.map((month) => <span key={`${month.label}-${month.week}`} className="whitespace-nowrap" style={{ gridColumn: monthLabelGridColumn(month.week, calendar.weeks.length) }}>{month.label}</span>)}
+    </div>
+    {hovered && <div
+      role="tooltip"
+      className="pointer-events-none absolute z-20 w-44 rounded-md border border-border bg-surface px-3 py-2 text-xs text-foreground shadow-[0_6px_20px_rgba(0,0,0,0.14)]"
+      style={{ left: hovered.left, top: hovered.top, transform: `translate(-50%, ${hovered.below ? '0' : '-100%'})` }}
+    >
+      <div className="font-medium">{hovered.day.day}</div>
+      <div className="mt-1 flex items-center justify-between gap-3 text-muted-foreground"><span>当日 Token 总数</span><span className="font-mono font-medium tabular-nums text-foreground">{fmtTokens(hovered.day.effective_tokens)}</span></div>
+    </div>}
+  </div>;
 }
 
 function balanceTone(tiers?: { utilization: number }[]): string {

@@ -1,8 +1,8 @@
 # Model Center —— 个人模型聚合平台 · 开发文档
 
-> 版本：v0.3  日期：2026-08-24
+> 版本：v0.5  日期：2026-08-24
 > 定位：单人自用的模型 API 聚合网关 + 管理后台。把各家模型服务商的 API Key 统一收进来，对外只暴露一个兼容 OpenAI 协议的接口，通过模型名路由到不同服务商；同时提供服务商管理、预设提示词、额度查询、模型列表同步等管理能力。
-> 服务商来源参考：[farion1231/cc-switch](https://github.com/farion1231/cc-switch)（从中筛选主流厂商，不含小型中转站）。
+> 服务商、模型、定价与图标固定同步自 [farion1231/cc-switch](https://github.com/farion1231/cc-switch)；精确 SHA、字段映射和更新流程见 `docs/cc-switch-sync.md`。
 
 ---
 
@@ -71,15 +71,14 @@
 
 > v0.4 起改为**完全同步** cc-switch 的预设（不再只保留主流 13 家）。
 
-- 来源：`cc-switch` 仓库 `src/config/{claude,codex,gemini}ProviderPresets.ts`（main 分支），代码化为 `lib/presets/`：`legacy.ts`（下表 13 家主流厂商，含余额端点信息，保留原 slug）+ `cc-switch.ts`（全量 166 条，自动提取生成）。
-- 排除项：OAuth-only 预设（GitHub Copilot、Codex、xAI OAuth 等 5 条，无法仅凭 api_key 使用）与无 base_url 的模板项（1 条）。`claudeDesktopProviderPresets.ts` 是从 claude 预设派生的 Claude Desktop 变体（端点重复），不重复收录。
-- 协议推断：claude 系按其 `apiFormat` 字段（默认 anthropic）；codex 系按 `apiFormat`（默认 openai_responses）；gemini 系固定 gemini。
-- 分类：cc-switch 的 `ProviderCategory` 映射为 official / cn_official / aggregator / relay（third_party）/ other，UI 按分类分组展示。
-- 同一厂商多端点（如 Kimi 的 anthropic 端点与 codex 端点）保留为多条预设，slug 加 `-cc`/`-codex`/`-gemini` 后缀区分；**UI 消歧约定**：同名多条预设的显示名加端点类型后缀（如 `Kimi（Claude 端点）`、`Kimi（Codex/Responses）`），legacy 主流 13 家带 `（推荐）` 标记并在各分组内置顶，避免误选端点类型。
-- Logo：厂商图标取自 cc-switch `src/icons/extracted/`（99 个，规范化命名存于 `public/logos/`），预设带 `logo` 字段，无 logo 的厂商前端用首字母占位图。
+- 固定来源提交为 `9a596158ca926e74b56243c08af67d9dd13fc27c`。同步覆盖 Claude、Claude Desktop、Codex、Gemini、Grok Build、OpenCode、OpenClaw、Hermes、Pi、Universal 共 10 类；539 条数组记录加独立 Grok Official，合计 540 条，规范化为 255 个协议/Base URL 变体。
+- 每条源记录必须归入 included、merged 或 excluded 覆盖账本。OAuth-only、Bedrock 等不支持项保留元数据但在选择器禁用；无可执行 Base URL 的自定义模板明确进入排除项。
+- 同一厂商仅在“身份、协议、规范化 Base URL”全部一致时合并；不同协议或端点保留为独立变体。稳定 slug 和旧 slug 兼容由 `lib/presets/index.ts` 处理，不再把 legacy 与生成预设重复拼接。
+- 分类映射包含 official、cn_official、cloud_provider、aggregator、third_party/relay、other，UI 按分类分组。
+- Logo：厂商图标取自 cc-switch `src/icons/extracted/`（99 个，按 `index.ts` 逻辑键映射并保留实际扩展名存于 `public/logos/`），预设带 `logo` 字段，无物理资源的厂商前端用首字母占位图。
 - 预设的额外配置（claude 系默认模型 env、codex 系 config.toml 等）存入预设 `extra` 字段，仅保存展示，网关暂不消费。
 
-下表为 13 家主流厂商（含余额端点信息，位于 `lib/presets/legacy.ts`）：
+下表保留 13 家主流厂商的接入说明；运行时预设统一来自生成目录，本地推荐、余额与 Coding Plan 行为按稳定 slug 覆盖：
 
 | 服务商 | 协议 | Base URL | 模型列表接口 | 余额查询接口 | 备注 |
 |--------|------|----------|--------------|--------------|------|
@@ -266,7 +265,10 @@ models (
   alias         TEXT,                    -- 可选别名（全局唯一）
   display_name  TEXT,
   enabled       INTEGER NOT NULL DEFAULT 1,
-  input_price   REAL, output_price REAL, -- 每百万 token 单价（自定义，用于成本估算）
+  input_price REAL, output_price REAL,    -- 每百万 token 单价
+  cache_read_price REAL, cache_write_price REAL,
+  pricing_source TEXT,                    -- manual / cc-switch-provider / cc-switch-global
+  pricing_source_ref TEXT, pricing_synced_at INTEGER,
   context_window INTEGER,
   synced        INTEGER NOT NULL DEFAULT 0,  -- 1=同步来的, 0=手动加的
   UNIQUE(provider_id, model_id)
@@ -296,6 +298,9 @@ request_logs (
   provider_id  TEXT, model_id TEXT, alias TEXT,
   prompt_id    TEXT,
   token_id     TEXT,                     -- 本次调用使用的网关令牌
+  client_key TEXT, client_name TEXT,     -- 请求客户端稳定键与写入时名称快照
+  entry_protocol TEXT,                   -- 内部协议兼容字段，不作为可见“入口”
+  source TEXT,                           -- 清理后的原始 User-Agent
   status       INTEGER,                  -- HTTP 状态
   latency_ms   INTEGER,
   prompt_tokens     INTEGER,
@@ -389,7 +394,7 @@ Claude Code 接入示例：`ANTHROPIC_BASE_URL=http://localhost:3000 ANTHROPIC_A
 | GET/POST | `/api/admin/tokens` | 令牌列表（含窗口已用）/ 创建（明文仅创建时返回一次） |
 | PATCH/DELETE | `/api/admin/tokens/:id` | 令牌修改（启停/过期/限额）/ 删除 |
 | GET | `/api/admin/tokens/:id/key`、`/usage` | 查看令牌明文 / 窗口内已用金额 |
-| GET | `/api/admin/logs?provider=&model=&from=&to=&status=` | 日志查询（分页） |
+| GET | `/api/admin/logs?provider=&model=&token=&client=&from=&to=&status=` | 日志查询（分页；入口按请求客户端筛选） |
 | POST | `/api/admin/logs/purge` | 手动清理过期日志 |
 | GET | `/api/admin/stats?granularity=day` | 用量/成本聚合 |
 | GET/PUT | `/api/admin/settings` | 日志保留天数、余额刷新间隔、http provider 开关 |
@@ -413,7 +418,7 @@ interface BalanceResult {
 }
 ```
 
-- 内置已知金额端点（DeepSeek `/user/balance`（origin 级，注意不在 /v1 下）、Kimi `/users/me/balance`、SiliconFlow `/user/info`、OpenRouter `/auth/key` …），按 §3.1 表实现，逐一以官方文档校准。自定义 endpoint 支持完整 URL 或 `//path`（origin 级）覆盖。
+- CC Switch 内置金额端点按 Base URL 识别：DeepSeek、StepFun、SiliconFlow 中国/国际站、OpenRouter credits、Novita AI；因此同一厂商不同协议变体都可查询。Kimi 余额为本项目原有扩展。自定义 endpoint 支持完整 URL 或 `//path`（origin 级）覆盖。
 - `balance_config` 字段允许用户自定义：`{ endpoint, method, headers, json_path, unit }`，应对未内置/接口变更的服务商。
 - **Coding Plan 套餐**（移植 cc-switch coding_plan.rs）：按预设 `codingPlan` 标记或 base_url 模式检测（kimi `api.kimi.com/coding`、智谱 `bigmodel.cn`/`api.z.ai`、MiniMax、ZenMux、火山）。返回配额档位（5 小时窗/周限额 + 重置时间），UI 用进度条展示。智谱 Authorization 不加 Bearer 前缀；MiniMax 返回剩余百分比需反转；resetTime 秒/毫秒自适应。火山方舟套餐需控制面 AK/SK 签名（与推理 Key 两套凭据），暂不支持并明确提示。
 - 不支持的服务商：返回 `supported: false`，UI 显示"前往控制台"链接。
@@ -428,7 +433,7 @@ interface BalanceResult {
 3. **路由别名**：别名 → 目标模型列表（上下移动排序实现 failover 顺序）。
 4. **提示词**：列表 + 编辑器 + `{{变量}}` 检测 + 实时渲染预览。
 5. **令牌**：多网关令牌管理（创建返回明文一次、查看/复制明文、启停、过期时间、限额与窗口已用进度条）。
-6. **日志**：筛选（服务商/状态/时间/错误摘要）+ 表格（时间/模型/别名/tokens/耗时/状态），可展开看错误详情，分页。
+6. **日志**：筛选（令牌/服务商/请求客户端/状态/时间/错误摘要）+ 高密度表格；“入口”是 Codex、Claude Code、Kimi Code 等请求客户端，“来源”是清理后的真实 User-Agent。`entry_protocol` 仅供内部协议兼容，界面不显示 Chat/Responses/Messages 入口标签。
 7. **设置**：令牌页入口、导入导出、日志保留天数、余额刷新间隔、http provider 开关。
 
 ---

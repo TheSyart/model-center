@@ -6,10 +6,10 @@
 
 - **统一网关**：`POST /v1/chat/completions`（OpenAI）、`POST /v1/messages`（Anthropic，Claude Code 直连）、`POST /v1/responses`（OpenAI Responses，Codex）、`GET /v1/models`。入口协议与服务商原生协议一致时原生透传，否则经 IR（OpenAI Chat 中间格式）双向转换，支持流式 SSE、工具调用、图片输入。
 - **模型路由**：`model` 支持三种写法——路由别名（如 `best-coding`，支持按序 failover）、`provider-slug/model`（显式）、裸模型名（全局匹配，priority 决胜）。
-- **服务商管理**：完全同步 cc-switch 预设（170+ 条，含中转/聚合），api_key AES-256-GCM 加密入库，连通性测速，模型列表一键同步，余额查询（内置解析 + 自定义 json_path）与 Coding Plan 套餐配额查询（Kimi/智谱/MiniMax/ZenMux 进度条展示）。
+- **服务商管理**：固定 SHA 同步 CC Switch 的 10 类内置预设（当前 540 条源记录归一为 255 个端点变体）、192 条四档模型定价与 99 个图标；api_key AES-256-GCM 加密入库，支持连通性测速、模型列表同步、余额与 Coding Plan 查询。维护方式见 [`docs/cc-switch-sync.md`](docs/cc-switch-sync.md)。
 - **预设提示词**：`{{变量}}` 占位，网关请求带 `prompt_id`/`prompt_name` + `prompt_vars` 注入为 system message。
 - **多令牌**：网关令牌管理（创建/启停/过期时间/花费限额与窗口），按令牌追踪用量。
-- **日志与统计**：请求日志（筛选/分页/错误摘要）、用量与估算成本看板、日志保留策略。
+- **日志与统计**：按 Codex、Claude Code、Kimi Code 等请求客户端识别入口，保留清理后的真实 User-Agent 来源；提供四档 Token 用量、估算成本看板和日志保留策略。
 - **导入导出**：一键 JSON 导出（api_key 默认脱敏）/导入（冲突跳过）。
 - **安全**：管理后台无认证（**仅限本机/受信网络**）；网关多令牌（sha256 存储）；base_url 强制 https（localhost 例外）。
 

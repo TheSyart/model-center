@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "sync:cc-switch": "node --experimental-strip-types scripts/sync-cc-switch.ts",
     "build": "next build",
     "start": "next start"
   },

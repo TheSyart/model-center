@@ -4,7 +4,7 @@ import { GatewayError, anthropicErrorResponse } from '@/lib/gateway/errors';
 import { extractPromptExtension } from '@/lib/gateway/extensions';
 import { runGatewayPipeline } from '@/lib/gateway/pipeline';
 import { anthropicRequestToIR } from '@/lib/protocols/anthropic';
-import { detectRequestSource } from '@/lib/services/usage-metrics';
+import { normalizeRequestSource } from '@/lib/services/usage-metrics';
 
 /**
  * POST /api/v1/messages（对外 /v1/messages）：Anthropic 兼容出口，供 Claude Code 等 agent 直连。
@@ -48,7 +48,7 @@ export async function POST(req: NextRequest) {
       anthropicVersion: req.headers.get('anthropic-version'),
       prompt,
       token: auth.token,
-      source: detectRequestSource(req.headers.get('user-agent')),
+      source: normalizeRequestSource(req.headers.get('user-agent')),
     });
   } catch (e) {
     if (e instanceof GatewayError) return anthropicErrorResponse(e.status, e.message);

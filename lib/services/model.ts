@@ -3,6 +3,7 @@ import { asc, eq } from 'drizzle-orm';
 import { db, schema } from '@/lib/db';
 import type { models } from '@/lib/db/schema';
 import type { ProviderRow } from './provider';
+import { CC_SWITCH_PRICING_SOURCE_REF, lookupBundledPricing } from './model-pricing';
 
 export type ModelRow = typeof models.$inferSelect;
 
@@ -16,6 +17,11 @@ export function serializeModel(m: ModelRow) {
     enabled: m.enabled === 1,
     input_price: m.inputPrice,
     output_price: m.outputPrice,
+    cache_read_price: m.cacheReadPrice,
+    cache_write_price: m.cacheWritePrice,
+    pricing_source: m.pricingSource,
+    pricing_source_ref: m.pricingSourceRef,
+    pricing_synced_at: m.pricingSyncedAt,
     context_window: m.contextWindow,
     synced: m.synced === 1,
   };
@@ -50,12 +56,23 @@ export interface ModelInput {
   enabled?: boolean;
   input_price?: number | null;
   output_price?: number | null;
+  cache_read_price?: number | null;
+  cache_write_price?: number | null;
   context_window?: number | null;
 }
 
 /** 创建手动模型（synced=0）；冲突返回 'conflict'（同 provider 同名）或 'alias_conflict'。 */
 export function createModel(input: ModelInput): ModelRow | 'conflict' | 'alias_conflict' {
   if (input.alias && aliasTaken(input.alias)) return 'alias_conflict';
+  const provider = db.select().from(schema.providers).where(eq(schema.providers.id, input.provider_id)).get();
+  const hasManualPricing =
+    input.input_price !== undefined ||
+    input.output_price !== undefined ||
+    input.cache_read_price !== undefined ||
+    input.cache_write_price !== undefined;
+  const bundled = !hasManualPricing && provider
+    ? lookupBundledPricing(provider.baseUrl, provider.protocol, input.model_id)
+    : null;
   const row: ModelRow = {
     id: crypto.randomUUID(),
     providerId: input.provider_id,
@@ -63,8 +80,13 @@ export function createModel(input: ModelInput): ModelRow | 'conflict' | 'alias_c
     alias: input.alias || null,
     displayName: input.display_name || null,
     enabled: input.enabled === false ? 0 : 1,
-    inputPrice: input.input_price ?? null,
-    outputPrice: input.output_price ?? null,
+    inputPrice: hasManualPricing ? (input.input_price ?? null) : (bundled?.input ?? null),
+    outputPrice: hasManualPricing ? (input.output_price ?? null) : (bundled?.output ?? null),
+    cacheReadPrice: hasManualPricing ? (input.cache_read_price ?? null) : (bundled?.cacheRead ?? null),
+    cacheWritePrice: hasManualPricing ? (input.cache_write_price ?? null) : (bundled?.cacheWrite ?? null),
+    pricingSource: hasManualPricing ? 'manual' : (bundled?.source ?? null),
+    pricingSourceRef: bundled ? CC_SWITCH_PRICING_SOURCE_REF : null,
+    pricingSyncedAt: bundled ? Date.now() : null,
     contextWindow: input.context_window ?? null,
     synced: 0,
   };
@@ -91,8 +113,41 @@ export function updateModel(
   if (input.enabled !== undefined) updates.enabled = input.enabled ? 1 : 0;
   if (input.input_price !== undefined) updates.inputPrice = input.input_price;
   if (input.output_price !== undefined) updates.outputPrice = input.output_price;
+  if (input.cache_read_price !== undefined) updates.cacheReadPrice = input.cache_read_price;
+  if (input.cache_write_price !== undefined) updates.cacheWritePrice = input.cache_write_price;
+  if (
+    input.input_price !== undefined ||
+    input.output_price !== undefined ||
+    input.cache_read_price !== undefined ||
+    input.cache_write_price !== undefined
+  ) {
+    updates.pricingSource = 'manual';
+    updates.pricingSourceRef = null;
+    updates.pricingSyncedAt = null;
+  }
   if (input.context_window !== undefined) updates.contextWindow = input.context_window;
   db.update(schema.models).set(updates).where(eq(schema.models.id, id)).run();
+  return getModelById(id)!;
+}
+
+export function restoreModelPricing(id: string): ModelRow | null {
+  const existing = getModelById(id);
+  if (!existing) return null;
+  const provider = db.select().from(schema.providers).where(eq(schema.providers.id, existing.providerId)).get();
+  if (!provider) return null;
+  const pricing = lookupBundledPricing(provider.baseUrl, provider.protocol, existing.modelId);
+  db.update(schema.models)
+    .set({
+      inputPrice: pricing?.input ?? null,
+      outputPrice: pricing?.output ?? null,
+      cacheReadPrice: pricing?.cacheRead ?? null,
+      cacheWritePrice: pricing?.cacheWrite ?? null,
+      pricingSource: pricing?.source ?? null,
+      pricingSourceRef: pricing ? CC_SWITCH_PRICING_SOURCE_REF : null,
+      pricingSyncedAt: pricing ? Date.now() : null,
+    })
+    .where(eq(schema.models.id, id))
+    .run();
   return getModelById(id)!;
 }
 
@@ -197,8 +252,18 @@ export async function syncModels(provider: ProviderRow, apiKey: string): Promise
   let added = 0;
   for (const modelId of upstreamIds) {
     if (existingIds.has(modelId)) continue;
+    const pricing = lookupBundledPricing(provider.baseUrl, provider.protocol, modelId);
     db.insert(schema.models)
-      .values({ id: crypto.randomUUID(), providerId: provider.id, modelId, enabled: 1, synced: 1 })
+      .values({
+        id: crypto.randomUUID(), providerId: provider.id, modelId, enabled: 1, synced: 1,
+        inputPrice: pricing?.input ?? null,
+        outputPrice: pricing?.output ?? null,
+        cacheReadPrice: pricing?.cacheRead ?? null,
+        cacheWritePrice: pricing?.cacheWrite ?? null,
+        pricingSource: pricing?.source ?? null,
+        pricingSourceRef: pricing ? CC_SWITCH_PRICING_SOURCE_REF : null,
+        pricingSyncedAt: pricing ? Date.now() : null,
+      })
       .run();
     added++;
   }

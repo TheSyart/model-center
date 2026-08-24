@@ -59,11 +59,15 @@ export interface UsageTrendPoint {
 }
 
 const HOUR = 3_600_000;
-const DAY = 86_400_000;
 
 function localDay(timestamp: number): string {
   const date = new Date(timestamp);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function offsetLocalDay(timestamp: number, offsetDays: number): string {
+  const date = new Date(timestamp);
+  return localDay(new Date(date.getFullYear(), date.getMonth(), date.getDate() + offsetDays).getTime());
 }
 
 function localHour(timestamp: number): string {
@@ -163,14 +167,13 @@ function serializeAggregate(row: AggregateRow | undefined): UsageAggregate {
 
 function fillTrend(rows: UsageTrendPoint[], filters: UsageFilters): UsageTrendPoint[] {
   const map = new Map(rows.map((row) => [row.start, row]));
-  const step = filters.bucket === 'hour' ? HOUR : DAY;
   const startDate = new Date(filters.from);
   const cursor =
     filters.bucket === 'hour'
       ? new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate(), startDate.getHours()).getTime()
       : new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate()).getTime();
   const points: UsageTrendPoint[] = [];
-  for (let timestamp = cursor; timestamp < filters.to; timestamp += step) {
+  const appendPoint = (timestamp: number) => {
     const key = filters.bucket === 'hour' ? localHour(timestamp) : localDay(timestamp);
     points.push(
       map.get(key) ?? {
@@ -184,6 +187,15 @@ function fillTrend(rows: UsageTrendPoint[], filters: UsageFilters): UsageTrendPo
         cost: 0,
       },
     );
+  };
+  if (filters.bucket === 'hour') {
+    for (let timestamp = cursor; timestamp < filters.to; timestamp += HOUR) appendPoint(timestamp);
+  } else {
+    const date = new Date(cursor);
+    while (date.getTime() < filters.to) {
+      appendPoint(date.getTime());
+      date.setDate(date.getDate() + 1);
+    }
   }
   return points;
 }
@@ -259,7 +271,7 @@ export function getUsage(filters: UsageFilters) {
   const serializeRows = <T extends AggregateRow>(rows: T[]) => rows.map((row) => ({ ...row, ...serializeAggregate(row) }));
 
   const end = Date.now();
-  const activityStart = localDay(end - 364 * DAY);
+  const activityStart = offsetLocalDay(end, -364);
   const activityEnd = localDay(end);
   const activityWhere = dailyWhere(filters, activityStart, activityEnd);
   const activityRows = db.all<ActivityDay>(sql`

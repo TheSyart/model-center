@@ -11,6 +11,8 @@ const REQUEST_LOG_COLUMNS: Array<[string, string]> = [
   ['cache_metrics_observed', 'INTEGER'],
   ['first_token_ms', 'INTEGER'],
   ['duration_ms', 'INTEGER'],
+  ['client_key', 'TEXT'],
+  ['client_name', 'TEXT'],
 ];
 
 /**
@@ -30,6 +32,7 @@ export function migrateUsageSchema(sqlite: Database.Database): void {
       CREATE INDEX IF NOT EXISTS idx_logs_provider_ts ON request_logs(provider_id, ts);
       CREATE INDEX IF NOT EXISTS idx_logs_model_ts ON request_logs(model_id, ts);
       CREATE INDEX IF NOT EXISTS idx_logs_entry_ts ON request_logs(entry_protocol, ts);
+      CREATE INDEX IF NOT EXISTS idx_logs_client_ts ON request_logs(client_key, ts);
 
       CREATE TABLE IF NOT EXISTS usage_daily (
         id TEXT PRIMARY KEY,
@@ -130,6 +133,17 @@ export function migrateUsageSchema(sqlite: Database.Database): void {
           COALESCE(l.model_id, ''), COALESCE(l.entry_protocol, '');
       `);
       sqlite.prepare("INSERT INTO schema_migrations (name, applied_at) VALUES ('usage_rollup_v1', ?)").run(Date.now());
+    }
+
+    // CC Switch 四档计价上线后，按产品决策只清空请求/用量历史一次；配置与余额快照不受影响。
+    const reset = sqlite
+      .prepare("SELECT 1 AS ok FROM schema_migrations WHERE name = 'cc_switch_usage_history_reset_v1'")
+      .get() as { ok: number } | undefined;
+    if (!reset) {
+      sqlite.exec('DELETE FROM request_logs; DELETE FROM usage_daily;');
+      sqlite
+        .prepare("INSERT INTO schema_migrations (name, applied_at) VALUES ('cc_switch_usage_history_reset_v1', ?)")
+        .run(Date.now());
     }
   });
   transaction();

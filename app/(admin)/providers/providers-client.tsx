@@ -295,6 +295,7 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
                 <div className="flex items-center gap-2">
                   {getPreset(form.slug)?.logo && <img src={getPreset(form.slug)!.logo} alt="" className="h-6 w-6 rounded object-contain" />}
                   <select
+                    aria-label="服务商预设"
                     defaultValue=""
                     onChange={(e) => onSelectPreset(e.target.value)}
                     className={`w-full ${inputCls}`}
@@ -305,7 +306,7 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
                     {presetsByCategory().map((g) => (
                       <optgroup key={g.category} label={g.label}>
                         {g.presets.map((p) => (
-                          <option key={p.slug} value={p.slug}>
+                          <option key={p.slug} value={p.slug} disabled={p.supported === false}>
                             {presetDisplayName(p)}
                           </option>
                         ))}

@@ -2,7 +2,8 @@ import crypto from 'node:crypto';
 import { and, eq, sql } from 'drizzle-orm';
 import { db, schema } from '@/lib/db';
 import { maybePurgeExpiredLogs } from '@/lib/services/log';
-import { effectiveTokenTotal, type UsageInfo } from '@/lib/services/usage-metrics';
+import { detectRequestClient, effectiveTokenTotal, normalizeRequestSource, type UsageInfo } from '@/lib/services/usage-metrics';
+import { calculateRequestCost } from '@/lib/services/pricing';
 
 export type { UsageInfo } from '@/lib/services/usage-metrics';
 
@@ -36,8 +37,16 @@ function estimateCost(providerId: string | null, modelId: string | null, usage: 
     .from(schema.models)
     .where(and(eq(schema.models.providerId, providerId), eq(schema.models.modelId, modelId)))
     .get();
-  if (!m || (m.inputPrice == null && m.outputPrice == null)) return null;
-  return ((usage.prompt_tokens ?? 0) * (m.inputPrice ?? 0)) / 1e6 + ((usage.completion_tokens ?? 0) * (m.outputPrice ?? 0)) / 1e6;
+  if (!m) return null;
+  return calculateRequestCost({
+    usage,
+    pricing: {
+      input: m.inputPrice,
+      output: m.outputPrice,
+      cacheRead: m.cacheReadPrice,
+      cacheWrite: m.cacheWritePrice,
+    },
+  });
 }
 
 /**
@@ -55,6 +64,8 @@ export function writeRequestLog(f: RequestLogFields): void {
     const day = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
     const observed = f.usage?.cache_metrics_observed === true;
     const durationMs = f.durationMs ?? f.latencyMs;
+    const source = normalizeRequestSource(f.source);
+    const client = detectRequestClient(source);
 
     db.transaction((tx) => {
       tx.insert(schema.requestLogs)
@@ -69,7 +80,9 @@ export function writeRequestLog(f: RequestLogFields): void {
           tokenName: f.tokenName ?? null,
           tokenPrefix: f.tokenPrefix ?? null,
           entryProtocol: f.entryProtocol,
-          source: f.source ?? 'unknown',
+          source,
+          clientKey: client.key,
+          clientName: client.name,
           status: f.status,
           latencyMs: f.latencyMs,
           firstTokenMs: f.firstTokenMs ?? null,

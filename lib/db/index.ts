@@ -6,6 +6,9 @@ import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { encrypt } from '@/lib/crypto';
 import * as schema from './schema';
 import { migrateUsageSchema } from './usage-migration';
+import { migrateModelPricingSchema } from './pricing-migration';
+import { lookupBundledPricing } from '@/lib/services/model-pricing';
+import ccSwitchManifest from '@/lib/presets/cc-switch-manifest.json';
 
 // 数据目录：默认 <cwd>/data，可用 MODEL_CENTER_DB_DIR 覆盖（测试/多实例隔离用）
 const DB_DIR = process.env.MODEL_CENTER_DB_DIR || path.join(process.cwd(), 'data');
@@ -35,6 +38,11 @@ CREATE TABLE IF NOT EXISTS models (
   enabled       INTEGER NOT NULL DEFAULT 1,
   input_price   REAL,
   output_price  REAL,
+  cache_read_price REAL,
+  cache_write_price REAL,
+  pricing_source TEXT,
+  pricing_source_ref TEXT,
+  pricing_synced_at INTEGER,
   context_window INTEGER,
   synced        INTEGER NOT NULL DEFAULT 0
 );
@@ -67,7 +75,9 @@ CREATE TABLE IF NOT EXISTS request_logs (
   total_tokens      INTEGER,
   cost         REAL,
   error        TEXT,
-  stream       INTEGER
+  stream       INTEGER,
+  client_key   TEXT,
+  client_name  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_logs_ts ON request_logs(ts);
 CREATE TABLE IF NOT EXISTS balance_snapshots (
@@ -132,6 +142,7 @@ function migrate(sqlite: Database.Database) {
   }
 
   migrateUsageSchema(sqlite);
+  migrateModelPricingSchema(sqlite, lookupBundledPricing, ccSwitchManifest.commit);
 }
 
 function createClient() {

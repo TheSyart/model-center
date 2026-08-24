@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import Database from 'better-sqlite3';
 
-// @ts-expect-error TS5097: runtime import intentionally includes the TypeScript extension.
 import { migrateUsageSchema } from '../lib/db/usage-migration.ts';
 
 function createLegacyDatabase() {
@@ -38,10 +37,9 @@ function createLegacyDatabase() {
   return sqlite;
 }
 
-test('usage migration is idempotent and backfills legacy logs without inventing cache metrics', () => {
+test('usage migration clears historical logs once and keeps later logs on repeated startup', () => {
   const sqlite = createLegacyDatabase();
 
-  migrateUsageSchema(sqlite);
   migrateUsageSchema(sqlite);
 
   const columns = sqlite.prepare('PRAGMA table_info(request_logs)').all() as Array<{ name: string }>;
@@ -56,18 +54,23 @@ test('usage migration is idempotent and backfills legacy logs without inventing 
     'cache_metrics_observed',
     'first_token_ms',
     'duration_ms',
+    'client_key',
+    'client_name',
   ]) {
     assert.equal(columns.some((column) => column.name === name), true, `missing ${name}`);
   }
 
-  const rows = sqlite.prepare('SELECT * FROM usage_daily').all() as Array<Record<string, unknown>>;
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].requests, 1);
-  assert.equal(rows[0].success, 1);
-  assert.equal(rows[0].effective_tokens, 30);
-  assert.equal(rows[0].cache_observed_requests, 0);
-  assert.equal(rows[0].token_name, '开发令牌');
-  assert.equal(rows[0].provider_slug, 'deepseek');
+  assert.equal((sqlite.prepare('SELECT COUNT(*) AS n FROM request_logs').get() as { n: number }).n, 0);
+  assert.equal((sqlite.prepare('SELECT COUNT(*) AS n FROM usage_daily').get() as { n: number }).n, 0);
+
+  sqlite.prepare('INSERT INTO request_logs (id, ts) VALUES (?, ?)').run('new-log', Date.now());
+  migrateUsageSchema(sqlite);
+  assert.equal((sqlite.prepare('SELECT COUNT(*) AS n FROM request_logs').get() as { n: number }).n, 1);
+
+  const marker = sqlite
+    .prepare("SELECT 1 AS ok FROM schema_migrations WHERE name = 'cc_switch_usage_history_reset_v1'")
+    .get() as { ok: number } | undefined;
+  assert.equal(marker?.ok, 1);
 
   const indexes = sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as Array<{ name: string }>;
   for (const name of ['idx_logs_token_ts', 'idx_logs_provider_ts', 'idx_logs_model_ts', 'idx_logs_entry_ts']) {

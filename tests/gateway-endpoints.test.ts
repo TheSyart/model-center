@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 // Node 22 strip-types 直接执行测试时要求显式 .ts 扩展名。
-// @ts-expect-error TS5097: runtime import intentionally includes the TypeScript extension.
 import { buildGatewayEndpoints } from '../lib/gateway-endpoints.ts';
 
 test('builds every supported public endpoint from the current origin', () => {

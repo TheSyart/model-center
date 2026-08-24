@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-// @ts-expect-error TS5097: runtime import intentionally includes the TypeScript extension.
 import { observeSSEStream } from '../lib/protocols/sse.ts';
 
 const encoder = new TextEncoder();

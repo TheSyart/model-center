@@ -2,8 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 // Node 22 strip-types 直接执行测试时要求显式 .ts 扩展名。
-// @ts-expect-error TS5097: runtime import intentionally includes the TypeScript extension.
-import { cacheHitRate, detectRequestSource, effectiveTokenTotal, fillDailyActivity, normalizeAnthropicUsage, normalizeGeminiUsage, normalizeOpenAIUsage, normalizeResponsesUsage, normalizeUsageRangeForBucket, toPublicUsage, validateUsageRange } from '../lib/services/usage-metrics.ts';
+import { cacheHitRate, effectiveTokenTotal, fillDailyActivity, normalizeAnthropicUsage, normalizeGeminiUsage, normalizeOpenAIUsage, normalizeRequestSource, normalizeResponsesUsage, normalizeUsageRangeForBucket, toPublicUsage, validateUsageRange } from '../lib/services/usage-metrics.ts';
 
 test('normalizes OpenAI cached input without double counting prompt tokens', () => {
   const usage = normalizeOpenAIUsage({
@@ -145,12 +144,28 @@ test('normalizes day buckets to honest local calendar-day boundaries', () => {
   });
 });
 
-test('classifies common gateway clients from their user agent', () => {
-  assert.equal(detectRequestSource('claude-code/1.2.3'), 'claude_code');
-  assert.equal(detectRequestSource('codex_cli_rs/0.80.0'), 'codex');
-  assert.equal(detectRequestSource('CCSwitch/3.9'), 'cc_switch');
-  assert.equal(detectRequestSource('OpenAI/Python 1.90'), 'openai_sdk');
-  assert.equal(detectRequestSource(null), 'unknown');
+test('stores the sanitized original user agent as the request source', () => {
+  assert.equal(normalizeRequestSource('  kimi-code-cli/0.34.0  '), 'kimi-code-cli/0.34.0');
+  assert.equal(normalizeRequestSource('claude-code/1.2.3'), 'claude-code/1.2.3');
+  assert.equal(normalizeRequestSource('client/1.0\n\u0000 macOS'), 'client/1.0 macOS');
+  assert.equal(normalizeRequestSource('client/1.0\u0085macOS'), 'client/1.0 macOS');
+  assert.equal(normalizeRequestSource('x'.repeat(300)).length, 256);
+  assert.equal(normalizeRequestSource(null), 'unknown');
+});
+
+test('fills every civil heatmap day across a daylight-saving transition', () => {
+  const previousTimezone = process.env.TZ;
+  process.env.TZ = 'America/Los_Angeles';
+  try {
+    const end = new Date(2024, 2, 11, 23, 59, 59).getTime();
+    assert.deepEqual(
+      fillDailyActivity([], end, 4).map((item) => item.day),
+      ['2024-03-08', '2024-03-09', '2024-03-10', '2024-03-11'],
+    );
+  } finally {
+    if (previousTimezone == null) delete process.env.TZ;
+    else process.env.TZ = previousTimezone;
+  }
 });
 
 test('fills missing heatmap dates with real zero-valued days', () => {

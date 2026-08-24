@@ -3,6 +3,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { EmptyState, SkeletonRows } from '@/components/empty-state';
 import { btn, inputCls, tableHeadCls, tableWrapCls } from '@/components/ui';
+import { REQUEST_CLIENT_OPTIONS } from '@/lib/services/usage-metrics';
 
 interface Provider { id: string; name: string; slug: string; }
 interface Token { id: string; name: string; prefix: string; }
@@ -27,6 +28,8 @@ interface LogRow {
   token_id: string | null;
   token_name: string | null;
   token_prefix: string | null;
+  client_key: string | null;
+  client_name: string | null;
   entry_protocol: string | null;
   source: string | null;
   uncached_input_tokens: number | null;
@@ -38,8 +41,6 @@ interface LogRow {
 }
 
 const DAY = 86_400_000;
-const ENTRY_LABELS: Record<string, string> = { openai: 'Chat', responses: 'Responses', anthropic: 'Messages' };
-const SOURCE_LABELS: Record<string, string> = { claude_code: 'Claude Code', codex: 'Codex', cc_switch: 'CC Switch', openai_sdk: 'OpenAI SDK', unknown: '未知' };
 
 function rangeFrom(range: string): number | undefined {
   const now = new Date();
@@ -74,7 +75,7 @@ export default function LogsClient() {
   const [loadError, setLoadError] = useState('');
   const [page, setPage] = useState(1);
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [filters, setFilters] = useState({ provider: '', token: '', entry: '', status: '', range: 'today', q: '' });
+  const [filters, setFilters] = useState({ provider: '', token: '', client: '', status: '', range: 'today', q: '' });
   const logRequestId = useRef(0);
   const pageSize = 50;
 
@@ -95,7 +96,7 @@ export default function LogsClient() {
     const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
     if (filters.provider) params.set('provider', filters.provider);
     if (filters.token) params.set('token', filters.token);
-    if (filters.entry) params.set('entry', filters.entry);
+    if (filters.client) params.set('client', filters.client);
     if (filters.status) params.set('status', filters.status);
     if (filters.q) params.set('q', filters.q);
     const from = rangeFrom(filters.range);
@@ -129,7 +130,7 @@ export default function LogsClient() {
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_auto_auto_auto_1.1fr]">
           <select aria-label="网关令牌" value={filters.token} onChange={(event) => applyFilters({ token: event.target.value })} className={inputCls}><option value="">全部令牌</option>{tokens.map((token) => <option key={token.id} value={token.id}>{token.name} · {token.prefix}</option>)}</select>
           <select aria-label="服务商" value={filters.provider} onChange={(event) => applyFilters({ provider: event.target.value })} className={inputCls}><option value="">全部服务商</option>{providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select>
-          <select aria-label="入口协议" value={filters.entry} onChange={(event) => applyFilters({ entry: event.target.value })} className={inputCls}><option value="">全部入口</option><option value="openai">Chat</option><option value="responses">Responses</option><option value="anthropic">Messages</option></select>
+          <select aria-label="请求客户端" value={filters.client} onChange={(event) => applyFilters({ client: event.target.value })} className={inputCls}><option value="">全部入口</option>{REQUEST_CLIENT_OPTIONS.map((client) => <option key={client.key} value={client.key}>{client.name}</option>)}</select>
           <select aria-label="请求状态" value={filters.status} onChange={(event) => applyFilters({ status: event.target.value })} className={inputCls}><option value="">全部状态</option><option value="2xx">成功</option><option value="error">失败</option></select>
           <select aria-label="时间范围" value={filters.range} onChange={(event) => applyFilters({ range: event.target.value })} className={inputCls}><option value="today">当天</option><option value="7d">近 7 天</option><option value="30d">近 30 天</option><option value="">全部时间</option></select>
           <input aria-label="搜索错误摘要" value={filters.q} onChange={(event) => applyFilters({ q: event.target.value })} placeholder="搜索错误摘要…" className={inputCls} />
@@ -151,16 +152,16 @@ export default function LogsClient() {
                   <tr className={`${log.error && !success ? 'bg-destructive-soft/25' : ''} hover:bg-muted/35`}>
                     <td className="px-4 py-3 whitespace-nowrap"><button type="button" aria-expanded={expanded === log.id} onClick={() => setExpanded(expanded === log.id ? null : log.id)} className="text-left text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">{new Date(log.ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })}</button></td>
                     <td className="px-4 py-3"><div className="font-medium">{log.token_name ?? '已删除令牌'}</div><div className="mt-0.5 font-mono text-[11px] text-subtle-foreground">{log.token_prefix ?? '—'}</div></td>
-                    <td className="px-4 py-3"><span className="rounded border border-border bg-muted px-2 py-1 text-[11px] text-muted-foreground">{ENTRY_LABELS[log.entry_protocol ?? ''] ?? log.entry_protocol ?? '旧记录'}</span></td>
+                    <td className="px-4 py-3"><span className="rounded border border-border bg-muted px-2 py-1 text-[11px] text-muted-foreground">{log.client_name ?? '未知客户端'}</span></td>
                     <td className="px-4 py-3"><div>{log.provider_name ?? log.provider_slug ?? '—'}</div><div className="mt-0.5 max-w-64 truncate font-mono text-[11px] text-muted-foreground" title={log.model_id ?? ''}>{log.model_id ?? '—'}</div></td>
                     <td className="px-4 py-3 text-right tabular-nums"><div>{fmtTokens(input)}</div><div className="mt-0.5 text-[10px] text-subtle-foreground">{log.cache_metrics_observed === 1 ? `读 ${fmtTokens(log.cache_read_tokens)} · 写 ${fmtTokens(log.cache_write_tokens)}` : '缓存未知'}</div></td>
                     <td className="px-4 py-3 text-right tabular-nums">{fmtTokens(log.completion_tokens)}</td>
                     <td className="px-4 py-3 text-right tabular-nums">{fmtCost(log.cost)}</td>
                     <td className="px-4 py-3 text-right tabular-nums"><div>{fmtDuration(log.duration_ms ?? log.latency_ms)}</div><div className="mt-0.5 text-[10px] text-subtle-foreground">首字 {fmtDuration(log.first_token_ms)}</div></td>
                     <td className="px-4 py-3"><span className={`rounded-full px-2 py-0.5 text-xs ${success ? 'bg-success-soft text-success' : 'bg-destructive-soft text-destructive'}`}>{log.status ?? '—'}</span></td>
-                    <td className="px-4 py-3 text-xs text-muted-foreground">{SOURCE_LABELS[log.source ?? 'unknown'] ?? log.source ?? '未知'}</td>
+                    <td className="px-4 py-3"><div className="max-w-56 truncate font-mono text-[11px] text-muted-foreground" title={log.source ?? 'unknown'}>{log.source ?? 'unknown'}</div></td>
                   </tr>
-                  {expanded === log.id && <tr><td colSpan={10} className="bg-muted/45 px-4 py-4"><div className="grid gap-3 text-xs sm:grid-cols-2 lg:grid-cols-4"><div><span className="text-subtle-foreground">路由</span><div className="mt-1 font-mono">{[log.provider_slug, log.model_id].filter(Boolean).join('/') || '—'}</div></div><div><span className="text-subtle-foreground">请求别名 / 提示词</span><div className="mt-1 font-mono">{log.alias ?? '—'} / {log.prompt_id ?? '—'}</div></div><div><span className="text-subtle-foreground">上游响应头</span><div className="mt-1 tabular-nums">{fmtDuration(log.latency_ms)} · {log.stream === 1 ? '流式' : '非流式'}</div></div><div><span className="text-subtle-foreground">原始 Token</span><div className="mt-1 tabular-nums">{fmtTokens(log.prompt_tokens)} + {fmtTokens(log.completion_tokens)} = {fmtTokens(log.total_tokens)}</div></div></div>{log.error ? <pre className={`mt-4 whitespace-pre-wrap rounded-md border px-3 py-3 text-xs ${success ? 'border-warning/25 bg-warning-soft text-warning' : 'border-destructive/25 bg-destructive-soft text-destructive'}`}>{log.error}</pre> : <div className="mt-4 text-xs text-subtle-foreground">请求完成，无错误或 failover 备注。</div>}</td></tr>}
+                  {expanded === log.id && <tr><td colSpan={10} className="bg-muted/45 px-4 py-4"><div className="grid gap-3 text-xs sm:grid-cols-2 lg:grid-cols-4"><div><span className="text-subtle-foreground">路由</span><div className="mt-1 font-mono">{[log.provider_slug, log.model_id].filter(Boolean).join('/') || '—'}</div></div><div><span className="text-subtle-foreground">请求别名 / 提示词</span><div className="mt-1 font-mono">{log.alias ?? '—'} / {log.prompt_id ?? '—'}</div></div><div><span className="text-subtle-foreground">上游响应头</span><div className="mt-1 tabular-nums">{fmtDuration(log.latency_ms)} · {log.stream === 1 ? '流式' : '非流式'}</div></div><div><span className="text-subtle-foreground">原始 Token</span><div className="mt-1 tabular-nums">{fmtTokens(log.prompt_tokens)} + {fmtTokens(log.completion_tokens)} = {fmtTokens(log.total_tokens)}</div></div><div className="sm:col-span-2 lg:col-span-4"><span className="text-subtle-foreground">来源 User-Agent</span><div className="mt-1 break-all font-mono">{log.source ?? 'unknown'}</div></div></div>{log.error ? <pre className={`mt-4 whitespace-pre-wrap rounded-md border px-3 py-3 text-xs ${success ? 'border-warning/25 bg-warning-soft text-warning' : 'border-destructive/25 bg-destructive-soft text-destructive'}`}>{log.error}</pre> : <div className="mt-4 text-xs text-subtle-foreground">请求完成，无错误或 failover 备注。</div>}</td></tr>}
                 </Fragment>
               );
             })}

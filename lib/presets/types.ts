@@ -1,10 +1,12 @@
 /** 预设分类（cc-switch ProviderCategory 映射而来，供 UI 分组展示）。 */
-export type PresetCategory = 'official' | 'cn_official' | 'aggregator' | 'relay' | 'other';
+export type PresetCategory = 'official' | 'cn_official' | 'cloud_provider' | 'aggregator' | 'third_party' | 'relay' | 'other';
 
 export const CATEGORY_LABELS: Record<PresetCategory, string> = {
   official: '官方',
   cn_official: '国内官方',
+  cloud_provider: '云服务商',
   aggregator: '聚合平台',
+  third_party: '中转/第三方',
   relay: '中转/第三方',
   other: '其他',
 };
@@ -34,6 +36,11 @@ export interface ProviderPreset {
   recommended?: boolean;
   /** Coding Plan 套餐厂商标记（kimi/zhipu/minimax-cn/minimax-en/zenmux/volcengine），优先级高于 base_url 模式检测 */
   codingPlan?: string;
+  /** false 表示上游有该预设，但当前网关不支持其鉴权或协议。 */
+  supported?: boolean;
+  disabledReason?: string;
+  authMode?: 'api-key' | 'oauth';
+  sourceApps?: string[];
   /**
    * cc-switch 预设的额外配置（仅保存展示，网关暂不消费）：
    * env（claude 系的模型默认值等）、endpoint_candidates、api_key_field、config_toml（codex 系）。

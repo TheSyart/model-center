@@ -8,7 +8,7 @@ export interface LogFilters {
   provider?: string; // provider_id
   model?: string;
   token?: string;
-  entry?: string;
+  client?: string;
   status?: string; // '2xx' | 'error'
   stream?: string; // '1' | '0'
   from?: number; // ms 时间戳
@@ -38,6 +38,8 @@ export interface LogRow {
   token_id: string | null;
   token_name: string | null;
   token_prefix: string | null;
+  client_key: string | null;
+  client_name: string | null;
   entry_protocol: string | null;
   source: string | null;
   uncached_input_tokens: number | null;
@@ -53,7 +55,7 @@ function buildWhere(f: LogFilters) {
     (${f.provider ? sql`l.provider_id = ${f.provider}` : sql`1=1`})
     AND (${f.model ? sql`l.model_id = ${f.model}` : sql`1=1`})
     AND (${f.token ? sql`l.token_id = ${f.token}` : sql`1=1`})
-    AND (${f.entry ? sql`l.entry_protocol = ${f.entry}` : sql`1=1`})
+    AND (${f.client ? sql`l.client_key = ${f.client}` : sql`1=1`})
     AND (${f.status === '2xx' ? sql`l.status BETWEEN 200 AND 299` : f.status === 'error' ? sql`NOT (l.status BETWEEN 200 AND 299)` : sql`1=1`})
     AND (${f.stream === '1' ? sql`l.stream = 1` : f.stream === '0' ? sql`l.stream = 0` : sql`1=1`})
     AND (${f.from ? sql`l.ts >= ${f.from}` : sql`1=1`})
@@ -71,7 +73,8 @@ export function queryLogs(f: LogFilters): { logs: LogRow[]; total: number } {
       l.prompt_tokens, l.completion_tokens, l.total_tokens, l.cost, l.error, l.stream,
       l.token_id, COALESCE(l.token_name, t.name) AS token_name,
       COALESCE(l.token_prefix, t.prefix) AS token_prefix,
-      l.entry_protocol, l.source, l.uncached_input_tokens, l.cache_read_tokens,
+      l.client_key, l.client_name, l.entry_protocol, l.source,
+      l.uncached_input_tokens, l.cache_read_tokens,
       l.cache_write_tokens, l.cache_metrics_observed, l.first_token_ms, l.duration_ms
     FROM request_logs l
     LEFT JOIN providers p ON p.id = l.provider_id

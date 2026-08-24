@@ -166,13 +166,47 @@ export function normalizeUsageRangeForBucket(
   };
 }
 
-export function detectRequestSource(userAgent: string | null | undefined): string {
-  const value = (userAgent ?? '').toLowerCase();
-  if (value.includes('claude-code') || value.includes('claude_code')) return 'claude_code';
-  if (value.includes('codex')) return 'codex';
-  if (value.includes('ccswitch') || value.includes('cc-switch')) return 'cc_switch';
-  if (value.includes('openai')) return 'openai_sdk';
-  return 'unknown';
+/**
+ * 日志“来源”表示调用方原样上报的 User-Agent，而不是根据 UA 推断出的客户端类别。
+ * 清理控制字符并限制快照长度，避免不可见字符破坏高密度日志表。
+ */
+export function normalizeRequestSource(userAgent: string | null | undefined): string {
+  const value = (userAgent ?? '')
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return value ? value.slice(0, 256) : 'unknown';
+}
+
+const REQUEST_CLIENTS: Array<{ key: string; name: string; pattern: RegExp }> = [
+  { key: 'kimi-code', name: 'Kimi Code', pattern: /\bkimi[-_ ]?(?:code|cli)|kimi-code-cli/i },
+  { key: 'claude-code', name: 'Claude Code', pattern: /\bclaude[-_ ]?(?:code|cli)|anthropic-cli/i },
+  { key: 'cc-switch', name: 'CC Switch', pattern: /\bcc[-_ ]?switch\b/i },
+  { key: 'gemini-cli', name: 'Gemini CLI', pattern: /\bgemini[-_ ]?cli\b|geminicli/i },
+  { key: 'opencode', name: 'OpenCode', pattern: /\bopencode\b/i },
+  { key: 'openclaw', name: 'OpenClaw', pattern: /\bopenclaw\b/i },
+  { key: 'hermes', name: 'Hermes', pattern: /\bhermes(?:-agent)?\b/i },
+  { key: 'pi', name: 'Pi', pattern: /\bpi(?:-agent|-coding-agent)?\//i },
+  { key: 'grok-cli', name: 'Grok CLI', pattern: /\bgrok[-_ ]?(?:build|cli)\b/i },
+  { key: 'codex', name: 'Codex', pattern: /\bcodex(?:_cli_rs|-cli|\/)/i },
+  { key: 'openai-sdk', name: 'OpenAI SDK', pattern: /\bopenai-(?:node|python|go|java|dotnet)|\bopenai\//i },
+  { key: 'anthropic-sdk', name: 'Anthropic SDK', pattern: /\banthropic-(?:typescript|python|go|java)|\banthropic\//i },
+  { key: 'gemini-sdk', name: 'Gemini SDK', pattern: /\bgoogle-genai|generative-ai/i },
+  { key: 'curl', name: 'cURL', pattern: /^curl\//i },
+];
+
+/** 日志筛选器使用的稳定客户端列表；“未知客户端”始终作为兜底项保留。 */
+export const REQUEST_CLIENT_OPTIONS: ReadonlyArray<{ key: string; name: string }> = [
+  ...REQUEST_CLIENTS.map(({ key, name }) => ({ key, name })),
+  { key: 'unknown', name: '未知客户端' },
+];
+
+export function detectRequestClient(source: string | null | undefined): { key: string; name: string } {
+  const normalized = normalizeRequestSource(source);
+  for (const client of REQUEST_CLIENTS) {
+    if (client.pattern.test(normalized)) return { key: client.key, name: client.name };
+  }
+  return { key: 'unknown', name: '未知客户端' };
 }
 
 export interface ActivityDay {
@@ -189,10 +223,10 @@ function localDayKey(timestamp: number): string {
 
 export function fillDailyActivity(rows: ActivityDay[], endTimestamp: number, days = 365): ActivityDay[] {
   const end = new Date(endTimestamp);
-  const endStart = new Date(end.getFullYear(), end.getMonth(), end.getDate()).getTime();
   const byDay = new Map(rows.map((row) => [row.day, row]));
   return Array.from({ length: days }, (_, index) => {
-    const day = localDayKey(endStart - (days - 1 - index) * DAY_MS);
+    const date = new Date(end.getFullYear(), end.getMonth(), end.getDate() - (days - 1 - index));
+    const day = localDayKey(date.getTime());
     return byDay.get(day) ?? { day, requests: 0, effective_tokens: 0, cost: 0 };
   });
 }

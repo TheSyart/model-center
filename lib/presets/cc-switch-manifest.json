@@ -1,0 +1,125 @@
+{
+  "arrayProviderCount": 539,
+  "blobs": {
+    "src-tauri/src/database/schema.rs": "71b8472101be2a25bc198ac5ade519fa0c92b443",
+    "src-tauri/src/services/balance.rs": "8639b1d985076fbea1ce2b9ba97022a1bf7850b7",
+    "src/config/claudeDesktopProviderPresets.ts": "3727f066ae4bf75f0299240868d910298a30c952",
+    "src/config/claudeProviderPresets.ts": "f7fe0dc6cae96490a6f84f6cf6f79c3943ed51f8",
+    "src/config/codexProviderPresets.ts": "c61b5975f968a3c590a07ba9c707b18736972969",
+    "src/config/codingPlanProviders.ts": "f0a17a382ac8324bea0567f3dfef1594828a383b",
+    "src/config/geminiProviderPresets.ts": "0c1237bc95bf727bd1a58fa83f86c2d9fd249cf6",
+    "src/config/grokBuildProviderPresets.ts": "8160b443f5e4ddea46e364c2440dd45aca727b89",
+    "src/config/hermesProviderPresets.ts": "604e07dc7d86bf92cb37cf0fc82f57eb64db8fa9",
+    "src/config/openclawProviderPresets.ts": "64e9f30bba18c49ce751ec088c05d5557d70bc65",
+    "src/config/opencodeProviderPresets.ts": "8708597812434351a25525d95eab6848b6b43758",
+    "src/config/piProviderPresets.ts": "15b7aba6a517e9cb143ecd8001d7e09a4370879c",
+    "src/config/universalProviderPresets.ts": "ca708316b1ff78299a6f791334ab524946c21e34",
+    "src/icons/extracted/index.ts": "0e459c9e4924f15ff533b294fb8ebb31d9d9bfba"
+  },
+  "capabilities": {
+    "balanceProviders": [
+      {
+        "endpoint": "https://api.deepseek.com/user/balance",
+        "id": "deepseek",
+        "patterns": [
+          "api.deepseek.com"
+        ]
+      },
+      {
+        "endpoint": "https://api.stepfun.com/v1/accounts",
+        "id": "stepfun",
+        "patterns": [
+          "api.stepfun.ai",
+          "api.stepfun.com"
+        ]
+      },
+      {
+        "endpoint": "https://api.siliconflow.cn/v1/user/info",
+        "id": "siliconflow-cn",
+        "patterns": [
+          "api.siliconflow.cn"
+        ]
+      },
+      {
+        "endpoint": "https://api.siliconflow.com/v1/user/info",
+        "id": "siliconflow-en",
+        "patterns": [
+          "api.siliconflow.com"
+        ]
+      },
+      {
+        "endpoint": "https://openrouter.ai/api/v1/credits",
+        "id": "openrouter",
+        "patterns": [
+          "openrouter.ai"
+        ]
+      },
+      {
+        "endpoint": "https://api.novita.ai/v3/user/balance",
+        "id": "novita",
+        "patterns": [
+          "api.novita.ai"
+        ]
+      }
+    ],
+    "codingPlanProviders": [
+      {
+        "id": "kimi",
+        "label": "Kimi For Coding",
+        "pattern": "/api\\.kimi\\.com\\/coding/i"
+      },
+      {
+        "id": "zhipu",
+        "label": "Zhipu GLM (智谱)",
+        "pattern": "/bigmodel\\.cn|api\\.z\\.ai/i"
+      },
+      {
+        "id": "zhipu_team",
+        "label": "Zhipu GLM Team (智谱团队)",
+        "pattern": "/bigmodel\\.cn/i"
+      },
+      {
+        "id": "minimax",
+        "label": "MiniMax",
+        "pattern": "/api\\.minimaxi?\\.com|api\\.minimax\\.io/i"
+      },
+      {
+        "id": "zenmux",
+        "label": "ZenMux",
+        "pattern": "/zenmux\\./i"
+      },
+      {
+        "id": "volcengine",
+        "label": "火山方舟 (Volcengine)",
+        "pattern": "/volces\\.com\\/api\\/(plan|coding)/i"
+      }
+    ]
+  },
+  "commit": "9a596158ca926e74b56243c08af67d9dd13fc27c",
+  "commitTime": "2026-08-24T16:49:56+08:00",
+  "coverage": {
+    "excluded": 4,
+    "included": 255,
+    "merged": 281
+  },
+  "exclusionCount": 4,
+  "iconChecksum": "72fbb4997719b4e19541b871f1687f9f236cc98c49acb3c68f39841c430f5e78",
+  "iconCount": 99,
+  "pricingCount": 192,
+  "providerCount": 255,
+  "rawProviderCount": 540,
+  "repository": "https://github.com/farion1231/cc-switch.git",
+  "schemaVersion": 2,
+  "sourceCounts": {
+    "claude": 77,
+    "claude-desktop": 74,
+    "codex": 72,
+    "gemini": 23,
+    "grok-build": 38,
+    "hermes": 66,
+    "openclaw": 65,
+    "opencode": 65,
+    "pi": 58,
+    "universal": 2
+  }
+}

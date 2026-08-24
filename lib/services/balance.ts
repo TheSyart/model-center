@@ -3,6 +3,7 @@ import { db, schema } from '@/lib/db';
 import { getPreset } from '@/lib/presets';
 import { formatQuotaSummary, queryCodingPlan, type QuotaTier } from './coding-plan';
 import type { ProviderRow } from './provider';
+import { detectCcSwitchBalanceProvider, type CcSwitchBalanceProvider } from './balance-provider';
 
 /** §8 余额查询统一抽象。 */
 export interface BalanceResult {
@@ -65,8 +66,15 @@ async function fetchJson(url: string, headers: Record<string, string>, method = 
 
 type Json = Record<string, any>;
 
-/** 内置余额解析器（按 preset slug，端点信息来自 lib/presets.ts §3.1）。 */
-const BUILTIN_PARSERS: Record<string, (base: string, apiKey: string) => Promise<{ summary: string; raw: unknown }>> = {
+type BalanceParser = (base: string, apiKey: string) => Promise<{ summary: string; raw: unknown }>;
+
+function numberField(value: unknown): number {
+  const number = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
+/** 内置余额解析器：CC Switch 六类按 Base URL 识别，Kimi 为本项目原有扩展。 */
+const BUILTIN_PARSERS: Record<CcSwitchBalanceProvider | 'kimi', BalanceParser> = {
   // DeepSeek: GET https://api.deepseek.com/user/balance（origin 级，不在 /v1 下）
   // → { balance_infos: [{ currency, total_balance, granted_balance, topped_up_balance }] }
   deepseek: async (base, apiKey) => {
@@ -81,25 +89,36 @@ const BUILTIN_PARSERS: Record<string, (base: string, apiKey: string) => Promise<
         .join(' / ') || '无余额信息';
     return { summary: `剩余 ${summary}`, raw };
   },
+  stepfun: async (_base, apiKey) => {
+    const raw = (await fetchJson('https://api.stepfun.com/v1/accounts', { Authorization: `Bearer ${apiKey}` })) as Json;
+    return { summary: `剩余 ¥${numberField(raw.balance)}`, raw };
+  },
   // Kimi: GET /users/me/balance → { data: { available_balance } }
   kimi: async (base, apiKey) => {
     const raw = (await fetchJson(`${base}/users/me/balance`, { Authorization: `Bearer ${apiKey}` })) as Json;
     return { summary: `剩余 ¥${raw.data?.available_balance ?? '?'}`, raw };
   },
   // SiliconFlow: GET /user/info → { data: { balance, totalBalance } }
-  siliconflow: async (base, apiKey) => {
-    const raw = (await fetchJson(`${base}/user/info`, { Authorization: `Bearer ${apiKey}` })) as Json;
-    return { summary: `剩余 ¥${raw.data?.balance ?? '?'} / 总额 ¥${raw.data?.totalBalance ?? '?'}`, raw };
+  'siliconflow-cn': async (_base, apiKey) => {
+    const raw = (await fetchJson('https://api.siliconflow.cn/v1/user/info', { Authorization: `Bearer ${apiKey}` })) as Json;
+    return { summary: `剩余 ¥${numberField(raw.data?.totalBalance)}`, raw };
   },
-  // OpenRouter: GET /auth/key → { data: { usage, limit, limit_remaining } }
-  openrouter: async (base, apiKey) => {
-    const raw = (await fetchJson(`${base}/auth/key`, { Authorization: `Bearer ${apiKey}` })) as Json;
+  'siliconflow-en': async (_base, apiKey) => {
+    const raw = (await fetchJson('https://api.siliconflow.com/v1/user/info', { Authorization: `Bearer ${apiKey}` })) as Json;
+    return { summary: `剩余 $${numberField(raw.data?.totalBalance)}`, raw };
+  },
+  // OpenRouter: 与 CC Switch 一致读取 credits，而非旧版 /auth/key 限额接口。
+  openrouter: async (_base, apiKey) => {
+    const raw = (await fetchJson('https://openrouter.ai/api/v1/credits', { Authorization: `Bearer ${apiKey}` })) as Json;
     const d = raw.data ?? {};
-    const summary =
-      d.limit != null
-        ? `已用 $${d.usage ?? '?'} / 限额 $${d.limit}（剩余 $${d.limit_remaining ?? '?'}）`
-        : `已用 $${d.usage ?? '?'}（无限额）`;
+    const total = numberField(d.total_credits);
+    const used = numberField(d.total_usage);
+    const summary = `剩余 $${total - used} / 总额 $${total}（已用 $${used}）`;
     return { summary, raw };
+  },
+  novita: async (_base, apiKey) => {
+    const raw = (await fetchJson('https://api.novita.ai/v3/user/balance', { Authorization: `Bearer ${apiKey}` })) as Json;
+    return { summary: `剩余 $${numberField(raw.availableBalance) / 10_000}`, raw };
   },
 };
 
@@ -113,7 +132,8 @@ export async function queryBalance(provider: ProviderRow, apiKey: string): Promi
   const preset = getPreset(provider.slug);
 
   // 1. 内置解析器
-  const parser = BUILTIN_PARSERS[provider.slug];
+  const balanceProvider = detectCcSwitchBalanceProvider(base) ?? (provider.slug === 'kimi' ? 'kimi' : null);
+  const parser = balanceProvider ? BUILTIN_PARSERS[balanceProvider] : undefined;
   if (parser) {
     try {
       const { summary, raw } = await parser(base, apiKey);
