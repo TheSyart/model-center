@@ -2,7 +2,6 @@ import type Database from 'better-sqlite3';
 import type { ProviderPreset } from '../presets/types.ts';
 import { listProviderEndpoints, replaceProviderEndpoints } from './provider-endpoint.ts';
 import { resolveEndpointSetForCreate } from './provider-endpoint-request.ts';
-import { validateProviderBaseUrl } from './provider-url.ts';
 
 export const MASKED_TRANSFER_KEY = '***';
 
@@ -15,6 +14,7 @@ export interface TransferDependencies {
   now: () => number;
   getLogRetentionDays: () => number;
   setSetting: (key: string, value: string) => void;
+  validateBaseUrl: (baseUrl: string) => string | null;
 }
 
 export interface ImportReport {
@@ -144,7 +144,7 @@ export function createTransferService(deps: TransferDependencies): TransferServi
         const preset = presetKey ? deps.getPreset(presetKey) : undefined;
         const endpoints = resolveEndpointSetForCreate(
           { preset_key: presetKey, endpoints: row.endpoints, default_protocol: row.default_protocol, protocol: row.protocol, base_url: row.base_url },
-          deps.getPreset, validateProviderBaseUrl,
+          deps.getPreset, deps.validateBaseUrl,
         );
         const defaultEndpoint = endpoints.find((endpoint) => endpoint.is_default)!;
         const now = deps.now();
@@ -156,7 +156,7 @@ export function createTransferService(deps: TransferDependencies): TransferServi
             .run(providerId, slug, text(row.name) || preset?.name || slug, defaultEndpoint.protocol, defaultEndpoint.base_url,
               preset?.presetKey ?? null, deps.encrypt(apiKey), truthy(row.enabled) ? 1 : 0,
               typeof row.priority === 'number' ? row.priority : 0, row.balance_config ?? null, text(row.remark) ?? null, now, now);
-          replaceProviderEndpoints(sqlite, providerId, endpoints, now, validateProviderBaseUrl);
+          replaceProviderEndpoints(sqlite, providerId, endpoints, now, deps.validateBaseUrl);
         })();
         report.providers.added++;
       } catch (error) {

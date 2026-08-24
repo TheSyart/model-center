@@ -17,7 +17,7 @@ interface CreateBody {
   name?: string;
   protocol?: string;
   base_url?: string;
-  preset_key?: string;
+  preset_key?: string | null;
   endpoints?: unknown[];
   default_protocol?: string;
   api_key?: string;

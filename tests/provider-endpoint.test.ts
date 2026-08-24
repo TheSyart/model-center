@@ -127,6 +127,30 @@ test('legacy POST and PATCH shapes deterministically convert to complete endpoin
   );
 });
 
+test('explicit null preset_key is treated as a custom provider for form POST and PATCH payloads', () => {
+  const getPreset = () => undefined;
+  assert.deepEqual(
+    resolveEndpointSetForCreate({
+      preset_key: null,
+      endpoints: [{ protocol: 'openai', base_url: 'https://custom.example/v1', enabled: true, is_default: true }],
+      default_protocol: 'openai',
+    }, getPreset),
+    [{ protocol: 'openai', base_url: 'https://custom.example/v1', enabled: true, is_default: true }],
+  );
+  assert.deepEqual(
+    resolveEndpointSetForPatch(
+      {
+        preset_key: null,
+        endpoints: [{ protocol: 'openai', base_url: 'https://custom.example/v2', enabled: true, is_default: true }],
+        default_protocol: 'openai',
+      },
+      [],
+      getPreset,
+    ),
+    [{ protocol: 'openai', base_url: 'https://custom.example/v2', enabled: true, is_default: true }],
+  );
+});
+
 test('PATCH default_protocol alone changes the enabled default and compatibility projection', () => {
   const sqlite = database();
   replaceProviderEndpoints(sqlite, 'provider-1', [

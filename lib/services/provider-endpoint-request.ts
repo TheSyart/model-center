@@ -24,7 +24,7 @@ function reject(message: string): never {
 }
 
 function presetFor(body: EndpointRequestBody, getPreset: PresetLookup): ProviderPreset | undefined {
-  if (body.preset_key === undefined) return undefined;
+  if (body.preset_key === undefined || body.preset_key === null) return undefined;
   if (typeof body.preset_key !== 'string' || !body.preset_key.trim()) reject('preset_key 不能为空');
   const preset = getPreset(body.preset_key.trim());
   if (!preset || preset.supported === false) reject('预设不支持或不存在');

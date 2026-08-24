@@ -211,10 +211,10 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
       const payload: Record<string, unknown> = {
         name: form.name,
         remark: form.remark,
-        preset_key: form.preset_key,
         endpoints,
         default_protocol: defaultEndpoint?.protocol,
       };
+      if (form.preset_key) payload.preset_key = form.preset_key;
       if (form.api_key) payload.api_key = form.api_key;
       if (!isEdit) payload.slug = form.slug;
       const res = await fetch(isEdit ? `/api/admin/providers/${form.id}` : '/api/admin/providers', {
@@ -349,7 +349,7 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
                     onClick={() => toggleExpand(p.id)}
                     aria-expanded={isOpen}
                     aria-controls={detailsId}
-                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                    className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground sm:h-10 sm:w-10"
                     title={isOpen ? '收起详情' : '展开详情'}
                   >
                     <ChevronIcon className={`h-4 w-4 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
@@ -385,10 +385,10 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
                               <code className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={revealedKeys[p.id] ?? ''}>
                                 {revealedKeys[p.id] ?? '••••••••'}
                               </code>
-                              <button onClick={() => toggleRevealKey(p)} className="text-subtle-foreground hover:text-foreground" title={revealedKeys[p.id] ? '隐藏明文' : '查看明文'}>
+                              <button onClick={() => toggleRevealKey(p)} className="flex h-11 w-11 items-center justify-center rounded-md text-subtle-foreground hover:bg-muted hover:text-foreground sm:h-10 sm:w-10" title={revealedKeys[p.id] ? '隐藏明文' : '查看明文'}>
                                 {revealedKeys[p.id] ? <EyeOffIcon className="h-4 w-4" /> : <EyeIcon className="h-4 w-4" />}
                               </button>
-                              <button onClick={() => copyKey(p)} className="text-subtle-foreground hover:text-foreground" title="复制 Key">
+                              <button onClick={() => copyKey(p)} className="flex h-11 w-11 items-center justify-center rounded-md text-subtle-foreground hover:bg-muted hover:text-foreground sm:h-10 sm:w-10" title="复制 Key">
                                 {copiedKeys[p.id] ? <CheckIcon className="h-4 w-4 text-success" /> : <CopyIcon className="h-4 w-4" />}
                               </button>
                             </div>

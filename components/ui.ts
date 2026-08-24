@@ -7,11 +7,11 @@ export function cn(...classes: Array<string | false | null | undefined>): string
 
 export const btn = {
   primary:
-    'inline-flex min-h-10 items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-[background-color,transform] duration-200 hover:bg-primary-hover active:translate-y-px disabled:pointer-events-none disabled:opacity-45',
+    'inline-flex min-h-11 items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-[background-color,transform] duration-200 hover:bg-primary-hover active:translate-y-px disabled:pointer-events-none disabled:opacity-45 sm:min-h-10',
   ghost:
-    'inline-flex min-h-10 items-center justify-center rounded-md border border-border bg-surface px-3 py-2 text-sm font-medium text-muted-foreground transition-colors duration-200 hover:border-foreground/20 hover:text-foreground disabled:pointer-events-none disabled:opacity-45',
+    'inline-flex min-h-11 items-center justify-center rounded-md border border-border bg-surface px-3 py-2 text-sm font-medium text-muted-foreground transition-colors duration-200 hover:border-foreground/20 hover:text-foreground disabled:pointer-events-none disabled:opacity-45 sm:min-h-10',
   danger:
-    'inline-flex min-h-10 items-center justify-center rounded-md border border-destructive/25 bg-surface px-3 py-2 text-sm font-medium text-destructive transition-colors duration-200 hover:bg-destructive-soft disabled:pointer-events-none disabled:opacity-45',
+    'inline-flex min-h-11 items-center justify-center rounded-md border border-destructive/25 bg-surface px-3 py-2 text-sm font-medium text-destructive transition-colors duration-200 hover:bg-destructive-soft disabled:pointer-events-none disabled:opacity-45 sm:min-h-10',
   /** 行内文字按钮 */
   link: 'inline-flex min-h-8 items-center text-sm font-medium text-primary underline-offset-4 transition-colors hover:text-primary-hover hover:underline',
   linkDanger:
@@ -19,7 +19,7 @@ export const btn = {
 } as const;
 
 export const inputCls =
-  'min-h-10 rounded-md border border-border bg-surface px-3 py-2 text-sm text-foreground transition-colors placeholder:text-subtle-foreground hover:border-foreground/20 focus:border-foreground/35 disabled:bg-muted disabled:text-subtle-foreground';
+  'min-h-11 rounded-md border border-border bg-surface px-3 py-2 text-sm text-foreground transition-colors placeholder:text-subtle-foreground hover:border-foreground/20 focus:border-foreground/35 disabled:bg-muted disabled:text-subtle-foreground sm:min-h-10';
 
 export const cardCls = 'rounded-lg border border-border bg-surface';
 export const tableWrapCls = `minimal-scrollbar overflow-x-auto ${cardCls}`;

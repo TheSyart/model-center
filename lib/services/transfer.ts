@@ -4,6 +4,7 @@ import { decrypt, encrypt } from '@/lib/crypto';
 import { getPreset } from '@/lib/presets';
 import { getLogRetentionDays } from './log';
 import { setSetting } from '@/lib/settings';
+import { validateBaseUrl } from './provider';
 import { createTransferService, type ExportedConfig } from './transfer-core.ts';
 
 export { MASKED_TRANSFER_KEY as MASKED_KEY, createTransferService, type ImportReport } from './transfer-core.ts';
@@ -18,6 +19,7 @@ function service() {
     now: Date.now,
     getLogRetentionDays,
     setSetting,
+    validateBaseUrl,
   });
 }
 

@@ -3,6 +3,7 @@ import test from 'node:test';
 import Database from 'better-sqlite3';
 
 import { createTransferService } from '../lib/services/transfer-core.ts';
+import { validateProviderBaseUrl } from '../lib/services/provider-url.ts';
 import type { ProviderPreset } from '../lib/presets/types.ts';
 
 const preset: ProviderPreset = {
@@ -61,7 +62,7 @@ function database() {
   return sqlite;
 }
 
-function service(sqlite: Database.Database) {
+function service(sqlite: Database.Database, allowHttp = false) {
   let id = 0;
   return createTransferService({
     sqlite,
@@ -72,6 +73,7 @@ function service(sqlite: Database.Database) {
     now: () => 1000,
     getLogRetentionDays: () => 30,
     setSetting: (key, value) => sqlite.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value),
+    validateBaseUrl: (baseUrl) => validateProviderBaseUrl(baseUrl, allowHttp),
   });
 }
 
@@ -155,4 +157,43 @@ test('invalid imported endpoints roll back the provider insertion transaction', 
   assert.match(report.providers.skipped[0]?.reason ?? '', /endpoint rejected/);
   assert.equal((sqlite.prepare('SELECT COUNT(*) AS n FROM providers').get() as { n: number }).n, 0);
   sqlite.close();
+});
+
+test('HTTP provider import follows the runtime allow_http_providers policy for v3 and legacy shapes', () => {
+  const allowed = database();
+  const allowedReport = service(allowed, true).importConfig({
+    version: 3,
+    providers: [
+      {
+        slug: 'v3-http', name: 'V3 HTTP', api_key: 'secret', default_protocol: 'openai',
+        endpoints: [{ protocol: 'openai', base_url: 'http://remote.example/v1', enabled: true }],
+      },
+      {
+        slug: 'legacy-http', name: 'Legacy HTTP', api_key: 'secret',
+        protocol: 'openai', base_url: 'http://legacy.example/v1',
+      },
+    ],
+  });
+  assert.equal(allowedReport.providers.added, 2);
+  assert.deepEqual(
+    allowed.prepare('SELECT slug, base_url FROM providers ORDER BY slug').all(),
+    [
+      { slug: 'legacy-http', base_url: 'http://legacy.example/v1' },
+      { slug: 'v3-http', base_url: 'http://remote.example/v1' },
+    ],
+  );
+  allowed.close();
+
+  const denied = database();
+  const deniedReport = service(denied, false).importConfig({
+    version: 3,
+    providers: [{
+      slug: 'denied-http', name: 'Denied HTTP', api_key: 'secret', default_protocol: 'openai',
+      endpoints: [{ protocol: 'openai', base_url: 'http://remote.example/v1', enabled: true }],
+    }],
+  });
+  assert.equal(deniedReport.providers.added, 0);
+  assert.match(deniedReport.providers.skipped[0]?.reason ?? '', /https/);
+  assert.equal((denied.prepare('SELECT COUNT(*) AS n FROM providers').get() as { n: number }).n, 0);
+  denied.close();
 });
