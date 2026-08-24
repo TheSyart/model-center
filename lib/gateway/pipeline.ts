@@ -1,12 +1,19 @@
 import { after } from 'next/server';
-import { GatewayError } from './errors';
+import { getAdapter } from '@/lib/adapters';
+import { decrypt } from '@/lib/crypto';
+import { GatewayError, protocolNotImplemented } from './errors';
 import { fetchUpstream } from './forward';
+import type { FetchFailure } from './forward';
 import { writeRequestLog } from './logger';
 import type { UsageInfo } from './logger';
 import { observeReadableStream } from './stream-observer';
 import { resolveModel } from './router';
-import { buildAttemptForEndpoint, shouldFailoverStatus } from './attempt-builder';
+import type { RouteTarget } from './router';
+import { buildAttemptForEndpoint } from './attempt-builder';
 import { selectProviderEndpoint } from './provider-endpoint-selector';
+import type { SelectableProviderEndpoint } from './provider-endpoint-selector';
+import { runTargetAttempts } from './target-attempt-runner';
+import { cancelStreamBestEffort, runStreamSetupSafely } from './stream-setup';
 import { getPromptById, getPromptByName, renderPrompt } from '@/lib/services/prompt';
 import { checkSpendLimit, SPEND_WINDOW_LABELS } from '@/lib/services/token';
 import type { TokenRow } from '@/lib/services/token';
@@ -152,8 +159,11 @@ export async function runGatewayPipeline(input: PipelineInput): Promise<Response
     tokenName: input.token?.name ?? null,
     tokenPrefix: input.token?.prefix ?? null,
     entryProtocol: entry,
+    providerEndpointId: null as string | null,
+    upstreamProtocol: null as string | null,
     source: input.source ?? 'unknown',
   };
+  let activeLogBase = logBase;
 
   const log = (
     base: typeof logBase,
@@ -173,6 +183,7 @@ export async function runGatewayPipeline(input: PipelineInput): Promise<Response
     // 1. 模型解析与路由
     const route = resolveModel(requestedModel);
     logBase = { ...logBase, providerId: route.targets[0].provider.id, modelId: route.targets[0].modelId, alias: route.alias };
+    activeLogBase = logBase;
 
     // 1.4 令牌限额检查（按 request_logs.cost 聚合；未配单价的调用 cost 为 null 不计入）
     if (input.token) {
@@ -203,122 +214,178 @@ export async function runGatewayPipeline(input: PipelineInput): Promise<Response
       }
     }
 
-    // 2. 按目标顺序尝试（别名 failover）
-    let failoverFrom: string | null = null;
-    for (let i = 0; i < route.targets.length; i++) {
-      const target = route.targets[i];
-      const isLast = i === route.targets.length - 1;
-      const endpoint = selectProviderEndpoint(
-        listProviderEndpoints(sqlite, target.provider.id),
-        entry,
-        target.modelId,
-        listProviderEndpointModelObservations(sqlite, target.provider.id),
-      );
-      if (!endpoint) {
-        throw new GatewayError(503, `服务商 "${target.provider.slug}" 没有可用的协议端点`, 'provider_endpoint_unavailable', 'server_error');
-      }
-      const attemptBase = {
-        ...logBase,
-        providerId: target.provider.id,
-        modelId: target.modelId,
-        providerEndpointId: endpoint.id,
-        upstreamProtocol: endpoint.protocol,
-      };
-      const attempt = buildAttemptForEndpoint(input, target, endpoint);
-
-      const fetched = await fetchUpstream({
-        url: attempt.url,
-        headers: attempt.headers,
-        body: attempt.body,
-        clientSignal,
-      });
-
-      if (!fetched.ok) {
-        const failNote = `目标 ${target.provider.slug}/${target.modelId} 失败`;
-        if (shouldFailoverStatus(fetched.status) && !isLast) {
-          // 降级到下一目标
+    // 2. 按供应商目标顺序尝试；每个目标只做一次本地端点选择。
+    type FailureContext = { attemptBase: typeof logBase; fetched: FetchFailure };
+    return await runTargetAttempts<RouteTarget, SelectableProviderEndpoint, Response, FailureContext>({
+      targets: route.targets,
+      selectEndpoint(target) {
+        return selectProviderEndpoint(
+          listProviderEndpoints(sqlite, target.provider.id),
+          entry,
+          target.modelId,
+          listProviderEndpointModelObservations(sqlite, target.provider.id),
+        );
+      },
+      onSelected(target, endpoint) {
+        activeLogBase = {
+          ...logBase,
+          providerId: target.provider.id,
+          modelId: target.modelId,
+          providerEndpointId: endpoint.id,
+          upstreamProtocol: endpoint.protocol,
+        };
+      },
+      targetLabel: (target) => `${target.provider.slug}/${target.modelId}`,
+      unavailableError: (target) => new GatewayError(
+        503,
+        `服务商 "${target.provider.slug}" 没有可用的协议端点`,
+        'provider_endpoint_unavailable',
+        'server_error',
+      ),
+      onUnavailable(target, willContinue) {
+        const unavailableBase = {
+          ...logBase,
+          providerId: target.provider.id,
+          modelId: target.modelId,
+          providerEndpointId: null,
+          upstreamProtocol: null,
+        };
+        activeLogBase = unavailableBase;
+        if (willContinue) {
           const durationMs = Date.now() - startedAt;
-          after(() => log(attemptBase, { status: fetched.status, latencyMs: fetched.latencyMs, durationMs, usage: null, error: `${failNote}（failover 到下一目标）: ${fetched.error}` }));
-          failoverFrom = `${target.provider.slug}/${target.modelId}`;
-          continue;
+          after(() => log(unavailableBase, {
+            status: 503,
+            latencyMs: durationMs,
+            durationMs,
+            usage: null,
+            error: `服务商 "${target.provider.slug}" 没有可用的协议端点（failover 到下一目标）`,
+          }));
         }
-        const durationMs = Date.now() - startedAt;
-        after(() => log(attemptBase, { status: fetched.status, latencyMs: fetched.latencyMs, durationMs, usage: null, error: failoverFrom ? `${failoverFrom} 失败后降级仍失败: ${fetched.error}` : fetched.error }));
-        return fetched.response;
-      }
-
-      const { upstream, latencyMs, cleanup } = fetched;
-      const successError = failoverFrom ? `failed over from ${failoverFrom}` : null;
-
-      // 非流式
-      if (!stream) {
-        cleanup();
-        const json = await upstream.json();
-        let outJson: Json;
-        let usage: UsageInfo | null;
-        if (attempt.passthrough) {
-          outJson = json;
-          usage = passthroughUsageFromJson(entry, json);
-        } else {
-          const irJson = attempt.adapter!.convertResponse(json, attempt.ctx);
-          usage = attempt.adapter!.extractUsage(json, attempt.ctx);
-          outJson = egressJson(entry, irJson, requestedModel);
+      },
+      async execute(target, endpoint, failoverFrom) {
+        const attemptBase = {
+          ...logBase,
+          providerId: target.provider.id,
+          modelId: target.modelId,
+          providerEndpointId: endpoint.id,
+          upstreamProtocol: endpoint.protocol,
+        };
+        const attempt = buildAttemptForEndpoint(input, target, endpoint, {
+          decrypt,
+          getAdapter,
+          protocolNotImplemented,
+        });
+        const fetched = await fetchUpstream({
+          url: attempt.url,
+          headers: attempt.headers,
+          body: attempt.body,
+          clientSignal,
+        });
+        if (!fetched.ok) {
+          return { ok: false as const, status: fetched.status, value: fetched.response, context: { attemptBase, fetched } };
         }
-        const durationMs = Date.now() - startedAt;
-        after(() => log(attemptBase, { status: 200, latencyMs, durationMs, usage, error: successError }));
-        return Response.json(outJson, { status: 200 });
-      }
 
-      // 流式
-      if (!upstream.body) {
-        cleanup();
-        const durationMs = Date.now() - startedAt;
-        after(() => log(attemptBase, { status: 200, latencyMs, durationMs, usage: null, error: '上游流无 body' }));
-        return new Response(null, { status: 200, headers: SSE_HEADERS });
-      }
+        const { upstream, latencyMs, cleanup } = fetched;
+        const successError = failoverFrom ? `failed over from ${failoverFrom}` : null;
+        if (!stream) {
+          try {
+            const json = await upstream.json();
+            let outJson: Json;
+            let usage: UsageInfo | null;
+            if (attempt.passthrough) {
+              outJson = json;
+              usage = passthroughUsageFromJson(entry, json);
+            } else {
+              const irJson = attempt.adapter!.convertResponse(json, attempt.ctx);
+              usage = attempt.adapter!.extractUsage(json, attempt.ctx);
+              outJson = egressJson(entry, irJson, requestedModel);
+            }
+            const response = Response.json(outJson, { status: 200 });
+            const durationMs = Date.now() - startedAt;
+            after(() => log(attemptBase, { status: 200, latencyMs, durationMs, usage, error: successError }));
+            return { ok: true as const, value: response };
+          } catch (error) {
+            await cancelStreamBestEffort(upstream.body, error);
+            throw error;
+          } finally {
+            cleanup();
+          }
+        }
 
-      let clientStream: ReadableStream<Uint8Array>;
-      let usagePromise: Promise<UsageInfo | null>;
-      if (attempt.passthrough) {
-        const inspected = passthroughUsageStream(entry, upstream.body);
-        clientStream = inspected.stream;
-        usagePromise = inspected.usage;
-      } else {
-        const translated = attempt.adapter!.translateStream(upstream.body, attempt.ctx);
-        clientStream = egressStream(entry, translated.stream, requestedModel);
-        usagePromise = translated.usage;
-      }
-
-      const observed = observeReadableStream(clientStream, startedAt);
-      after(async () => {
-        try {
-          const [usage, timing] = await Promise.all([usagePromise, observed.timing]);
-          log(attemptBase, {
-            status: 200,
-            latencyMs,
-            firstTokenMs: timing.firstTokenMs,
-            durationMs: timing.durationMs,
-            usage,
-            error: timing.cancelled ? [successError, '客户端中断流'].filter(Boolean).join('；') : successError,
-          });
-        } catch (e) {
-          log(attemptBase, { status: 200, latencyMs, durationMs: Date.now() - startedAt, usage: null, error: `流中断: ${e instanceof Error ? e.message : String(e)}`.slice(0, 500) });
-        } finally {
+        if (!upstream.body) {
           cleanup();
+          const durationMs = Date.now() - startedAt;
+          after(() => log(attemptBase, { status: 200, latencyMs, durationMs, usage: null, error: '上游流无 body' }));
+          return { ok: true as const, value: new Response(null, { status: 200, headers: SSE_HEADERS }) };
         }
-      });
-      return new Response(observed.stream, { status: 200, headers: SSE_HEADERS });
-    }
 
-    // 不可达（循环必然返回），仅作类型兜底
-    throw new GatewayError(502, '所有路由目标均失败', 'all_targets_failed', 'server_error');
+        const upstreamBody = upstream.body;
+        return runStreamSetupSafely(upstreamBody, cleanup, (tracker) => {
+          let clientStream: ReadableStream<Uint8Array>;
+          let usagePromise: Promise<UsageInfo | null>;
+          if (attempt.passthrough) {
+            const inspected = passthroughUsageStream(entry, upstreamBody);
+            clientStream = inspected.stream;
+            tracker.stream(inspected.stream);
+            usagePromise = inspected.usage;
+          } else {
+            const translated = attempt.adapter!.translateStream(upstreamBody, attempt.ctx);
+            tracker.stream(translated.stream);
+            tracker.usage(translated.usage);
+            clientStream = egressStream(entry, translated.stream, requestedModel);
+            tracker.stream(clientStream);
+            usagePromise = translated.usage;
+          }
+          tracker.usage(usagePromise);
+
+          const observed = observeReadableStream(clientStream, startedAt);
+          tracker.stream(observed.stream);
+          const response = new Response(observed.stream, { status: 200, headers: SSE_HEADERS });
+          after(async () => {
+            try {
+              const [usage, timing] = await Promise.all([usagePromise, observed.timing]);
+              log(attemptBase, {
+                status: 200,
+                latencyMs,
+                firstTokenMs: timing.firstTokenMs,
+                durationMs: timing.durationMs,
+                usage,
+                error: timing.cancelled ? [successError, '客户端中断流'].filter(Boolean).join('；') : successError,
+              });
+            } catch (error) {
+              log(attemptBase, { status: 200, latencyMs, durationMs: Date.now() - startedAt, usage: null, error: `流中断: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500) });
+            } finally {
+              cleanup();
+            }
+          });
+          return { ok: true as const, value: response };
+        });
+      },
+      onFailure(target, failure, willContinue, failoverFrom) {
+        const { attemptBase, fetched } = failure.context;
+        const durationMs = Date.now() - startedAt;
+        const failNote = `目标 ${target.provider.slug}/${target.modelId} 失败`;
+        const error = willContinue
+          ? `${failNote}（failover 到下一目标）: ${fetched.error}`
+          : failoverFrom
+            ? `${failoverFrom} 失败后降级仍失败: ${fetched.error}`
+            : fetched.error;
+        after(() => log(attemptBase, {
+          status: fetched.status,
+          latencyMs: fetched.latencyMs,
+          durationMs,
+          usage: null,
+          error,
+        }));
+      },
+    });
   } catch (e) {
     const err =
       e instanceof GatewayError
         ? e
         : new GatewayError(500, `网关内部错误: ${e instanceof Error ? e.message : String(e)}`, null, 'server_error');
     const durationMs = Date.now() - startedAt;
-    after(() => log(logBase, { status: err.status, latencyMs: durationMs, durationMs, usage: null, error: err.message }));
+    after(() => log(activeLogBase, { status: err.status, latencyMs: durationMs, durationMs, usage: null, error: err.message }));
     throw err;
   }
 }

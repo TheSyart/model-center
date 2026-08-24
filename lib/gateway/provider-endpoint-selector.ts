@@ -61,4 +61,3 @@ export function selectProviderEndpoint(
     .map((protocol) => enabled.find((endpoint) => endpoint.protocol === protocol && canServe(endpoint, modelId, observations)))
     .find((endpoint): endpoint is SelectableProviderEndpoint => !!endpoint);
 }
-

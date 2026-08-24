@@ -3,8 +3,10 @@ import { asc, eq } from 'drizzle-orm';
 import { db, schema, sqlite } from '@/lib/db';
 import type { models } from '@/lib/db/schema';
 import { withDefaultProviderEndpoint, type ProviderRow } from './provider';
-import { getEnabledDefaultEndpoint, replaceEndpointModelCatalogInTransaction } from './provider-endpoint';
 import { CC_SWITCH_PRICING_SOURCE_REF, lookupBundledPricing } from './model-pricing';
+import { syncProviderModels, type SyncResult } from './model-sync';
+
+export type { SyncResult } from './model-sync';
 
 export type ModelRow = typeof models.$inferSelect;
 
@@ -199,90 +201,18 @@ export async function testProviderConnection(provider: ProviderRow, apiKey: stri
   }
 }
 
-const SYNC_TIMEOUT_MS = 30_000;
-
-/** 按 provider.protocol 调上游模型列表端点，返回 model_id 列表。 */
-async function fetchUpstreamModels(provider: ProviderRow, apiKey: string): Promise<string[]> {
-  const base = provider.baseUrl.replace(/\/+$/, '');
-  let url: string;
-  let headers: Record<string, string>;
-  if (provider.protocol === 'gemini') {
-    url = `${base}/v1beta/models`;
-    headers = { 'x-goog-api-key': apiKey };
-  } else if (provider.protocol === 'anthropic') {
-    url = `${base}/v1/models`;
-    headers = { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' };
-  } else {
-    // openai / openai-responses
-    url = `${base}/models`;
-    headers = { Authorization: `Bearer ${apiKey}` };
-  }
-  const res = await fetch(url, { headers, signal: AbortSignal.timeout(SYNC_TIMEOUT_MS) });
-  if (!res.ok) {
-    const text = (await res.text()).slice(0, 300);
-    throw new Error(`上游返回 ${res.status}: ${text}`);
-  }
-  const json = (await res.json()) as Record<string, any>;
-  let ids: string[];
-  if (provider.protocol === 'gemini') {
-    // { models: [{ name: "models/xxx", ... }] }
-    ids = ((json.models as any[]) ?? []).map((m) => String(m.name ?? '').replace(/^models\//, '')).filter(Boolean);
-  } else {
-    // openai / anthropic: { data: [{ id: "xxx" }] }
-    ids = ((json.data as any[]) ?? []).map((m) => String(m.id ?? '')).filter(Boolean);
-  }
-  return [...new Set(ids)];
-}
-
-export interface SyncResult {
-  added: number;
-  existing: number;
-  /** 上游已消失的同步模型数量（保留不删，仅报告） */
-  removed_not_in_upstream: number;
-  total_upstream: number;
-}
-
 /**
  * 同步上游模型列表并合并入库：
  * 新模型插入（synced=1）；已有 synced=1 但上游消失的不删除（保留 enabled 状态，仅报告数量）；
  * 手动添加的（synced=0）不动。
  */
 export async function syncModels(provider: ProviderRow, apiKey: string): Promise<SyncResult> {
-  provider = withDefaultProviderEndpoint(provider);
-  const defaultEndpoint = getEnabledDefaultEndpoint(sqlite, provider.id);
-  if (!defaultEndpoint) throw new Error('服务商没有启用的默认端点');
-  const upstreamIds = await fetchUpstreamModels(provider, apiKey);
-  const upstreamSet = new Set(upstreamIds);
-  const existingRows = listModels(provider.id);
-  const existingIds = new Set(existingRows.map((m) => m.modelId));
-
-  let added = 0;
-  const observedAt = Date.now();
-  sqlite.transaction(() => {
-    for (const modelId of upstreamIds) {
-      if (existingIds.has(modelId)) continue;
-      const pricing = lookupBundledPricing(provider.baseUrl, provider.protocol, modelId);
-      db.insert(schema.models)
-        .values({
-          id: crypto.randomUUID(), providerId: provider.id, modelId, enabled: 1, synced: 1,
-          inputPrice: pricing?.input ?? null,
-          outputPrice: pricing?.output ?? null,
-          cacheReadPrice: pricing?.cacheRead ?? null,
-          cacheWritePrice: pricing?.cacheWrite ?? null,
-          pricingSource: pricing?.source ?? null,
-          pricingSourceRef: pricing ? CC_SWITCH_PRICING_SOURCE_REF : null,
-          pricingSyncedAt: pricing ? observedAt : null,
-        })
-        .run();
-      added++;
-    }
-    replaceEndpointModelCatalogInTransaction(sqlite, defaultEndpoint.id, upstreamIds, observedAt);
-  })();
-  const removedNotInUpstream = existingRows.filter((m) => m.synced === 1 && !upstreamSet.has(m.modelId)).length;
-  return {
-    added,
-    existing: upstreamIds.length - added,
-    removed_not_in_upstream: removedNotInUpstream,
-    total_upstream: upstreamIds.length,
-  };
+  return syncProviderModels(provider, apiKey, {
+    sqlite,
+    fetch,
+    lookupPricing: lookupBundledPricing,
+    randomId: crypto.randomUUID,
+    pricingSourceRef: CC_SWITCH_PRICING_SOURCE_REF,
+    now: Date.now,
+  });
 }

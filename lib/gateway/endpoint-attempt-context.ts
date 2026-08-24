@@ -22,4 +22,3 @@ export function isNativeEndpoint(entry: 'openai' | 'responses' | 'anthropic', en
 export function shouldFailoverStatus(status: number): boolean {
   return status === 429 || status >= 500;
 }
-

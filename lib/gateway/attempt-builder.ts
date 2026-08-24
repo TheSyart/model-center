@@ -1,10 +1,7 @@
-import { getAdapter } from '@/lib/adapters';
-import type { AdapterContext, ProtocolAdapter } from '@/lib/adapters/types';
-import { decrypt } from '@/lib/crypto';
-import { protocolNotImplemented } from './errors';
+import type { AdapterContext, ProtocolAdapter } from '../adapters/types.ts';
 import type { RouteTarget } from './router';
-import { isNativeEndpoint, providerForEndpoint, shouldFailoverStatus } from './endpoint-attempt-context';
-import type { ProviderProtocol } from '@/lib/presets/types';
+import { isNativeEndpoint, providerForEndpoint, shouldFailoverStatus } from './endpoint-attempt-context.ts';
+import type { ProviderProtocol } from '../presets/types.ts';
 
 type Json = Record<string, any>;
 
@@ -36,8 +33,14 @@ export interface SelectedProviderEndpoint {
   baseUrl: string;
 }
 
+export interface AttemptBuilderDependencies {
+  decrypt(ciphertext: string): string;
+  getAdapter(protocol: string): ProtocolAdapter | undefined;
+  protocolNotImplemented(protocol: string): Error;
+}
+
 /** Alias failover permits only transient/network-like upstream failures. */
-export { shouldFailoverStatus } from './endpoint-attempt-context';
+export { shouldFailoverStatus } from './endpoint-attempt-context.ts';
 
 function passthroughRequest(
   entry: GatewayEntryProtocol,
@@ -66,9 +69,14 @@ function passthroughRequest(
 }
 
 /** Builds one selected endpoint attempt; endpoint fallback is decided before calling this function. */
-export function buildAttemptForEndpoint(input: AttemptInput, target: RouteTarget, endpoint: SelectedProviderEndpoint): AttemptContext {
+export function buildAttemptForEndpoint(
+  input: AttemptInput,
+  target: RouteTarget,
+  endpoint: SelectedProviderEndpoint,
+  dependencies: AttemptBuilderDependencies,
+): AttemptContext {
   const provider = providerForEndpoint(target.provider, endpoint);
-  const apiKey = decrypt(provider.apiKeyEnc);
+  const apiKey = dependencies.decrypt(provider.apiKeyEnc);
   const base = provider.baseUrl.replace(/\/+$/, '');
   const ctx: AdapterContext = {
     provider,
@@ -82,8 +90,8 @@ export function buildAttemptForEndpoint(input: AttemptInput, target: RouteTarget
     const built = passthroughRequest(input.entry, base, apiKey, input.rawBody, target.modelId, input.anthropicVersion);
     return { ...built, adapter: undefined, ctx, passthrough: true, endpoint };
   }
-  const adapter = getAdapter(provider.protocol);
-  if (!adapter) throw protocolNotImplemented(provider.protocol);
+  const adapter = dependencies.getAdapter(provider.protocol);
+  if (!adapter) throw dependencies.protocolNotImplemented(provider.protocol);
   const built = adapter.buildRequest(input.ir, ctx);
   return { url: built.url, headers: built.headers, body: built.body, adapter, ctx, passthrough: false, endpoint };
 }

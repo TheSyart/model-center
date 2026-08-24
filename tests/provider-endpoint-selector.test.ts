@@ -36,7 +36,6 @@ test('skips a complete native endpoint that is known not to contain the requeste
 
   assert.equal(chosen?.id, 'responses');
 });
-
 test('uses an enabled default when the native endpoint is disabled', () => {
   const chosen = selectProviderEndpoint([
     endpoint({ id: 'chat', protocol: 'openai', enabled: false }),
@@ -66,4 +65,3 @@ test('uses deterministic protocol order after native and default candidates are 
 
   assert.equal(chosen?.id, 'responses');
 });
-
