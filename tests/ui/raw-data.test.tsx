@@ -109,15 +109,18 @@ function installRawDataApi(options: ApiOptions = {}) {
       const offset = (page - 1) * pageSize;
       return json({ items: records.slice(offset, offset + pageSize), total: records.length, page, pageSize });
     }
-    if (url === `/api/admin/raw-data/records/${record.id}` && method === 'GET') {
-      return json({ record });
+    const recordMatch = url.match(/^\/api\/admin\/raw-data\/records\/([^/]+)$/);
+    if (recordMatch && method === 'GET') {
+      const matchedRecord = records.find((item) => item.id === recordMatch[1]);
+      return matchedRecord ? json({ record: matchedRecord }) : json({ error: '记录不存在' }, 404);
     }
-    if (url === `/api/admin/raw-data/records/${record.id}/request` && method === 'GET') {
+    const previewMatch = url.match(/^\/api\/admin\/raw-data\/records\/([^/]+)\/(request|response)$/);
+    if (previewMatch?.[2] === 'request' && method === 'GET') {
       return new Response(options.requestPreview ?? '{  "model":"x" }', {
         headers: { 'X-Raw-Total-Bytes': '300000', 'X-Raw-Truncated': 'true' },
       });
     }
-    if (url === `/api/admin/raw-data/records/${record.id}/response` && method === 'GET') {
+    if (previewMatch?.[2] === 'response' && method === 'GET') {
       return new Response(options.responsePreview ?? 'data: {"x":1}\n\n', {
         headers: { 'X-Raw-Total-Bytes': '15', 'X-Raw-Truncated': 'false' },
       });
@@ -356,6 +359,95 @@ describe('RawDataClient', () => {
     expect(await screen.findByText('第 1 / 1 页，共 20 条')).toBeVisible();
     expect((await screen.findAllByRole('button', { name: `查看记录 ${pageRecords[0].id}` }))[0]).toBeVisible();
     expect(screen.queryByRole('button', { name: `查看记录 ${pageRecords[20].id}` })).not.toBeInTheDocument();
+  });
+
+  it('closes a record selected from the deleted archive while DELETE is pending', async () => {
+    const user = userEvent.setup();
+    const archivedRecord: RawCaptureRecord = { ...record, day: archive.day, location: 'archived' };
+    const activeSameDay: RawCaptureRecord = {
+      ...record,
+      id: '22222222-2222-4222-8222-222222222222',
+      day: archive.day,
+      location: 'active',
+    };
+    const api = installRawDataApi({ records: [archivedRecord, activeSameDay] });
+    const delayedDelete = deferred<Response>();
+    let deleteRequest: [RequestInfo | URL, RequestInit | undefined] | null = null;
+    api.fetchSpy.mockImplementation((input, init) => {
+      if (String(input) === `/api/admin/raw-data/archives/${archive.day}` && init?.method === 'DELETE') {
+        deleteRequest = [input, init];
+        return delayedDelete.promise;
+      }
+      return api.respond(input, init);
+    });
+    renderClient();
+
+    await screen.findAllByRole('button', { name: `查看记录 ${archivedRecord.id}` });
+    await user.click(screen.getByRole('button', { name: `删除 ${archive.day} 归档` }));
+    await user.click(screen.getByRole('button', { name: '删除归档' }));
+    await waitFor(() => expect(deleteRequest).not.toBeNull());
+
+    await user.click(screen.getAllByRole('button', { name: `查看记录 ${archivedRecord.id}` })[0]);
+    const dialog = screen.getByRole('dialog', { name: '原始记录详情' });
+    expect(within(dialog).getByText(new RegExp(archivedRecord.id))).toBeVisible();
+    expect(within(dialog).getByRole('link', { name: '下载完整请求' })).toBeVisible();
+    await within(dialog).findByRole('region', { name: '请求原始正文' });
+
+    await act(async () => {
+      const [input, init] = deleteRequest!;
+      delayedDelete.resolve(await api.respond(input, init));
+      await delayedDelete.promise;
+    });
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '原始记录详情' })).not.toBeInTheDocument());
+    expect(await screen.findByRole('status')).toHaveTextContent(`${archive.day} 归档已删除`);
+    expect(screen.queryByRole('link', { name: '下载完整请求' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: `查看记录 ${archivedRecord.id}` })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: `查看记录 ${activeSameDay.id}` })[0]).toBeVisible();
+  });
+
+  it('keeps an active record selected from the same day when deleting an archive', async () => {
+    const user = userEvent.setup();
+    const archivedRecord: RawCaptureRecord = { ...record, day: archive.day, location: 'archived' };
+    const activeSameDay: RawCaptureRecord = {
+      ...record,
+      id: '22222222-2222-4222-8222-222222222222',
+      day: archive.day,
+      location: 'active',
+    };
+    const api = installRawDataApi({ records: [archivedRecord, activeSameDay] });
+    const delayedDelete = deferred<Response>();
+    let deleteRequest: [RequestInfo | URL, RequestInit | undefined] | null = null;
+    api.fetchSpy.mockImplementation((input, init) => {
+      if (String(input) === `/api/admin/raw-data/archives/${archive.day}` && init?.method === 'DELETE') {
+        deleteRequest = [input, init];
+        return delayedDelete.promise;
+      }
+      return api.respond(input, init);
+    });
+    renderClient();
+
+    await screen.findAllByRole('button', { name: `查看记录 ${activeSameDay.id}` });
+    await user.click(screen.getByRole('button', { name: `删除 ${archive.day} 归档` }));
+    await user.click(screen.getByRole('button', { name: '删除归档' }));
+    await waitFor(() => expect(deleteRequest).not.toBeNull());
+    await user.click(screen.getAllByRole('button', { name: `查看记录 ${activeSameDay.id}` })[0]);
+
+    const dialog = screen.getByRole('dialog', { name: '原始记录详情' });
+    await within(dialog).findByRole('region', { name: '请求原始正文' });
+    await act(async () => {
+      const [input, init] = deleteRequest!;
+      delayedDelete.resolve(await api.respond(input, init));
+      await delayedDelete.promise;
+    });
+
+    expect(await screen.findByRole('status', { hidden: true })).toHaveTextContent(`${archive.day} 归档已删除`);
+    expect(screen.getByRole('dialog', { name: '原始记录详情' })).toBeVisible();
+    expect(within(dialog).getByText(new RegExp(activeSameDay.id))).toBeVisible();
+    expect(within(dialog).getByRole('link', { name: '下载完整请求' })).toHaveAttribute(
+      'href',
+      `/api/admin/raw-data/records/${activeSameDay.id}/request?download=1`,
+    );
   });
 
   it('does not start an overlapping poll while one refresh is pending', async () => {

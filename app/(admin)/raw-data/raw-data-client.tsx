@@ -18,6 +18,7 @@ type RefreshOptions = {
   quiet?: boolean;
   policy?: 'replace' | 'skip';
   duringMutation?: boolean;
+  invalidatedArchiveDay?: string;
 };
 
 const EMPTY_PAGE: RawCapturePage = { items: [], total: 0, page: 1, pageSize: 20 };
@@ -83,7 +84,12 @@ export default function RawDataClient() {
     includeArchives: boolean,
     options: RefreshOptions = {},
   ) => {
-    const { quiet = false, policy = 'replace', duringMutation = false } = options;
+    const {
+      quiet = false,
+      policy = 'replace',
+      duringMutation = false,
+      invalidatedArchiveDay,
+    } = options;
     if (mutationActive.current && !duringMutation) return;
     if (refreshController.current) {
       if (policy === 'skip') return;
@@ -107,9 +113,11 @@ export default function RawDataClient() {
       setDashboard(nextDashboard);
       setRecords(nextRecords);
       if (nextArchives) setArchives(nextArchives.archives);
-      setSelected((current) => current
-        ? nextRecords.items.find((item) => item.id === current.id) ?? current
-        : null);
+      setSelected((current) => {
+        if (!current) return null;
+        if (current.location === 'archived' && current.day === invalidatedArchiveDay) return null;
+        return nextRecords.items.find((item) => item.id === current.id) ?? current;
+      });
       setError('');
     } catch (loadError) {
       const wasAborted = controller.signal.aborted;
@@ -125,10 +133,10 @@ export default function RawDataClient() {
     }
   }, [showError]);
 
-  const finishMutation = useCallback(async (targetPage: number) => {
+  const finishMutation = useCallback(async (targetPage: number, invalidatedArchiveDay?: string) => {
     try {
       if (mounted.current) {
-        await refresh(targetPage, true, { quiet: true, duringMutation: true });
+        await refresh(targetPage, true, { quiet: true, duringMutation: true, invalidatedArchiveDay });
       }
     } finally {
       mutationActive.current = false;
@@ -236,14 +244,20 @@ export default function RawDataClient() {
     setError('');
     setNotice('');
     let failure = '';
+    let deletedArchiveDay: string | undefined;
     const success = `${item.day} 归档已删除`;
     try {
       await requestJson<{ deleted: true; day: string }>(`/api/admin/raw-data/archives/${item.day}`, { method: 'DELETE' });
-      if (mounted.current && selected?.day === item.day && selected.location === 'archived') setSelected(null);
+      deletedArchiveDay = item.day;
+      if (mounted.current) {
+        setSelected((current) => (
+          current?.day === item.day && current.location === 'archived' ? null : current
+        ));
+      }
     } catch (deleteError) {
       failure = errorMessage(deleteError, '归档删除失败');
     } finally {
-      await finishMutation(records.page);
+      await finishMutation(records.page, deletedArchiveDay);
       if (!mounted.current) return;
       setPendingDay(null);
       if (failure) {
