@@ -15,6 +15,7 @@ describe('AdminShell', () => {
     expect(screen.getByRole('navigation', { name: '主导航' })).toBeVisible();
     expect(screen.getByRole('link', { name: /服务商/ })).toHaveAttribute('aria-current', 'page');
     expect(screen.getByRole('link', { name: '中转风险' })).toHaveAttribute('href', '/security-lab');
+    expect(screen.getByRole('link', { name: '原始数据' })).toHaveAttribute('href', '/raw-data');
     expect(screen.getByText('页面内容')).toBeVisible();
   });
 

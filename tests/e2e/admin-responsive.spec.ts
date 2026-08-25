@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-const pages = ['/', '/providers', '/aliases', '/prompts', '/tokens', '/logs', '/security-lab', '/settings'];
+const pages = ['/', '/providers', '/aliases', '/prompts', '/tokens', '/logs', '/security-lab', '/raw-data', '/settings'];
 
 test('all admin modules render without page-level horizontal overflow', async ({ page }) => {
   const consoleErrors: string[] = [];
@@ -10,6 +10,10 @@ test('all admin modules render without page-level horizontal overflow', async ({
     await page.goto(path);
     await expect(page.locator('main')).toBeVisible();
     if (path === '/security-lab') await page.waitForTimeout(500);
+    if (path === '/raw-data') {
+      await expect(page.getByRole('heading', { name: '原始数据' })).toBeVisible();
+      await expect(page.getByText('今日原始数据')).toBeVisible();
+    }
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
     expect(overflow, `${path} has horizontal overflow`).toBe(false);
   }
