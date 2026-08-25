@@ -1,10 +1,8 @@
 import {
   constants,
   createReadStream,
-  lstatSync,
   openSync,
 } from 'node:fs';
-import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import type Database from 'better-sqlite3';
 
@@ -14,9 +12,8 @@ import {
 } from './archive.ts';
 import { createRawCaptureConfigStore } from './config.ts';
 import {
-  activeRecordDir,
-  archivePath,
   assertArchiveDay,
+  assertManagedRegularFile,
   assertRecordId,
 } from './paths.ts';
 import { createRawCaptureRuntime, getDefaultRawCaptureRuntime } from './runtime.ts';
@@ -123,16 +120,18 @@ function enabledInput(input: unknown): boolean {
   return enabled;
 }
 
-function assertRegularFile(path: string, expectedBytes: number, missingMessage: string): void {
+function assertStoredFile(
+  rootDir: string,
+  segments: string[],
+  expectedBytes: number | null,
+  missingMessage: string,
+): string {
   try {
-    const info = lstatSync(path);
-    if (!info.isFile() || info.isSymbolicLink() || info.size !== expectedBytes) {
-      throw new RawDataGoneError(missingMessage);
-    }
-  } catch (error) {
-    if (error instanceof RawDataGoneError) throw error;
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new RawDataGoneError(missingMessage);
-    throw error;
+    const { path, stats } = assertManagedRegularFile(rootDir, ...segments);
+    if (expectedBytes !== null && stats.size !== expectedBytes) throw new Error('size mismatch');
+    return path;
+  } catch {
+    throw new RawDataGoneError(missingMessage);
   }
 }
 
@@ -185,8 +184,12 @@ export function openRecordPart(
 
   if (record.location === 'active') {
     const fileName = validPart === 'request' ? 'request.body' : 'response.body';
-    const path = join(activeRecordDir(services.store.rootDir, record.day, validId), fileName);
-    assertRegularFile(path, totalBytes, '原始正文文件已不存在');
+    const path = assertStoredFile(
+      services.store.rootDir,
+      ['active', record.day, validId, fileName],
+      totalBytes,
+      '原始正文文件已不存在',
+    );
     const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     stream = createReadStream(path, {
       fd: descriptor,
@@ -197,8 +200,9 @@ export function openRecordPart(
   } else {
     const archive = services.archive.listArchives().find((item) => item.day === record.day && item.status === 'ready');
     if (!archive) throw new RawDataGoneError('原始正文文件已不存在');
-    assertRegularFile(
-      archivePath(services.store.rootDir, record.day),
+    assertStoredFile(
+      services.store.rootDir,
+      ['archives', `${record.day}.tar.gz`],
       archive.archiveBytes,
       '原始正文文件已不存在',
     );
@@ -250,25 +254,35 @@ export function createRawDataAdminService(services: RawDataAdminDependencies) {
       return services.archive.archiveClosedDays();
     },
 
-    openArchive(day: string): { day: string; archiveBytes: number; stream: Readable } {
+    async openArchive(day: string): Promise<{ day: string; archiveBytes: number; stream: Readable }> {
       const validDay = validArchiveDay(day);
       const archive = services.archive.listArchives().find((item) => item.day === validDay && item.status === 'ready');
       if (!archive) throw new RawDataNotFoundError('原始归档不存在');
-      assertRegularFile(
-        archivePath(services.store.rootDir, validDay),
+      assertStoredFile(
+        services.store.rootDir,
+        ['archives', `${validDay}.tar.gz`],
         archive.archiveBytes,
         '原始归档文件已不存在',
       );
-      return { day: validDay, archiveBytes: archive.archiveBytes, stream: services.archive.openArchive(validDay) };
+      try {
+        return {
+          day: validDay,
+          archiveBytes: archive.archiveBytes,
+          stream: await services.archive.openArchive(validDay),
+        };
+      } catch {
+        throw new RawDataGoneError('原始归档文件已损坏');
+      }
     },
 
     async deleteArchive(day: string): Promise<boolean> {
       const validDay = validArchiveDay(day);
-      const archive = services.archive.listArchives().find((item) => item.day === validDay && item.status === 'ready');
+      const archive = services.archive.listArchives().find((item) => item.day === validDay);
       if (!archive) return false;
-      assertRegularFile(
-        archivePath(services.store.rootDir, validDay),
-        archive.archiveBytes,
+      assertStoredFile(
+        services.store.rootDir,
+        ['archives', `${validDay}.tar.gz`],
+        null,
         '原始归档文件已不存在',
       );
       return services.archive.deleteArchive(validDay);
@@ -414,7 +428,7 @@ export async function handleRawDataArchiveGet(day: string, admin: RawDataAdminSe
   try {
     const validDay = validArchiveDay(day);
     const service = await admin;
-    const opened = service.openArchive(validDay);
+    const opened = await service.openArchive(validDay);
     return binaryResponse(opened.stream, {
       'Content-Type': 'application/gzip',
       'Content-Length': String(opened.archiveBytes),

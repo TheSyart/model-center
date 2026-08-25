@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import {
   existsSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   unlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,6 +35,7 @@ import type { RawCaptureEntry } from '../lib/raw-capture/types.ts';
 const recordA = '11111111-1111-4111-8111-111111111111';
 const recordB = '22222222-2222-4222-8222-222222222222';
 const recordC = '33333333-3333-4333-8333-333333333333';
+const day24 = '2026-08-24';
 const day25 = '2026-08-25';
 const day26 = '2026-08-26';
 
@@ -364,6 +367,35 @@ test('archive download streams the complete tar.gz and DELETE removes only one v
 
   const missing = await handleRawDataArchiveGet(day25, fixture.admin);
   assert.equal(missing.status, 404);
+});
+
+test('same-size corrupt archive returns 410 before download and targeted DELETE preserves every other day', async (t) => {
+  const fixture = createFixture(t);
+  await fixture.complete({ day: day24, id: recordA, request: Buffer.from('old-request'), response: Buffer.from('old-response') });
+  await fixture.complete({ day: day25, id: recordB, request: Buffer.from('target-request'), response: Buffer.from('target-response') });
+  await fixture.complete({ day: day26, id: recordC, request: Buffer.from('active-request'), response: Buffer.from('active-response') });
+  await fixture.archive.archiveClosedDays();
+  const target = join(fixture.rootDir, 'archives', `${day25}.tar.gz`);
+  const original = readFileSync(target);
+  const corrupted = Buffer.from(original);
+  corrupted[Math.max(10, Math.floor(corrupted.length / 2))] ^= 0xff;
+  writeFileSync(target, corrupted);
+  assert.equal(readFileSync(target).length, original.length);
+
+  const download = await handleRawDataArchiveGet(day25, fixture.admin);
+
+  assert.equal(download.status, 410);
+  assert.deepEqual(await json(download), { error: '原始归档文件已损坏' });
+
+  const deleted = await handleRawDataArchiveDelete(day25, fixture.admin);
+
+  assert.equal(deleted.status, 200);
+  assert.equal(existsSync(target), false);
+  assert.equal(fixture.store.getRecord(recordB), undefined);
+  assert.equal(existsSync(join(fixture.rootDir, 'archives', `${day24}.tar.gz`)), true);
+  assert.equal(fixture.store.getRecord(recordA)?.location, 'archived');
+  assert.equal(existsSync(join(fixture.rootDir, 'active', day26, recordC)), true);
+  assert.equal(fixture.store.getRecord(recordC)?.location, 'active');
 });
 
 test('indexed archive with a missing tarball returns 410', async (t) => {

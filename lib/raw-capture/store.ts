@@ -363,6 +363,40 @@ export function createRawCaptureStore(sqlite: Database.Database, options: RawCap
     WHERE raw_capture_records.location != 'archived'
   `);
 
+  const restoreArchivedRecord = sqlite.prepare(`
+    INSERT INTO raw_capture_records (
+      id, day, started_at, completed_at, path, entry_protocol, status, stream, content_type,
+      request_bytes, response_bytes, complete, capture_error, location
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      day = excluded.day,
+      started_at = excluded.started_at,
+      completed_at = excluded.completed_at,
+      path = excluded.path,
+      entry_protocol = excluded.entry_protocol,
+      status = excluded.status,
+      stream = excluded.stream,
+      content_type = excluded.content_type,
+      request_bytes = excluded.request_bytes,
+      response_bytes = excluded.response_bytes,
+      complete = excluded.complete,
+      capture_error = excluded.capture_error,
+      location = excluded.location
+  `);
+
+  const upsertArchive = sqlite.prepare(`
+    INSERT INTO raw_capture_archives (
+      day, record_count, raw_bytes, archive_bytes, created_at, status, error
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(day) DO UPDATE SET
+      record_count = excluded.record_count,
+      raw_bytes = excluded.raw_bytes,
+      archive_bytes = excluded.archive_bytes,
+      created_at = excluded.created_at,
+      status = excluded.status,
+      error = excluded.error
+  `);
+
   const updateRecord = sqlite.prepare(`
     UPDATE raw_capture_records
     SET completed_at = ?, status = ?, stream = ?, content_type = ?, request_bytes = ?,
@@ -382,18 +416,7 @@ export function createRawCaptureStore(sqlite: Database.Database, options: RawCap
     ) {
       throw new Error('归档记录索引在提交前发生变化');
     }
-    sqlite.prepare(`
-      INSERT INTO raw_capture_archives (
-        day, record_count, raw_bytes, archive_bytes, created_at, status, error
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(day) DO UPDATE SET
-        record_count = excluded.record_count,
-        raw_bytes = excluded.raw_bytes,
-        archive_bytes = excluded.archive_bytes,
-        created_at = excluded.created_at,
-        status = excluded.status,
-        error = excluded.error
-    `).run(
+    upsertArchive.run(
       archive.day,
       archive.recordCount,
       archive.rawBytes,
@@ -405,6 +428,71 @@ export function createRawCaptureStore(sqlite: Database.Database, options: RawCap
     sqlite.prepare(`
       UPDATE raw_capture_records SET location = 'archived' WHERE day = ?
     `).run(archive.day);
+  });
+
+  const restoreArchiveTransaction = sqlite.transaction((archive: RawCaptureArchive, records: RawCaptureRecord[]): void => {
+    const incomingIds = new Set(records.map((record) => record.id));
+    const existing = sqlite.prepare(`
+      SELECT * FROM raw_capture_records WHERE day = ? ORDER BY id ASC
+    `).all(archive.day) as RawCaptureRecordRow[];
+    if (existing.some((row) => row.location === 'active' && !incomingIds.has(row.id))) {
+      throw new Error('归档重建会遗漏仍在活动目录中的记录');
+    }
+    for (const record of records) {
+      const conflicting = sqlite.prepare(`
+        SELECT day FROM raw_capture_records WHERE id = ?
+      `).get(record.id) as { day: string } | undefined;
+      if (conflicting && conflicting.day !== archive.day) {
+        throw new Error(`归档重建记录 ID 与其他日期冲突：${record.id}`);
+      }
+    }
+
+    sqlite.prepare(`
+      DELETE FROM raw_capture_records WHERE day = ? AND location = 'archived'
+    `).run(archive.day);
+    for (const record of records) {
+      restoreArchivedRecord.run(
+        record.id,
+        record.day,
+        record.startedAt,
+        record.completedAt,
+        record.path,
+        record.entryProtocol,
+        record.status,
+        record.stream ? 1 : 0,
+        record.contentType,
+        record.requestBytes,
+        record.responseBytes,
+        record.complete ? 1 : 0,
+        record.captureError,
+        'archived',
+      );
+    }
+    upsertArchive.run(
+      archive.day,
+      archive.recordCount,
+      archive.rawBytes,
+      archive.archiveBytes,
+      archive.createdAt,
+      archive.status,
+      archive.error,
+    );
+  });
+
+  const recordArchiveFailureTransaction = sqlite.transaction((archive: RawCaptureArchive): void => {
+    const ready = sqlite.prepare(`
+      SELECT status FROM raw_capture_archives WHERE day = ?
+    `).get(archive.day) as { status: 'ready' | 'error' } | undefined;
+    if (ready?.status === 'ready') return;
+    upsertArchive.run(
+      archive.day,
+      archive.recordCount,
+      archive.rawBytes,
+      archive.archiveBytes,
+      archive.createdAt,
+      archive.status,
+      archive.error,
+    );
   });
 
   const deleteArchivedDayTransaction = sqlite.transaction((day: string): number => {
@@ -686,6 +774,46 @@ export function createRawCaptureStore(sqlite: Database.Database, options: RawCap
       commitArchiveTransaction(archive, ids);
     },
 
+    restoreArchive(archive: RawCaptureArchive, records: RawCaptureRecord[]): void {
+      assertArchiveDay(archive.day);
+      const sorted = [...records].sort((left, right) => left.id.localeCompare(right.id));
+      const ids = sorted.map((record) => assertRecordId(record.id));
+      if (
+        archive.status !== 'ready'
+        || archive.error !== null
+        || archive.recordCount !== sorted.length
+        || new Set(ids).size !== ids.length
+        || sorted.some((record) => (
+          record.day !== archive.day
+          || !record.complete
+          || record.location !== 'archived'
+          || record.captureError !== null
+        ))
+      ) {
+        throw new Error('归档重建索引无效');
+      }
+      const rawBytes = sorted.reduce((total, record) => total + record.requestBytes + record.responseBytes, 0);
+      if (archive.rawBytes !== rawBytes) throw new Error('归档重建字节统计无效');
+      restoreArchiveTransaction(archive, sorted);
+    },
+
+    recordArchiveFailure(day: string, message: string, createdAt = now()): void {
+      const validDay = assertArchiveDay(day);
+      const totals = sqlite.prepare(`
+        SELECT COUNT(*) AS count, COALESCE(SUM(request_bytes + response_bytes), 0) AS bytes
+        FROM raw_capture_records WHERE day = ?
+      `).get(validDay) as { count: number; bytes: number };
+      recordArchiveFailureTransaction({
+        day: validDay,
+        recordCount: Number(totals.count),
+        rawBytes: Number(totals.bytes),
+        archiveBytes: 0,
+        createdAt,
+        status: 'error',
+        error: message,
+      });
+    },
+
     deleteArchivedDay(day: string): boolean {
       assertArchiveDay(day);
       return deleteArchivedDayTransaction(day) === 1;
@@ -707,7 +835,9 @@ export function createRawCaptureStore(sqlite: Database.Database, options: RawCap
         coverage_start: number | null;
         coverage_end: number | null;
       };
-      const archiveCount = Number((sqlite.prepare('SELECT COUNT(*) AS count FROM raw_capture_archives').get() as { count: number }).count);
+      const archiveCount = Number((sqlite.prepare(`
+        SELECT COUNT(*) AS count FROM raw_capture_archives WHERE status = 'ready'
+      `).get() as { count: number }).count);
       const lastArchive = sqlite.prepare(`
         SELECT * FROM raw_capture_archives ORDER BY created_at DESC, day DESC LIMIT 1
       `).get() as RawCaptureArchiveRow | undefined;
