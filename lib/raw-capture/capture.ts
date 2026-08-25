@@ -2,7 +2,8 @@ import type { NextRequest } from 'next/server';
 
 import { getRawCaptureEnabled } from './config.ts';
 import { observeResponseBody } from './response-observer.ts';
-import { createRawCaptureStore, type RawCaptureStore } from './store.ts';
+import { getDefaultRawCaptureRuntime } from './runtime.ts';
+import type { RawCaptureStore } from './store.ts';
 import type { RawCaptureEntry, RawCaptureSession } from './types.ts';
 
 export type RawCaptureRouteHandler = (request: NextRequest) => Response | Promise<Response>;
@@ -26,17 +27,15 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
-/**
- * Task 4 connects the archive service here. Keeping the hook asynchronous lets
- * request handling remain independent from archive latency and failures.
- */
-export async function triggerArchiveCheck(): Promise<void> {}
+export async function triggerArchiveCheck(): Promise<void> {
+  const runtime = await getDefaultRawCaptureRuntime();
+  await runtime.archive.archiveClosedDays();
+}
 
 export const defaultRawCaptureDependencies: RawCaptureDependencies = {
   getEnabled: getRawCaptureEnabled,
   async createStore() {
-    const { sqlite } = await import('../db/index.ts');
-    return createRawCaptureStore(sqlite);
+    return (await getDefaultRawCaptureRuntime()).store;
   },
   triggerArchiveCheck,
 };

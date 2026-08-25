@@ -9,7 +9,6 @@ import { Readable } from 'node:stream';
 import type Database from 'better-sqlite3';
 
 import {
-  createRawCaptureArchiveService,
   type RawCaptureArchiveService,
   type RawCaptureBodyPart,
 } from './archive.ts';
@@ -20,7 +19,8 @@ import {
   assertArchiveDay,
   assertRecordId,
 } from './paths.ts';
-import { createRawCaptureStore, type RawCaptureStore } from './store.ts';
+import { createRawCaptureRuntime, getDefaultRawCaptureRuntime } from './runtime.ts';
+import type { RawCaptureStore } from './store.ts';
 import type {
   RawCaptureConfig,
   RawCapturePage,
@@ -282,15 +282,12 @@ export type RawDataAdminServiceSource = RawDataAdminService | PromiseLike<RawDat
 let defaultServicePromise: Promise<RawDataAdminService> | undefined;
 
 export function createDefaultRawDataAdminService(database: Database.Database): RawDataAdminService {
-  const store = createRawCaptureStore(database);
-  const config = createRawCaptureConfigStore(database);
-  const archive = createRawCaptureArchiveService(store);
-  return createRawDataAdminService({ config, store, archive });
+  return createRawDataAdminService(createRawCaptureRuntime(database));
 }
 
 export function getDefaultRawDataAdminService(): Promise<RawDataAdminService> {
-  defaultServicePromise ??= import('../db/index.ts')
-    .then(({ sqlite }) => createDefaultRawDataAdminService(sqlite))
+  defaultServicePromise ??= getDefaultRawCaptureRuntime()
+    .then((runtime) => createRawDataAdminService(runtime))
     .catch((error) => {
       defaultServicePromise = undefined;
       throw error;
