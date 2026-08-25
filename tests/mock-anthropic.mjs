@@ -125,6 +125,8 @@ const server = http.createServer((req, res) => {
         { type: 'tool_use', id: 'toolu_mock_1', name: 'get_weather', input: { city: '北京' } },
       ];
       stopReason = 'tool_use';
+    } else if (lastUserText(body).includes('echo-prompt')) {
+      content = [{ type: 'text', text: `echo:${lastUserText(body)}` }];
     } else if (hasImage(body)) {
       const types = summarize(body);
       content = [{ type: 'text', text: `收到图片，块结构: ${types}` }];

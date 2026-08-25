@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-const pages = ['/', '/providers', '/aliases', '/prompts', '/tokens', '/logs', '/settings'];
+const pages = ['/', '/providers', '/aliases', '/prompts', '/tokens', '/logs', '/security-lab', '/settings'];
 
 test('all admin modules render without page-level horizontal overflow', async ({ page }) => {
   const consoleErrors: string[] = [];
