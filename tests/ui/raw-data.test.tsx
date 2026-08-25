@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { axe } from 'vitest-axe';
 
 import RawDataClient from '@/app/(admin)/raw-data/raw-data-client';
-import { ConfirmProvider } from '@/components/confirm-dialog';
+import * as ConfirmDialog from '@/components/confirm-dialog';
 import { ToastProvider } from '@/components/toast';
 import type { RawCaptureArchive, RawCaptureRecord, RawCaptureStatus } from '@/lib/raw-capture/types';
 
@@ -78,16 +78,16 @@ function json(data: unknown, responseStatus = 200): Response {
 function renderClient() {
   return render(
     <ToastProvider>
-      <ConfirmProvider>
+      <ConfirmDialog.ConfirmProvider>
         <RawDataClient />
-      </ConfirmProvider>
+      </ConfirmDialog.ConfirmProvider>
     </ToastProvider>,
   );
 }
 
 function installRawDataApi(options: ApiOptions = {}) {
   let records = options.records ?? [record];
-  const archives = options.archives ?? [archive];
+  let archives = options.archives ?? [archive];
   let enabled = options.enabled ?? false;
   const putBodies: unknown[] = [];
 
@@ -130,6 +130,7 @@ function installRawDataApi(options: ApiOptions = {}) {
     }
     if (url === `/api/admin/raw-data/archives/${archive.day}` && method === 'DELETE') {
       records = records.filter((item) => item.day !== archive.day || item.location !== 'archived');
+      archives = archives.filter((item) => item.day !== archive.day);
       return json({ deleted: true, day: archive.day });
     }
     throw new Error(`unexpected request: ${method} ${url}`);
@@ -213,6 +214,108 @@ describe('RawDataClient', () => {
     expect(screen.queryByRole('button', { name: /清空/ })).not.toBeInTheDocument();
   });
 
+  it('disables every mutation control and rejects overlapping archive work while config is pending', async () => {
+    const user = userEvent.setup();
+    const api = installRawDataApi({ enabled: true });
+    renderClient();
+
+    const captureSwitch = await screen.findByRole('switch', { name: '记录所有原始对话' });
+    const archiveRunButton = screen.getByRole('button', { name: '执行归档检查' });
+    const deleteButton = screen.getByRole('button', { name: `删除 ${archive.day} 归档` });
+    const refreshButton = screen.getByRole('button', { name: '刷新数据' });
+    const configSave = deferred<Response>();
+    const mutationMethods: string[] = [];
+    api.fetchSpy.mockImplementation((input, init) => {
+      const method = init?.method ?? 'GET';
+      if (method !== 'GET') mutationMethods.push(method);
+      if (String(input) === '/api/admin/raw-data/config' && method === 'PUT') return configSave.promise;
+      return api.respond(input, init);
+    });
+
+    await user.click(captureSwitch);
+    await waitFor(() => expect(mutationMethods).toEqual(['PUT']));
+    expect.soft(captureSwitch).toBeDisabled();
+    expect.soft(archiveRunButton).toBeDisabled();
+    expect.soft(deleteButton).toBeDisabled();
+    expect.soft(refreshButton).toBeDisabled();
+    act(() => { archiveRunButton.click(); });
+
+    await act(async () => {
+      configSave.resolve(json({ config: { enabled: false }, status: { ...status, enabled: false } }));
+      await configSave.promise;
+    });
+    await waitFor(() => expect(captureSwitch).toBeEnabled());
+    expect(mutationMethods).toEqual(['PUT']);
+  });
+
+  it('ignores a stale mutation response and performs one coherent authoritative refresh', async () => {
+    const user = userEvent.setup();
+    const api = installRawDataApi({ enabled: true });
+    renderClient();
+    const captureSwitch = await screen.findByRole('switch', { name: '记录所有原始对话' });
+    let mutationStarted = false;
+    const refreshReads = { config: 0, records: 0, archives: 0 };
+
+    api.fetchSpy.mockImplementation((input, init) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (url === '/api/admin/raw-data/config' && method === 'PUT') {
+        mutationStarted = true;
+        return Promise.resolve(json({
+          config: { enabled: false },
+          status: { ...status, enabled: false, todayRecords: 999 },
+        }));
+      }
+      if (mutationStarted && url === '/api/admin/raw-data/config' && method === 'GET') {
+        refreshReads.config += 1;
+        return Promise.resolve(json({
+          config: { enabled: true },
+          status: { ...status, enabled: true, todayRecords: 2 },
+        }));
+      }
+      if (mutationStarted && url.startsWith('/api/admin/raw-data/records?') && method === 'GET') {
+        refreshReads.records += 1;
+      }
+      if (mutationStarted && url === '/api/admin/raw-data/archives' && method === 'GET') {
+        refreshReads.archives += 1;
+      }
+      return api.respond(input, init);
+    });
+
+    await user.click(captureSwitch);
+
+    expect(await screen.findByRole('status')).toHaveTextContent('原始数据采集已关闭');
+    await waitFor(() => expect(refreshReads).toEqual({ config: 1, records: 1, archives: 1 }));
+    expect(captureSwitch).toBeChecked();
+    expect(screen.getByText('2 条')).toBeVisible();
+    expect(screen.queryByText('999 条')).not.toBeInTheDocument();
+  });
+
+  it('releases the mutation guard after a real failure and keeps the error visible', async () => {
+    const user = userEvent.setup();
+    const api = installRawDataApi({ enabled: true });
+    renderClient();
+    const captureSwitch = await screen.findByRole('switch', { name: '记录所有原始对话' });
+    const archiveRunButton = screen.getByRole('button', { name: '执行归档检查' });
+    api.fetchSpy.mockImplementation((input, init) => {
+      if (String(input) === '/api/admin/raw-data/config' && init?.method === 'PUT') {
+        return Promise.resolve(json({ error: '配置写入失败' }, 500));
+      }
+      return api.respond(input, init);
+    });
+
+    await user.click(captureSwitch);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('配置写入失败');
+    await waitFor(() => expect(archiveRunButton).toBeEnabled());
+    await user.click(archiveRunButton);
+    await waitFor(() => expect(api.fetchSpy).toHaveBeenCalledWith(
+      '/api/admin/raw-data/archives',
+      expect.objectContaining({ method: 'POST' }),
+    ));
+    expect(await screen.findByRole('status')).toHaveTextContent('归档检查已完成');
+  });
+
   it('removes deleted archive records from the visible pagination total', async () => {
     const user = userEvent.setup();
     const archivedRecord: RawCaptureRecord = { ...record, day: archive.day, location: 'archived' };
@@ -286,6 +389,58 @@ describe('RawDataClient', () => {
     });
   });
 
+  it('aborts the rest of a failed refresh batch and leaves no orphan after the next poll unmounts', async () => {
+    let poll: (() => void) | undefined;
+    vi.spyOn(window, 'setInterval').mockImplementation((handler, timeout) => {
+      if (timeout === 2000) poll = () => handler(undefined);
+      return 1 as unknown as ReturnType<typeof window.setInterval>;
+    });
+    const api = installRawDataApi({ enabled: true });
+    const view = renderClient();
+    await screen.findByText('今日原始数据');
+    await waitFor(() => expect(poll).toBeTypeOf('function'));
+
+    let mode: 'fail' | 'hang' = 'fail';
+    let activeRequests = 0;
+    let abortedRequests = 0;
+    const waitForAbort = (signal: AbortSignal | null | undefined) => new Promise<Response>((_resolve, reject) => {
+      activeRequests += 1;
+      signal?.addEventListener('abort', () => {
+        activeRequests -= 1;
+        abortedRequests += 1;
+        reject(new DOMException('Aborted', 'AbortError'));
+      }, { once: true });
+    });
+    api.fetchSpy.mockImplementation((input, init) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      if (method === 'GET' && mode === 'fail' && url === '/api/admin/raw-data/config') {
+        return Promise.resolve(json({ error: '磁盘不可用' }, 500));
+      }
+      if (method === 'GET' && mode === 'fail' && url.startsWith('/api/admin/raw-data/records?')) {
+        return waitForAbort(init?.signal);
+      }
+      if (method === 'GET' && mode === 'hang' && url === '/api/admin/raw-data/config') {
+        return waitForAbort(init?.signal);
+      }
+      return api.respond(input, init);
+    });
+
+    act(() => { poll?.(); });
+    expect(await screen.findByRole('alert')).toHaveTextContent('磁盘不可用');
+    await waitFor(() => expect.soft(activeRequests).toBe(0));
+    expect.soft(abortedRequests).toBe(1);
+
+    const orphanedBeforeNextPoll = activeRequests;
+    mode = 'hang';
+    act(() => { poll?.(); });
+    await waitFor(() => expect(activeRequests).toBe(orphanedBeforeNextPoll + 1));
+    view.unmount();
+    await waitFor(() => expect(activeRequests).toBe(orphanedBeforeNextPoll));
+    expect(activeRequests).toBe(0);
+    expect(abortedRequests).toBe(2);
+  });
+
   it('aborts a pending poll on disable and ignores its stale response', async () => {
     let poll: (() => void) | undefined;
     vi.spyOn(window, 'setInterval').mockImplementation((handler, timeout) => {
@@ -300,8 +455,10 @@ describe('RawDataClient', () => {
 
     const staleConfig = deferred<Response>();
     let pollSignal: AbortSignal | undefined;
+    let interceptedPoll = false;
     api.fetchSpy.mockImplementation((input, init) => {
-      if (String(input) === '/api/admin/raw-data/config' && (!init?.method || init.method === 'GET')) {
+      if (!interceptedPoll && String(input) === '/api/admin/raw-data/config' && (!init?.method || init.method === 'GET')) {
+        interceptedPoll = true;
         pollSignal = init?.signal ?? undefined;
         return staleConfig.promise;
       }
@@ -351,6 +508,48 @@ describe('RawDataClient', () => {
     view.unmount();
     expect(pollSignal?.aborted).toBe(true);
     await act(async () => { await Promise.resolve(); });
+  });
+
+  it('does not enable capture when confirmation resolves after unmount', async () => {
+    const confirmation = deferred<boolean>();
+    const confirm = vi.fn(() => confirmation.promise);
+    vi.spyOn(ConfirmDialog, 'useConfirm').mockReturnValue({ confirm });
+    const api = installRawDataApi();
+    const user = userEvent.setup();
+    const view = renderClient();
+
+    await user.click(await screen.findByRole('switch', { name: '记录所有原始对话' }));
+    expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ title: '开启原始数据采集？' }));
+    view.unmount();
+    await act(async () => {
+      confirmation.resolve(true);
+      await confirmation.promise;
+      await Promise.resolve();
+    });
+
+    expect(api.fetchSpy.mock.calls.some(([, init]) => init?.method === 'PUT')).toBe(false);
+  });
+
+  it('does not delete an archive when confirmation resolves after unmount', async () => {
+    const confirmation = deferred<boolean>();
+    const confirm = vi.fn(() => confirmation.promise);
+    vi.spyOn(ConfirmDialog, 'useConfirm').mockReturnValue({ confirm });
+    const api = installRawDataApi();
+    const user = userEvent.setup();
+    const view = renderClient();
+
+    await user.click(await screen.findByRole('button', { name: `删除 ${archive.day} 归档` }));
+    expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ title: `删除 ${archive.day} 归档？` }));
+    view.unmount();
+    await act(async () => {
+      confirmation.resolve(true);
+      await confirmation.promise;
+      await Promise.resolve();
+    });
+
+    expect(api.fetchSpy.mock.calls.some(([input, init]) => (
+      String(input) === `/api/admin/raw-data/archives/${archive.day}` && init?.method === 'DELETE'
+    ))).toBe(false);
   });
 
   it('announces API failures without replacing retained records', async () => {

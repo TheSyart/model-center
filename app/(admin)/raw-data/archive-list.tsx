@@ -11,6 +11,7 @@ export interface ArchiveListProps {
   loading: boolean;
   pendingDay: string | null;
   archiveRunning: boolean;
+  mutationPending: boolean;
   onRun: () => void;
   onDelete: (archive: RawCaptureArchive) => void;
 }
@@ -21,7 +22,7 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(2)} MiB`;
 }
 
-export function ArchiveList({ archives, loading, pendingDay, archiveRunning, onRun, onDelete }: ArchiveListProps) {
+export function ArchiveList({ archives, loading, pendingDay, archiveRunning, mutationPending, onRun, onDelete }: ArchiveListProps) {
   return (
     <Card>
       <CardHeader className="flex-row items-center justify-between space-y-0 border-b border-border py-4">
@@ -29,7 +30,7 @@ export function ArchiveList({ archives, loading, pendingDay, archiveRunning, onR
           <CardTitle>每日归档</CardTitle>
           <p className="mt-1 text-xs text-muted-foreground">每个已结束的本地自然日最多生成一个 tar.gz。</p>
         </div>
-        <Button type="button" variant="outline" size="sm" className="min-h-11 sm:min-h-9" disabled={loading || archiveRunning} onClick={onRun}>
+        <Button type="button" variant="outline" size="sm" className="min-h-11 sm:min-h-9" disabled={loading || mutationPending || archiveRunning} onClick={onRun}>
           <RefreshCw className={archiveRunning ? 'size-4 animate-spin' : 'size-4'} aria-hidden="true" />执行归档检查
         </Button>
       </CardHeader>
@@ -59,7 +60,7 @@ export function ArchiveList({ archives, loading, pendingDay, archiveRunning, onR
                       <a href={`/api/admin/raw-data/archives/${item.day}`} download aria-label={`下载 ${item.day} 归档`}><Download className="size-4" aria-hidden="true" />下载</a>
                     </Button>
                   )}
-                  <Button type="button" variant="dangerOutline" size="sm" className="min-h-11 flex-1 sm:min-h-9 sm:flex-none" disabled={pendingDay === item.day} onClick={() => onDelete(item)} aria-label={`删除 ${item.day} 归档`}>
+                  <Button type="button" variant="dangerOutline" size="sm" className="min-h-11 flex-1 sm:min-h-9 sm:flex-none" disabled={mutationPending || pendingDay === item.day} onClick={() => onDelete(item)} aria-label={`删除 ${item.day} 归档`}>
                     <Trash2 className="size-4" aria-hidden="true" />删除
                   </Button>
                 </div>

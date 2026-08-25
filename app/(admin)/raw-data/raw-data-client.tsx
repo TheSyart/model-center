@@ -14,6 +14,11 @@ import { RawRecordList } from './raw-record-list';
 
 type DashboardResponse = { config: RawCaptureConfig; status: RawCaptureStatus };
 type ArchivesResponse = { archives: RawCaptureArchive[] };
+type RefreshOptions = {
+  quiet?: boolean;
+  policy?: 'replace' | 'skip';
+  duringMutation?: boolean;
+};
 
 const EMPTY_PAGE: RawCapturePage = { items: [], total: 0, page: 1, pageSize: 20 };
 
@@ -39,14 +44,14 @@ export default function RawDataClient() {
   const [selected, setSelected] = useState<RawCaptureRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [configPending, setConfigPending] = useState(false);
+  const [mutationPending, setMutationPending] = useState(false);
   const [archiveRunning, setArchiveRunning] = useState(false);
   const [pendingDay, setPendingDay] = useState<string | null>(null);
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const requestVersion = useRef(0);
   const refreshController = useRef<AbortController | null>(null);
-  const activeMutations = useRef(0);
+  const mutationActive = useRef(false);
   const mounted = useRef(true);
   const detailTriggerRef = useRef<HTMLElement | null>(null);
   const { confirm } = useConfirm();
@@ -65,22 +70,21 @@ export default function RawDataClient() {
     }
   }, []);
 
-  const beginMutation = useCallback(() => {
-    activeMutations.current += 1;
+  const beginMutation = useCallback((): boolean => {
+    if (!mounted.current || mutationActive.current) return false;
+    mutationActive.current = true;
     cancelRefresh();
+    setMutationPending(true);
+    return true;
   }, [cancelRefresh]);
-
-  const endMutation = useCallback(() => {
-    activeMutations.current = Math.max(0, activeMutations.current - 1);
-  }, []);
 
   const refresh = useCallback(async (
     targetPage: number,
     includeArchives: boolean,
-    quiet = false,
-    policy: 'replace' | 'skip' = 'replace',
+    options: RefreshOptions = {},
   ) => {
-    if (activeMutations.current > 0) return;
+    const { quiet = false, policy = 'replace', duringMutation = false } = options;
+    if (mutationActive.current && !duringMutation) return;
     if (refreshController.current) {
       if (policy === 'skip') return;
       refreshController.current.abort();
@@ -108,7 +112,9 @@ export default function RawDataClient() {
         : null);
       setError('');
     } catch (loadError) {
-      if (controller.signal.aborted || !mounted.current || version !== requestVersion.current) return;
+      const wasAborted = controller.signal.aborted;
+      if (!wasAborted) controller.abort();
+      if (wasAborted || !mounted.current || version !== requestVersion.current) return;
       showError(errorMessage(loadError, '原始数据加载失败'));
     } finally {
       if (refreshController.current === controller) refreshController.current = null;
@@ -118,6 +124,17 @@ export default function RawDataClient() {
       }
     }
   }, [showError]);
+
+  const finishMutation = useCallback(async (targetPage: number) => {
+    try {
+      if (mounted.current) {
+        await refresh(targetPage, true, { quiet: true, duringMutation: true });
+      }
+    } finally {
+      mutationActive.current = false;
+      if (mounted.current) setMutationPending(false);
+    }
+  }, [refresh]);
 
   useEffect(() => {
     mounted.current = true;
@@ -130,7 +147,9 @@ export default function RawDataClient() {
 
   useEffect(() => {
     if (!dashboard?.config.enabled) return;
-    const timer = window.setInterval(() => { void refresh(records.page, false, true, 'skip'); }, 2000);
+    const timer = window.setInterval(() => {
+      void refresh(records.page, false, { quiet: true, policy: 'skip' });
+    }, 2000);
     return () => window.clearInterval(timer);
   }, [dashboard?.config.enabled, records.page, refresh]);
 
@@ -142,67 +161,65 @@ export default function RawDataClient() {
         confirmText: '确认开启',
         danger: true,
       });
-      if (!approved) return;
+      if (!approved || !mounted.current) return;
     }
 
-    beginMutation();
-    setConfigPending(true);
+    if (!beginMutation()) return;
     setError('');
     setNotice('');
+    let failure = '';
+    const success = enabled ? '原始数据采集已开启' : '原始数据采集已关闭';
     try {
-      const next = await requestJson<DashboardResponse>('/api/admin/raw-data/config', {
+      await requestJson<DashboardResponse>('/api/admin/raw-data/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled }),
       });
-      if (!mounted.current) return;
-      setDashboard(next);
-      const message = enabled ? '原始数据采集已开启' : '原始数据采集已关闭';
-      setNotice(message);
-      toast(message);
     } catch (saveError) {
-      if (!mounted.current) return;
-      const message = errorMessage(saveError, '采集配置保存失败');
-      showError(message);
-      toast(message, 'error');
+      failure = errorMessage(saveError, '采集配置保存失败');
     } finally {
-      endMutation();
-      if (mounted.current) setConfigPending(false);
+      await finishMutation(records.page);
+      if (!mounted.current) return;
+      if (failure) {
+        showError(failure);
+        toast(failure, 'error');
+      } else {
+        setNotice(success);
+        toast(success);
+      }
     }
   }
 
   async function runArchiveCheck() {
-    beginMutation();
+    if (!beginMutation()) return;
     setArchiveRunning(true);
     setError('');
     setNotice('');
+    let failure = '';
+    let success = '';
     try {
       const result = await requestJson<ArchiveRunResult>('/api/admin/raw-data/archives', { method: 'POST' });
-      const [archiveResponse, nextDashboard] = await Promise.all([
-        requestJson<ArchivesResponse>('/api/admin/raw-data/archives'),
-        requestJson<DashboardResponse>('/api/admin/raw-data/config'),
-      ]);
-      if (!mounted.current) return;
-      setArchives(archiveResponse.archives);
-      setDashboard(nextDashboard);
       const message = result.errors.length > 0
         ? `归档检查完成，${result.errors.length} 个日期失败`
         : `归档检查已完成，新增 ${result.archived.length} 个归档`;
       if (result.errors.length > 0) {
-        showError(message);
-        toast(message, 'error');
+        failure = message;
       } else {
-        setNotice(message);
-        toast(message);
+        success = message;
       }
     } catch (archiveError) {
-      if (!mounted.current) return;
-      const message = errorMessage(archiveError, '归档检查失败');
-      showError(message);
-      toast(message, 'error');
+      failure = errorMessage(archiveError, '归档检查失败');
     } finally {
-      endMutation();
-      if (mounted.current) setArchiveRunning(false);
+      await finishMutation(records.page);
+      if (!mounted.current) return;
+      setArchiveRunning(false);
+      if (failure) {
+        showError(failure);
+        toast(failure, 'error');
+      } else {
+        setNotice(success);
+        toast(success);
+      }
     }
   }
 
@@ -213,34 +230,29 @@ export default function RawDataClient() {
       confirmText: '删除归档',
       danger: true,
     });
-    if (!approved) return;
-    beginMutation();
+    if (!approved || !mounted.current) return;
+    if (!beginMutation()) return;
     setPendingDay(item.day);
     setError('');
     setNotice('');
+    let failure = '';
+    const success = `${item.day} 归档已删除`;
     try {
       await requestJson<{ deleted: true; day: string }>(`/api/admin/raw-data/archives/${item.day}`, { method: 'DELETE' });
-      if (!mounted.current) return;
-      setArchives((current) => current.filter((archive) => archive.day !== item.day));
-      if (selected?.day === item.day && selected.location === 'archived') setSelected(null);
-      const [nextDashboard, nextRecords] = await Promise.all([
-        requestJson<DashboardResponse>('/api/admin/raw-data/config'),
-        loadRecordPage(records.page),
-      ]);
-      if (!mounted.current) return;
-      setDashboard(nextDashboard);
-      setRecords(nextRecords);
-      const message = `${item.day} 归档已删除`;
-      setNotice(message);
-      toast(message);
+      if (mounted.current && selected?.day === item.day && selected.location === 'archived') setSelected(null);
     } catch (deleteError) {
-      if (!mounted.current) return;
-      const message = errorMessage(deleteError, '归档删除失败');
-      showError(message);
-      toast(message, 'error');
+      failure = errorMessage(deleteError, '归档删除失败');
     } finally {
-      endMutation();
-      if (mounted.current) setPendingDay(null);
+      await finishMutation(records.page);
+      if (!mounted.current) return;
+      setPendingDay(null);
+      if (failure) {
+        showError(failure);
+        toast(failure, 'error');
+      } else {
+        setNotice(success);
+        toast(success);
+      }
     }
   }
 
@@ -252,7 +264,7 @@ export default function RawDataClient() {
       <CaptureControl
         config={dashboard?.config ?? null}
         status={dashboard?.status ?? null}
-        pending={configPending}
+        pending={mutationPending}
         onEnabledChange={(enabled) => { void changeEnabled(enabled); }}
       />
 
@@ -260,6 +272,7 @@ export default function RawDataClient() {
         page={records}
         loading={loading}
         refreshing={refreshing}
+        mutationPending={mutationPending}
         onRefresh={() => { void refresh(records.page, true); }}
         onSelect={(record) => {
           detailTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -273,6 +286,7 @@ export default function RawDataClient() {
         loading={loading}
         pendingDay={pendingDay}
         archiveRunning={archiveRunning}
+        mutationPending={mutationPending}
         onRun={() => { void runArchiveCheck(); }}
         onDelete={(item) => { void deleteArchive(item); }}
       />

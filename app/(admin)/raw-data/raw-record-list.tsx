@@ -11,6 +11,7 @@ export interface RawRecordListProps {
   page: RawCapturePage;
   loading: boolean;
   refreshing: boolean;
+  mutationPending: boolean;
   onRefresh: () => void;
   onSelect: (record: RawCaptureRecord) => void;
   onPageChange: (page: number) => void;
@@ -56,7 +57,7 @@ function RecordAction({ record, onSelect }: { record: RawCaptureRecord; onSelect
   );
 }
 
-export function RawRecordList({ page, loading, refreshing, onRefresh, onSelect, onPageChange }: RawRecordListProps) {
+export function RawRecordList({ page, loading, refreshing, mutationPending, onRefresh, onSelect, onPageChange }: RawRecordListProps) {
   const totalPages = Math.max(1, Math.ceil(page.total / page.pageSize));
   return (
     <Card>
@@ -65,7 +66,7 @@ export function RawRecordList({ page, loading, refreshing, onRefresh, onSelect, 
           <CardTitle>原始记录</CardTitle>
           <p className="mt-1 text-xs text-muted-foreground">仅展示索引元数据，不读取或分析正文。</p>
         </div>
-        <Button type="button" variant="outline" size="sm" className="min-h-11 sm:min-h-9" onClick={onRefresh} disabled={refreshing}>
+        <Button type="button" variant="outline" size="sm" className="min-h-11 sm:min-h-9" onClick={onRefresh} disabled={refreshing || mutationPending}>
           <RefreshCw className={refreshing ? 'size-4 animate-spin' : 'size-4'} aria-hidden="true" />刷新数据
         </Button>
       </CardHeader>
@@ -136,10 +137,10 @@ export function RawRecordList({ page, loading, refreshing, onRefresh, onSelect, 
         <div className="flex flex-col gap-3 border-t border-border px-4 py-3 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
           <span>第 {page.page} / {totalPages} 页，共 {page.total} 条</span>
           <div className="flex gap-2">
-            <Button type="button" variant="outline" size="sm" className="min-h-11 sm:min-h-9" disabled={page.page <= 1 || refreshing} onClick={() => onPageChange(page.page - 1)}>
+            <Button type="button" variant="outline" size="sm" className="min-h-11 sm:min-h-9" disabled={page.page <= 1 || refreshing || mutationPending} onClick={() => onPageChange(page.page - 1)}>
               <ChevronLeft className="size-4" aria-hidden="true" />上一页
             </Button>
-            <Button type="button" variant="outline" size="sm" className="min-h-11 sm:min-h-9" disabled={page.page >= totalPages || refreshing} onClick={() => onPageChange(page.page + 1)}>
+            <Button type="button" variant="outline" size="sm" className="min-h-11 sm:min-h-9" disabled={page.page >= totalPages || refreshing || mutationPending} onClick={() => onPageChange(page.page + 1)}>
               下一页<ChevronRight className="size-4" aria-hidden="true" />
             </Button>
           </div>
