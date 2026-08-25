@@ -7,11 +7,12 @@ import { GatewayError, anthropicErrorResponse } from '@/lib/gateway/errors';
 import { extractPromptExtension } from '@/lib/gateway/extensions';
 import { runGatewayPipeline } from '@/lib/gateway/pipeline';
 import { anthropicRequestToIR } from '@/lib/protocols/anthropic';
+import { withRawCapture } from '@/lib/raw-capture/capture';
 import { runSecurityLabRewrite } from '@/lib/security-lab/execution';
 import { createSecurityLabStore } from '@/lib/security-lab/store';
 import { normalizeRequestSource } from '@/lib/services/usage-metrics';
 
-export async function POST(req: NextRequest) {
+async function handlePost(req: NextRequest): Promise<Response> {
   const auth = checkGatewayAuth(req);
   if (!auth.ok) return anthropicErrorResponse(401, auth.message);
 
@@ -68,6 +69,11 @@ export async function POST(req: NextRequest) {
     return anthropicErrorResponse(500, `Security Lab 网关错误: ${message}`);
   }
 }
+
+export const POST = withRawCapture(
+  { entry: 'security-lab-anthropic', path: '/security-lab/v1/messages' },
+  handlePost,
+);
 
 export function GET() {
   return NextResponse.json(

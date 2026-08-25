@@ -4,6 +4,7 @@ import { GatewayError, anthropicErrorResponse } from '@/lib/gateway/errors';
 import { extractPromptExtension } from '@/lib/gateway/extensions';
 import { runGatewayPipeline } from '@/lib/gateway/pipeline';
 import { anthropicRequestToIR } from '@/lib/protocols/anthropic';
+import { withRawCapture } from '@/lib/raw-capture/capture';
 import { normalizeRequestSource } from '@/lib/services/usage-metrics';
 
 /**
@@ -11,7 +12,7 @@ import { normalizeRequestSource } from '@/lib/services/usage-metrics';
  * 鉴权：x-api-key 或 Authorization: Bearer（同为 gateway_key）。
  * 错误一律 Anthropic 格式 { type:'error', error:{ type, message } }。
  */
-export async function POST(req: NextRequest) {
+async function handlePost(req: NextRequest): Promise<Response> {
   const auth = checkGatewayAuth(req);
   if (!auth.ok) {
     return anthropicErrorResponse(401, auth.message);
@@ -56,6 +57,11 @@ export async function POST(req: NextRequest) {
     return anthropicErrorResponse(500, `网关内部错误: ${message}`);
   }
 }
+
+export const POST = withRawCapture(
+  { entry: 'anthropic', path: '/v1/messages' },
+  handlePost,
+);
 
 export function GET() {
   return NextResponse.json(

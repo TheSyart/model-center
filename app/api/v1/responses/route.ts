@@ -4,6 +4,7 @@ import { GatewayError, gatewayErrorToResponse, openaiErrorResponse } from '@/lib
 import { extractPromptExtension } from '@/lib/gateway/extensions';
 import { runGatewayPipeline } from '@/lib/gateway/pipeline';
 import { responsesRequestToIR } from '@/lib/protocols/responses';
+import { withRawCapture } from '@/lib/raw-capture/capture';
 import { normalizeRequestSource } from '@/lib/services/usage-metrics';
 
 /**
@@ -11,7 +12,7 @@ import { normalizeRequestSource } from '@/lib/services/usage-metrics';
  * 鉴权：Authorization: Bearer <gateway_key>。错误沿用 OpenAI 错误 JSON 格式。
  * 目标 provider 为 openai-responses 原生协议时直接透传，否则经 IR 转换（§3.2）。
  */
-export async function POST(req: NextRequest) {
+async function handlePost(req: NextRequest): Promise<Response> {
   const auth = checkGatewayAuth(req);
   if (!auth.ok) {
     return openaiErrorResponse(401, auth.message, { type: 'authentication_error', code: auth.code });
@@ -52,6 +53,11 @@ export async function POST(req: NextRequest) {
     return openaiErrorResponse(500, `网关内部错误: ${message}`, { type: 'server_error' });
   }
 }
+
+export const POST = withRawCapture(
+  { entry: 'responses', path: '/v1/responses' },
+  handlePost,
+);
 
 export function GET() {
   return NextResponse.json(

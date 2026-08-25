@@ -3,10 +3,11 @@ import { checkGatewayAuth } from '@/lib/gateway/auth';
 import { GatewayError, gatewayErrorToResponse, openaiErrorResponse } from '@/lib/gateway/errors';
 import { extractPromptExtension } from '@/lib/gateway/extensions';
 import { runGatewayPipeline } from '@/lib/gateway/pipeline';
+import { withRawCapture } from '@/lib/raw-capture/capture';
 import { normalizeRequestSource } from '@/lib/services/usage-metrics';
 
 // POST /api/v1/chat/completions（对外经 rewrite 暴露为 /v1/chat/completions）
-export async function POST(req: NextRequest) {
+async function handlePost(req: NextRequest): Promise<Response> {
   const auth = checkGatewayAuth(req);
   if (!auth.ok) {
     return openaiErrorResponse(401, auth.message, { type: 'authentication_error', code: auth.code });
@@ -47,6 +48,11 @@ export async function POST(req: NextRequest) {
     return openaiErrorResponse(500, `网关内部错误: ${message}`, { type: 'server_error' });
   }
 }
+
+export const POST = withRawCapture(
+  { entry: 'openai', path: '/v1/chat/completions' },
+  handlePost,
+);
 
 // 其余方法不允许
 export function GET() {
