@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   constants,
   createReadStream,
@@ -375,7 +375,8 @@ function sameRecord(left: RawCaptureRecord, right: RawCaptureRecord): boolean {
     && left.requestBytes === right.requestBytes
     && left.responseBytes === right.responseBytes
     && left.complete === right.complete
-    && left.captureError === right.captureError;
+    && left.captureError === right.captureError
+    && left.location === right.location;
 }
 
 async function verifyArchive(
@@ -420,6 +421,25 @@ function archiveRow(day: string, inspected: InspectedArchive, createdAt = inspec
     status: 'ready',
     error: null,
   };
+}
+
+async function hashManagedFile(rootDir: string, segments: string[]): Promise<string> {
+  const { path } = assertManagedRegularFile(rootDir, ...segments);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const hash = createHash('sha256');
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  let position = 0;
+  try {
+    while (true) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+      if (bytesRead === 0) break;
+      hash.update(buffer.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+    return hash.digest('hex');
+  } finally {
+    await handle.close();
+  }
 }
 
 async function removeExactActiveDay(rootDir: string, day: string, recordIds: string[]): Promise<void> {
@@ -517,7 +537,38 @@ export function createRawCaptureArchiveService(
     }
   };
 
-  const recoverDeleteTombstones = async (today: string, result: ArchiveRunResult): Promise<void> => {
+  const verifyIndexedArchive = async (
+    day: string,
+    indexed: RawCaptureArchive,
+    segments: string[],
+  ): Promise<InspectedArchive> => {
+    if (indexed.status !== 'ready' || indexed.error !== null) {
+      throw new Error('归档索引不是可恢复的完成状态');
+    }
+    const indexedRecords = store.listRecordsForDay(day)
+      .filter((record) => record.location === 'archived')
+      .sort((left, right) => left.id.localeCompare(right.id));
+    if (indexedRecords.length !== indexed.recordCount) {
+      throw new Error('归档记录索引数量不一致');
+    }
+    const inspected = await verifyArchive(rootDir, segments, day, indexedRecords);
+    const totals = archiveRow(day, inspected, indexed.createdAt);
+    if (
+      totals.recordCount !== indexed.recordCount
+      || totals.rawBytes !== indexed.rawBytes
+      || totals.archiveBytes !== indexed.archiveBytes
+    ) {
+      throw new Error('归档总计与索引不一致');
+    }
+    return inspected;
+  };
+
+  const recoverDeleteTombstones = async (today: string, result: ArchiveRunResult): Promise<Set<string>> => {
+    const blockedDays = new Set<string>();
+    const blockRecovery = (day: string, message: string): void => {
+      blockedDays.add(day);
+      result.errors.push({ day, message });
+    };
     const temporaryRoot = assertManagedDirectory(rootDir, 'tmp');
     const grouped = new Map<string, string[]>();
     for (const entry of await readdir(temporaryRoot, { withFileTypes: true })) {
@@ -530,56 +581,68 @@ export function createRawCaptureArchiveService(
 
     for (const [day, names] of [...grouped].sort(([left], [right]) => left.localeCompare(right))) {
       if (day >= today) {
-        result.errors.push({ day, message: '删除 tombstone 日期尚未结束' });
+        blockRecovery(day, '删除 tombstone 日期尚未结束');
         continue;
       }
       if (names.length !== 1) {
-        result.errors.push({ day, message: '同一日期存在多个删除 tombstone 冲突' });
+        blockRecovery(day, '同一日期存在多个删除 tombstone 冲突');
         continue;
       }
       const tombstoneSegments = ['tmp', names[0]!];
       const tombstone = assertManagedRegularFile(rootDir, ...tombstoneSegments).path;
       const finalSegments = ['archives', `${day}.tar.gz`];
-      if (managedExists(rootDir, finalSegments)) {
-        result.errors.push({ day, message: '最终归档与删除 tombstone 冲突，已保留两份文件' });
-        continue;
-      }
       const indexed = store.listArchives().find((archive) => archive.day === day);
       if (!indexed) {
-        await unlink(tombstone);
+        if (managedExists(rootDir, finalSegments)) {
+          blockRecovery(day, '最终归档与无索引删除 tombstone 冲突，已保留两份文件');
+        } else {
+          await unlink(tombstone);
+        }
         continue;
       }
-      if (indexed.status !== 'ready') {
-        result.errors.push({ day, message: '错误状态索引与删除 tombstone 冲突' });
+      if (indexed.status !== 'ready' || indexed.error !== null) {
+        blockRecovery(day, '错误状态索引与删除 tombstone 冲突');
         continue;
       }
       try {
-        const inspected = await inspectArchive(rootDir, tombstoneSegments, day);
-        const restoredArchive = archiveRow(day, inspected, indexed.createdAt);
-        if (
-          restoredArchive.recordCount !== indexed.recordCount
-          || restoredArchive.rawBytes !== indexed.rawBytes
-          || restoredArchive.archiveBytes !== indexed.archiveBytes
-        ) {
-          throw new Error('删除 tombstone 与归档索引不一致');
+        const finalExists = managedExists(rootDir, finalSegments);
+        if (finalExists) {
+          await verifyIndexedArchive(day, indexed, finalSegments);
+          await verifyIndexedArchive(day, indexed, tombstoneSegments);
+          const [finalHash, tombstoneHash] = await Promise.all([
+            hashManagedFile(rootDir, finalSegments),
+            hashManagedFile(rootDir, tombstoneSegments),
+          ]);
+          if (finalHash !== tombstoneHash) {
+            throw new Error('最终归档与删除 tombstone 内容不一致');
+          }
+          await unlink(tombstone);
+          continue;
         }
-        store.restoreArchive(restoredArchive, inspected.records);
+
+        await verifyIndexedArchive(day, indexed, tombstoneSegments);
+        if (managedExists(rootDir, finalSegments)) throw new Error('恢复时最终归档已存在');
         await rename(tombstone, managedFilePath(rootDir, ...finalSegments));
         assertManagedRegularFile(rootDir, ...finalSegments);
       } catch (error) {
-        result.errors.push({ day, message: errorMessage(error) });
+        blockRecovery(day, `删除 tombstone 恢复失败：${errorMessage(error)}`);
       }
     }
+    return blockedDays;
   };
 
-  const recoverFinalArchives = async (today: string, result: ArchiveRunResult): Promise<void> => {
+  const recoverFinalArchives = async (
+    today: string,
+    result: ArchiveRunResult,
+    blockedDays: ReadonlySet<string>,
+  ): Promise<void> => {
     const archivesRoot = assertManagedDirectory(rootDir, 'archives');
     const entries = (await readdir(archivesRoot, { withFileTypes: true }))
       .filter((entry) => FINAL_ARCHIVE_PATTERN.test(entry.name))
       .sort((left, right) => left.name.localeCompare(right.name));
     for (const entry of entries) {
       const day = assertArchiveDay(FINAL_ARCHIVE_PATTERN.exec(entry.name)![1]!);
-      if (day >= today) continue;
+      if (day >= today || blockedDays.has(day)) continue;
       try {
         const indexed = store.listArchives().find((archive) => archive.day === day && archive.status === 'ready');
         const indexedRecords = store.listRecordsForDay(day);
@@ -626,8 +689,8 @@ export function createRawCaptureArchiveService(
     assertManagedDirectory(rootDir, 'archives');
     assertManagedDirectory(rootDir, 'tmp');
     await cleanupCreationTemps(timestamp);
-    await recoverDeleteTombstones(today, result);
-    await recoverFinalArchives(today, result);
+    const tombstoneBlockedDays = await recoverDeleteTombstones(today, result);
+    await recoverFinalArchives(today, result, tombstoneBlockedDays);
 
     const indexedArchiveDays = new Set(
       store.listArchives().filter((archive) => archive.status === 'ready').map((archive) => archive.day),

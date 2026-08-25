@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  appendFileSync,
   copyFileSync,
   cpSync,
   createWriteStream,
@@ -187,6 +188,31 @@ function validTarEntries(metadata = archivedMetadata()): TarFixtureEntry[] {
     { name: `${recordA}/request.body`, body: Buffer.from('req') },
     { name: `${recordA}/response.body`, body: Buffer.from('resp') },
   ];
+}
+
+async function writeSubstitutedArchive(
+  sourceArchive: string,
+  targetArchive: string,
+  sourceId: string,
+  replacementId: string,
+): Promise<void> {
+  const entries = await readTarEntries(sourceArchive);
+  await writeTarFixture(targetArchive, entries.map((entry) => {
+    const name = entry.name.replace(`${sourceId}/`, `${replacementId}/`);
+    if (!entry.name.endsWith('/metadata.json')) return { name, body: entry.body };
+    const metadata = JSON.parse(entry.body.toString('utf8')) as RawCaptureRecord;
+    return {
+      name,
+      body: Buffer.from(JSON.stringify({ ...metadata, id: replacementId })),
+    };
+  }));
+}
+
+function padArchiveTo(path: string, size: number): void {
+  const current = lstatSync(path).size;
+  assert.ok(current <= size, `cannot shrink archive fixture from ${current} to ${size} bytes`);
+  if (current < size) appendFileSync(path, Buffer.alloc(size - current));
+  assert.equal(lstatSync(path).size, size);
 }
 
 test('creates one verified tar.gz for a closed local day in deterministic order', async (t) => {
@@ -528,7 +554,40 @@ test('recovers delete tombstones on both database crash boundaries', async (t) =
   assert.equal(deleteFixture.store.getRecord(recordB), undefined);
 });
 
-test('preserves both files on final and delete-tombstone conflict', async (t) => {
+test('never substitutes indexed records from an aggregate-compatible delete tombstone', async (t) => {
+  const fixture = createFixture(t);
+  await fixture.complete(day25, recordA, Buffer.from('req'), Buffer.from('resp'));
+  const archive = createRawCaptureArchiveService(fixture.store, { rootDir: fixture.rootDir });
+  await archive.archiveClosedDays(now26);
+  const finalPath = join(fixture.rootDir, 'archives', `${day25}.tar.gz`);
+  const replacement = join(fixture.rootDir, 'replacement.tar.gz');
+  const tombstone = join(
+    fixture.rootDir,
+    'tmp',
+    `delete-${day25}.66666666-6666-4666-8666-666666666666.tar.gz`,
+  );
+  await writeSubstitutedArchive(finalPath, replacement, recordA, recordB);
+  const indexedSize = Math.max(lstatSync(finalPath).size, lstatSync(replacement).size);
+  padArchiveTo(finalPath, indexedSize);
+  padArchiveTo(replacement, indexedSize);
+  fixture.sqlite.prepare('UPDATE raw_capture_archives SET archive_bytes = ? WHERE day = ?').run(indexedSize, day25);
+  const indexedRecord = fixture.store.getRecord(recordA);
+  const indexedArchive = fixture.store.listArchives().find((item) => item.day === day25);
+  renameSync(replacement, tombstone);
+  renameSync(finalPath, join(fixture.rootDir, 'indexed-archive-evidence.tar.gz'));
+
+  const result = await archive.archiveClosedDays(now26);
+
+  assert.equal(result.errors.length, 1);
+  assert.match(result.errors[0]?.message ?? '', /tombstone.*索引不一致|归档记录与索引不一致/i);
+  assert.deepEqual(fixture.store.getRecord(recordA), indexedRecord);
+  assert.equal(fixture.store.getRecord(recordB), undefined);
+  assert.deepEqual(fixture.store.listArchives().find((item) => item.day === day25), indexedArchive);
+  assert.equal(existsSync(finalPath), false);
+  assert.equal(existsSync(tombstone), true);
+});
+
+test('removes an equal-content delete tombstone when the indexed final archive also exists', async (t) => {
   const fixture = createFixture(t);
   await fixture.complete(day25, recordA, Buffer.from('req'), Buffer.from('resp'));
   const archive = createRawCaptureArchiveService(fixture.store, { rootDir: fixture.rootDir });
@@ -543,11 +602,40 @@ test('preserves both files on final and delete-tombstone conflict', async (t) =>
 
   const result = await archive.archiveClosedDays(now26);
 
+  assert.deepEqual(result.errors, []);
+  assert.equal(existsSync(finalPath), true);
+  assert.equal(existsSync(tombstone), false);
+  assert.equal(fixture.store.getRecord(recordA)?.location, 'archived');
+});
+
+test('preserves mismatched final and tombstone files without mutating the existing index', async (t) => {
+  const fixture = createFixture(t);
+  await fixture.complete(day25, recordA, Buffer.from('req'), Buffer.from('resp'));
+  const archive = createRawCaptureArchiveService(fixture.store, { rootDir: fixture.rootDir });
+  await archive.archiveClosedDays(now26);
+  const finalPath = join(fixture.rootDir, 'archives', `${day25}.tar.gz`);
+  const tombstone = join(
+    fixture.rootDir,
+    'tmp',
+    `delete-${day25}.77777777-7777-4777-8777-777777777777.tar.gz`,
+  );
+  await writeSubstitutedArchive(finalPath, tombstone, recordA, recordB);
+  const indexedSize = Math.max(lstatSync(finalPath).size, lstatSync(tombstone).size);
+  padArchiveTo(finalPath, indexedSize);
+  padArchiveTo(tombstone, indexedSize);
+  fixture.sqlite.prepare('UPDATE raw_capture_archives SET archive_bytes = ? WHERE day = ?').run(indexedSize, day25);
+  const indexedRecord = fixture.store.getRecord(recordA);
+  const indexedArchive = fixture.store.listArchives().find((item) => item.day === day25);
+
+  const result = await archive.archiveClosedDays(now26);
+
   assert.equal(result.errors.length, 1);
-  assert.match(result.errors[0]?.message ?? '', /冲突|conflict/i);
+  assert.match(result.errors[0]?.message ?? '', /tombstone.*索引不一致|归档记录与索引不一致/i);
+  assert.deepEqual(fixture.store.getRecord(recordA), indexedRecord);
+  assert.equal(fixture.store.getRecord(recordB), undefined);
+  assert.deepEqual(fixture.store.listArchives().find((item) => item.day === day25), indexedArchive);
   assert.equal(existsSync(finalPath), true);
   assert.equal(existsSync(tombstone), true);
-  assert.equal(fixture.store.getRecord(recordA)?.location, 'archived');
 });
 
 test('rejects replaced managed archive parents and matching tombstone symlinks without outside mutation', async (t) => {
