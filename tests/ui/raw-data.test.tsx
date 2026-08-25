@@ -52,8 +52,10 @@ const status: RawCaptureStatus = {
 
 type ApiOptions = {
   enabled?: boolean;
-  requestPreview?: string;
-  responsePreview?: string;
+  requestPreview?: string | Uint8Array;
+  responsePreview?: string | Uint8Array;
+  requestPreviewHeaders?: Record<string, string>;
+  responsePreviewHeaders?: Record<string, string>;
   records?: RawCaptureRecord[];
   archives?: RawCaptureArchive[];
 };
@@ -73,6 +75,11 @@ function json(data: unknown, responseStatus = 200): Response {
     status: responseStatus,
     headers: { 'content-type': 'application/json' },
   });
+}
+
+function rawBody(body: string | Uint8Array): BodyInit {
+  if (typeof body === 'string') return body;
+  return body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer;
 }
 
 function renderClient() {
@@ -116,13 +123,25 @@ function installRawDataApi(options: ApiOptions = {}) {
     }
     const previewMatch = url.match(/^\/api\/admin\/raw-data\/records\/([^/]+)\/(request|response)$/);
     if (previewMatch?.[2] === 'request' && method === 'GET') {
-      return new Response(options.requestPreview ?? '{  "model":"x" }', {
-        headers: { 'X-Raw-Total-Bytes': '300000', 'X-Raw-Truncated': 'true' },
+      const body = options.requestPreview ?? '{  "model":"x" }';
+      return new Response(rawBody(body), {
+        headers: {
+          'Content-Length': String(typeof body === 'string' ? new TextEncoder().encode(body).byteLength : body.byteLength),
+          'X-Raw-Total-Bytes': '300000',
+          'X-Raw-Truncated': 'true',
+          ...options.requestPreviewHeaders,
+        },
       });
     }
     if (previewMatch?.[2] === 'response' && method === 'GET') {
-      return new Response(options.responsePreview ?? 'data: {"x":1}\n\n', {
-        headers: { 'X-Raw-Total-Bytes': '15', 'X-Raw-Truncated': 'false' },
+      const body = options.responsePreview ?? 'data: {"x":1}\n\n';
+      return new Response(rawBody(body), {
+        headers: {
+          'Content-Length': String(typeof body === 'string' ? new TextEncoder().encode(body).byteLength : body.byteLength),
+          'X-Raw-Total-Bytes': '15',
+          'X-Raw-Truncated': 'false',
+          ...options.responsePreviewHeaders,
+        },
       });
     }
     if (url === '/api/admin/raw-data/archives' && method === 'GET') {
@@ -191,6 +210,45 @@ describe('RawDataClient', () => {
     expect(trigger).toHaveFocus();
   });
 
+  it('counts preview bytes without re-encoding and renders non-text responses as deterministic hex', async () => {
+    const user = userEvent.setup();
+    const binaryRecord = {
+      ...record,
+      contentType: 'application/octet-stream',
+      requestBytes: 12,
+      responseBytes: 4,
+    };
+    installRawDataApi({
+      records: [binaryRecord],
+      requestPreview: new Uint8Array([0x7b, 0x22, 0x78, 0x22, 0x3a, 0x22, 0xe4, 0xb8]),
+      responsePreview: new Uint8Array([0x00, 0xff, 0x10, 0x41]),
+      requestPreviewHeaders: {
+        'Content-Length': '8',
+        'X-Raw-Total-Bytes': '12',
+        'X-Raw-Truncated': 'true',
+      },
+      responsePreviewHeaders: {
+        'Content-Length': '4',
+        'X-Raw-Total-Bytes': '4',
+        'X-Raw-Truncated': 'false',
+      },
+    });
+    renderClient();
+
+    const [trigger] = await screen.findAllByRole('button', { name: `查看记录 ${record.id}` });
+    await user.click(trigger);
+    const dialog = screen.getByRole('dialog', { name: '原始记录详情' });
+    const requestRegion = await within(dialog).findByRole('region', { name: '请求原始正文' });
+    expect(requestRegion.querySelector('pre')?.textContent).toBe('{"x":"�');
+    expect(within(requestRegion).getByText('仅预览前 8 B，完整正文 12 B')).toBeVisible();
+
+    await user.click(within(dialog).getByRole('tab', { name: 'Response' }));
+    const responseRegion = await within(dialog).findByRole('region', { name: '响应原始正文' });
+    expect(within(responseRegion).getByText('十六进制预览')).toBeVisible();
+    expect(responseRegion.querySelector('pre')?.textContent).toBe('00 ff 10 41');
+    expect(within(responseRegion).getByText('完整预览 · 4 B')).toBeVisible();
+  });
+
   it('runs archive checks and confirms deletion of only one day', async () => {
     const user = userEvent.setup();
     const { fetchSpy } = installRawDataApi();
@@ -206,6 +264,8 @@ describe('RawDataClient', () => {
       'href',
       `/api/admin/raw-data/archives/${archive.day}`,
     );
+    const archiveCreatedAt = screen.getByText(/压缩于/).closest('time');
+    expect(archiveCreatedAt).toHaveAttribute('dateTime', new Date(archive.createdAt).toISOString());
 
     await user.click(screen.getByRole('button', { name: `删除 ${archive.day} 归档` }));
     expect(screen.getByRole('alertdialog', { name: `删除 ${archive.day} 归档？` })).toBeVisible();

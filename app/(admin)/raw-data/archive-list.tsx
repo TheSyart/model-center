@@ -22,6 +22,16 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(2)} MiB`;
 }
 
+const timestampFormatter = new Intl.DateTimeFormat('zh-CN', {
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+});
+
 export function ArchiveList({ archives, loading, pendingDay, archiveRunning, mutationPending, onRun, onDelete }: ArchiveListProps) {
   return (
     <Card>
@@ -51,6 +61,11 @@ export function ArchiveList({ archives, loading, pendingDay, archiveRunning, mut
                       <Badge variant={item.status === 'ready' ? 'success' : 'destructive'}>{item.status === 'ready' ? '可用' : '失败'}</Badge>
                     </div>
                     <p className="mt-1 text-xs text-muted-foreground">{item.recordCount} 条 · 原始 {formatBytes(item.rawBytes)} · 压缩 {formatBytes(item.archiveBytes)}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      <time dateTime={new Date(item.createdAt).toISOString()}>
+                        {item.status === 'ready' ? '压缩于' : '尝试于'} {timestampFormatter.format(item.createdAt)}
+                      </time>
+                    </p>
                     {item.error && <p className="mt-1 break-words text-xs text-destructive">{item.error}</p>}
                   </div>
                 </div>

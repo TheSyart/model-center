@@ -11,7 +11,14 @@ import { requestJson } from '@/lib/client/request';
 import type { RawCaptureRecord } from '@/lib/raw-capture/types';
 
 type PreviewPart = 'request' | 'response';
-type Preview = { text: string; totalBytes: number; servedBytes: number; truncated: boolean };
+type PreviewFormat = 'utf8' | 'hex';
+type Preview = {
+  text: string;
+  format: PreviewFormat;
+  totalBytes: number;
+  servedBytes: number;
+  truncated: boolean;
+};
 
 export interface RawRecordDetailProps {
   record: RawCaptureRecord | null;
@@ -26,20 +33,56 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(2)} MiB`;
 }
 
-async function loadPreview(recordId: string, part: PreviewPart, signal: AbortSignal): Promise<Preview> {
+function byteHeader(value: string | null): number | null {
+  if (value === null || !/^(0|[1-9]\d*)$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function isTextLike(contentType: string | null): boolean {
+  if (!contentType) return false;
+  const mediaType = contentType.split(';', 1)[0]!.trim().toLowerCase();
+  return mediaType.startsWith('text/')
+    || mediaType === 'application/json'
+    || mediaType.endsWith('+json')
+    || mediaType === 'application/xml'
+    || mediaType.endsWith('+xml')
+    || mediaType === 'application/javascript'
+    || mediaType === 'application/x-www-form-urlencoded'
+    || mediaType === 'application/graphql';
+}
+
+function hexPreview(bytes: Uint8Array): string {
+  const lines: string[] = [];
+  for (let offset = 0; offset < bytes.length; offset += 16) {
+    lines.push(Array.from(bytes.subarray(offset, offset + 16), (byte) => byte.toString(16).padStart(2, '0')).join(' '));
+  }
+  return lines.join('\n');
+}
+
+async function loadPreview(
+  recordId: string,
+  part: PreviewPart,
+  contentType: string | null,
+  signal: AbortSignal,
+): Promise<Preview> {
   const response = await fetch(`/api/admin/raw-data/records/${recordId}/${part}`, { signal });
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { error?: unknown } | null;
     throw new Error(typeof body?.error === 'string' ? body.error : `正文预览加载失败（HTTP ${response.status}）`);
   }
-  const text = await response.text();
-  const servedBytes = new TextEncoder().encode(text).byteLength;
-  const totalHeader = Number(response.headers.get('X-Raw-Total-Bytes'));
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  const servedBytes = byteHeader(response.headers.get('X-Raw-Served-Bytes'))
+    ?? byteHeader(response.headers.get('Content-Length'))
+    ?? bytes.byteLength;
+  const totalBytes = byteHeader(response.headers.get('X-Raw-Total-Bytes')) ?? servedBytes;
+  const format: PreviewFormat = part === 'request' || isTextLike(contentType) ? 'utf8' : 'hex';
   return {
-    text,
+    text: format === 'utf8' ? new TextDecoder('utf-8').decode(bytes) : hexPreview(bytes),
+    format,
     servedBytes,
-    totalBytes: Number.isFinite(totalHeader) ? totalHeader : servedBytes,
-    truncated: response.headers.get('X-Raw-Truncated') === 'true',
+    totalBytes,
+    truncated: response.headers.get('X-Raw-Truncated') === 'true' || servedBytes < totalBytes,
   };
 }
 
@@ -60,6 +103,11 @@ function PreviewPanel({ record, part, preview }: { record: RawCaptureRecord; par
       </div>
       {!preview ? <Skeleton className="h-72 w-full" /> : (
         <div className="minimal-scrollbar max-w-full overflow-auto rounded-md border border-border bg-background">
+          {preview.format === 'hex' && (
+            <p className="border-b border-border px-4 py-2 font-mono text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              十六进制预览
+            </p>
+          )}
           {preview.text.length === 0 && <p className="px-4 py-3 text-xs text-muted-foreground">正文为空</p>}
           <pre className="min-h-72 whitespace-pre-wrap break-words p-4 font-mono text-xs leading-5 text-foreground">{preview.text}</pre>
         </div>
@@ -80,8 +128,8 @@ export function RawRecordDetail({ record, returnFocusRef, onRecordChange, onErro
     setPreviewError('');
     void Promise.all([
       requestJson<{ record: RawCaptureRecord }>(`/api/admin/raw-data/records/${recordId}`, { signal: controller.signal }),
-      loadPreview(recordId, 'request', controller.signal),
-      loadPreview(recordId, 'response', controller.signal),
+      loadPreview(recordId, 'request', record.contentType, controller.signal),
+      loadPreview(recordId, 'response', record.contentType, controller.signal),
     ]).then(([detail, request, response]) => {
       if (controller.signal.aborted) return;
       onRecordChange(detail.record);
