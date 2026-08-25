@@ -12,6 +12,7 @@ export interface RecordScanOptions<T> {
 
 export interface RecordScanResult<T> {
   records: T[];
+  overflowRecord: T | null;
   coverageComplete: boolean;
   boundaryReached: boolean;
   pageOneStable: boolean;
@@ -25,6 +26,21 @@ export interface RecordScanStability {
   hasStableSnapshot: boolean;
   confirmations: number;
   ready: boolean;
+}
+
+export interface CappedRecordAccumulator<T extends { id: string }> {
+  records: Map<string, T>;
+  maxRecords: number;
+  capped: boolean;
+  attemptedUniqueCount: number | null;
+}
+
+export interface RecordAccumulationResult {
+  newIds: string[];
+  capped: boolean;
+  candidateCount: number;
+  attemptedUniqueCount: number;
+  diagnostic: string;
 }
 
 export async function scanBoundedRecords<T extends { id: string }>(
@@ -42,13 +58,18 @@ export async function scanBoundedRecords<T extends { id: string }>(
   const pageCalls: number[] = [];
   let boundaryReached = false;
   let recordCapReached = false;
+  let overflowRecord: T | null = null;
 
   const addPage = (page: RecordScanPage<T>) => {
     for (const record of page.items) {
       const isBoundary = options.isBoundary?.(record) ?? false;
       if (!records.has(record.id) && records.size >= options.maxRecords) {
-        recordCapReached = true;
-        if (isBoundary) boundaryReached = true;
+        if (isBoundary) {
+          boundaryReached = true;
+        } else {
+          recordCapReached = true;
+          overflowRecord ??= record;
+        }
         break;
       }
       records.set(record.id, record);
@@ -101,6 +122,7 @@ export async function scanBoundedRecords<T extends { id: string }>(
 
   return {
     records: [...records.values()],
+    overflowRecord,
     coverageComplete,
     boundaryReached,
     pageOneStable,
@@ -120,18 +142,73 @@ export async function scanBoundedRecords<T extends { id: string }>(
   };
 }
 
-export function accumulateRecordsById<T extends { id: string }>(
-  accumulated: Map<string, T>,
+export function createCappedRecordAccumulator<T extends { id: string }>(
+  maxRecords: number,
+): CappedRecordAccumulator<T> {
+  if (!Number.isInteger(maxRecords) || maxRecords < 1) {
+    throw new Error('cumulative maxRecords must be a positive integer');
+  }
+  return {
+    records: new Map(),
+    maxRecords,
+    capped: false,
+    attemptedUniqueCount: null,
+  };
+}
+
+export function accumulateCappedRecordsById<T extends { id: string }>(
+  accumulator: CappedRecordAccumulator<T>,
   records: readonly T[],
   include: (record: T) => boolean,
-): string[] {
-  const newIds: string[] = [];
-  for (const record of records) {
-    if (!include(record)) continue;
-    if (!accumulated.has(record.id)) newIds.push(record.id);
-    accumulated.set(record.id, record);
+): RecordAccumulationResult {
+  if (accumulator.capped) {
+    const attemptedUniqueCount = accumulator.attemptedUniqueCount ?? accumulator.records.size;
+    return {
+      newIds: [],
+      capped: true,
+      candidateCount: accumulator.records.size,
+      attemptedUniqueCount,
+      diagnostic: `candidate_cap_reached=true candidate_count=${accumulator.records.size} attempted_unique=${attemptedUniqueCount} candidate_cap=${accumulator.maxRecords}`,
+    };
   }
-  return newIds;
+
+  const relevantRecords = new Map<string, T>();
+  for (const record of records) {
+    if (include(record)) relevantRecords.set(record.id, record);
+  }
+  const newIds = [...relevantRecords.keys()]
+    .filter((recordId) => !accumulator.records.has(recordId));
+  const attemptedUniqueCount = accumulator.records.size + newIds.length;
+  if (attemptedUniqueCount > accumulator.maxRecords) {
+    accumulator.capped = true;
+    accumulator.attemptedUniqueCount = attemptedUniqueCount;
+    return {
+      newIds: [],
+      capped: true,
+      candidateCount: accumulator.records.size,
+      attemptedUniqueCount,
+      diagnostic: `candidate_cap_reached=true candidate_count=${accumulator.records.size} attempted_unique=${attemptedUniqueCount} candidate_cap=${accumulator.maxRecords}`,
+    };
+  }
+
+  for (const record of relevantRecords.values()) accumulator.records.set(record.id, record);
+  return {
+    newIds,
+    capped: false,
+    candidateCount: accumulator.records.size,
+    attemptedUniqueCount,
+    diagnostic: `candidate_cap_reached=false candidate_count=${accumulator.records.size} attempted_unique=${attemptedUniqueCount} candidate_cap=${accumulator.maxRecords}`,
+  };
+}
+
+export async function mapAccumulatedRecords<T extends { id: string }, R>(
+  accumulator: CappedRecordAccumulator<T>,
+  evaluate: (record: T) => Promise<R>,
+): Promise<R[]> {
+  if (accumulator.capped) return [];
+  const results: R[] = [];
+  for (const record of accumulator.records.values()) results.push(await evaluate(record));
+  return results;
 }
 
 export function advanceRecordScanStability(
