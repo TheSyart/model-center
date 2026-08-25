@@ -111,6 +111,58 @@ test('keeps crash-leftover files and exposes the record as incomplete', () => {
   sqlite.close();
 });
 
+test('repairs a stale active index row from completed crash-leftover metadata', () => {
+  const rootDir = createRootDir();
+  const sqlite = new Database(':memory:');
+  createRawCaptureStore(sqlite, { rootDir });
+  const recordDir = activeRecordDir(rootDir, day, recordId);
+  mkdirSync(recordDir, { recursive: true });
+  const completed: RawCaptureRecord = {
+    id: recordId,
+    day,
+    startedAt: 1_724_600_245_000,
+    completedAt: 1_724_600_249_000,
+    path: '/v1/messages',
+    entryProtocol: 'anthropic',
+    status: 207,
+    stream: true,
+    contentType: 'text/event-stream',
+    requestBytes: 37,
+    responseBytes: 91,
+    complete: true,
+    captureError: null,
+    location: 'active',
+  };
+  writeFileSync(join(recordDir, 'request.body'), Buffer.alloc(completed.requestBytes));
+  writeFileSync(join(recordDir, 'response.body'), Buffer.alloc(completed.responseBytes));
+  writeFileSync(join(recordDir, 'metadata.json'), JSON.stringify(completed));
+  sqlite.prepare(`
+    INSERT INTO raw_capture_records (
+      id, day, started_at, completed_at, path, entry_protocol, status, stream, content_type,
+      request_bytes, response_bytes, complete, capture_error, location
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    recordId,
+    '2026-01-01',
+    1,
+    null,
+    '/stale',
+    'openai',
+    null,
+    0,
+    null,
+    0,
+    0,
+    0,
+    'crashed before index update',
+    'archived',
+  );
+
+  const recovered = createRawCaptureStore(sqlite, { rootDir }).getRecord(recordId);
+  assert.deepEqual(recovered, completed);
+  sqlite.close();
+});
+
 test('marks a failed capture incomplete while retaining bytes already written', async () => {
   const rootDir = createRootDir();
   const sqlite = new Database(':memory:');

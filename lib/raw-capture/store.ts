@@ -222,6 +222,27 @@ export function createRawCaptureStore(sqlite: Database.Database, options: RawCap
     ON CONFLICT(id) DO NOTHING
   `);
 
+  const reconcileRecord = sqlite.prepare(`
+    INSERT INTO raw_capture_records (
+      id, day, started_at, completed_at, path, entry_protocol, status, stream, content_type,
+      request_bytes, response_bytes, complete, capture_error, location
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      day = excluded.day,
+      started_at = excluded.started_at,
+      completed_at = excluded.completed_at,
+      path = excluded.path,
+      entry_protocol = excluded.entry_protocol,
+      status = excluded.status,
+      stream = excluded.stream,
+      content_type = excluded.content_type,
+      request_bytes = excluded.request_bytes,
+      response_bytes = excluded.response_bytes,
+      complete = excluded.complete,
+      capture_error = excluded.capture_error,
+      location = excluded.location
+  `);
+
   const updateRecord = sqlite.prepare(`
     UPDATE raw_capture_records
     SET completed_at = ?, status = ?, stream = ?, content_type = ?, request_bytes = ?,
@@ -229,8 +250,8 @@ export function createRawCaptureStore(sqlite: Database.Database, options: RawCap
     WHERE id = ?
   `);
 
-  const writeRecordIndex = (record: RawCaptureRecord): void => {
-    insertRecord.run(
+  const writeRecordIndex = (record: RawCaptureRecord, reconcile = false): void => {
+    (reconcile ? reconcileRecord : insertRecord).run(
       record.id,
       record.day,
       record.startedAt,
@@ -273,7 +294,7 @@ export function createRawCaptureStore(sqlite: Database.Database, options: RawCap
             dayEntry.name,
             recordEntry.name,
           );
-          if (recovered) writeRecordIndex(recovered);
+          if (recovered) writeRecordIndex(recovered, true);
         } catch {
           // Keep unparseable crash-leftover files untouched; a later repair can inspect them.
         }
