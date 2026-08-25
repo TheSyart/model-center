@@ -9,6 +9,7 @@ test('all admin modules render without page-level horizontal overflow', async ({
   for (const path of pages) {
     await page.goto(path);
     await expect(page.locator('main')).toBeVisible();
+    if (path === '/security-lab') await page.waitForTimeout(500);
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
     expect(overflow, `${path} has horizontal overflow`).toBe(false);
   }

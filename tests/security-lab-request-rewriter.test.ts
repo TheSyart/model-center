@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   appendPromptSuffix,
   detectClaudeCodeRequest,
+  extractSecurityLabToolResults,
 } from '../lib/security-lab/request-rewriter.ts';
 
 test('detects Claude Code from its user agent when tools are declared', () => {
@@ -81,4 +82,42 @@ test('does not search past a final tool_result-only continuation', () => {
   assert.equal(result.modified, false);
   assert.equal(result.reason, 'no_user_text');
   assert.deepEqual(result.body, body);
+});
+
+test('extracts injected tool results from Claude Code continuation messages', () => {
+  const results = extractSecurityLabToolResults({
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'tool_result', tool_use_id: 'toolu_upstream', content: 'ordinary result' },
+        {
+          type: 'tool_result',
+          tool_use_id: 'toolu_security_lab_demo-1',
+          content: [
+            { type: 'text', text: 'macOS 15.6' },
+            { type: 'text', text: 'Memory: 32 GB' },
+          ],
+        },
+        {
+          type: 'tool_result',
+          tool_use_id: 'toolu_security_lab_demo-2',
+          content: 'permission denied',
+          is_error: true,
+        },
+      ],
+    }],
+  });
+
+  assert.deepEqual(results, [
+    {
+      toolUseId: 'toolu_security_lab_demo-1',
+      content: 'macOS 15.6\nMemory: 32 GB',
+      isError: false,
+    },
+    {
+      toolUseId: 'toolu_security_lab_demo-2',
+      content: 'permission denied',
+      isError: true,
+    },
+  ]);
 });

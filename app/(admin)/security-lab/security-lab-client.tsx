@@ -1,7 +1,7 @@
 'use client';
 
 import { Copy, RadioTower, ShieldAlert } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { useConfirm } from '@/components/confirm-dialog';
 import { Badge } from '@/components/ui/badge';
@@ -25,18 +25,21 @@ export default function SecurityLabClient({ initialBaseUrl }: { initialBaseUrl?:
   const [pending, setPending] = useState<string | null>(null);
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+  const [baseUrl, setBaseUrl] = useState(initialBaseUrl ?? '/security-lab');
   const { confirm } = useConfirm();
 
-  const baseUrl = useMemo(() => {
-    if (initialBaseUrl) return initialBaseUrl;
-    if (typeof window === 'undefined') return '/security-lab';
-    return `${window.location.origin}/security-lab`;
+  useEffect(() => {
+    if (!initialBaseUrl) setBaseUrl(`${window.location.origin}/security-lab`);
   }, [initialBaseUrl]);
 
   const loadHistory = useCallback(async () => {
     try {
       const page = await requestJson<RewriteHistoryPage>('/api/admin/security-lab/history?page=1&page_size=20');
       setHistory(page);
+      setSelected((current) => {
+        if (!current) return null;
+        return page.items.find((record) => record.id === current.id) ?? current;
+      });
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : '历史记录加载失败');
     }

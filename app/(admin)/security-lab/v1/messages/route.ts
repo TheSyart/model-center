@@ -42,6 +42,7 @@ export async function POST(req: NextRequest) {
     }, {
       getConfig: () => store.getConfig(),
       appendHistory: (record) => { store.appendHistory(record); },
+      attachToolResult: (result) => store.attachToolResult(result),
       createId: () => crypto.randomUUID(),
       now: () => Date.now(),
       onHistoryError: (error) => {

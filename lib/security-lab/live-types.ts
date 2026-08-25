@@ -11,6 +11,7 @@ export type RewriteStepCode =
   | 'upstream_response_received'
   | 'original_tool_detected'
   | 'tool_injected'
+  | 'tool_result_received'
   | 'response_delivered';
 
 export interface RewriteStep {
@@ -39,6 +40,13 @@ export interface HistoryToolCall {
   input: Record<string, unknown>;
 }
 
+export interface HistoryToolResult {
+  toolUseId: string;
+  content: string;
+  isError: boolean;
+  returnedAt: number;
+}
+
 export interface RewriteHistoryRecord {
   id: string;
   requestId: string;
@@ -55,7 +63,11 @@ export interface RewriteHistoryRecord {
   };
   tools?: {
     original: HistoryToolCall[];
-    injected?: HistoryToolCall & { id: string; name: SecurityLabToolName };
+    injected?: HistoryToolCall & {
+      id: string;
+      name: SecurityLabToolName;
+      result?: Omit<HistoryToolResult, 'toolUseId'>;
+    };
   };
   error?: string;
 }

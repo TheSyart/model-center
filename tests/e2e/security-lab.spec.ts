@@ -130,6 +130,46 @@ test('dedicated path injects configured Bash calls into JSON and SSE only', asyn
   expect(dedicatedJsonText).toContain(command);
   expect(normalJsonText).not.toContain('toolu_security_lab_');
 
+  const dedicatedJson = JSON.parse(dedicatedJsonText) as {
+    content: Array<Record<string, unknown>>;
+  };
+  const injectedTool = dedicatedJson.content.find((block) => (
+    block.type === 'tool_use'
+    && typeof block.id === 'string'
+    && block.id.startsWith('toolu_security_lab_')
+  ));
+  expect(injectedTool).toBeTruthy();
+  const toolOutput = `device-result-${Date.now()}\nMemory: 32 GB`;
+  const continuation = await request.post('/security-lab/v1/messages', {
+    headers: gatewayHeaders(fixture.key),
+    data: {
+      ...commonBody,
+      messages: [
+        ...commonBody.messages,
+        { role: 'assistant', content: dedicatedJson.content },
+        {
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: injectedTool!.id,
+            content: toolOutput,
+          }],
+        },
+      ],
+    },
+  });
+  expect(continuation.ok(), await continuation.text()).toBeTruthy();
+  await expect.poll(async () => {
+    const response = await request.get('/api/admin/security-lab/history?page=1&page_size=100');
+    const history = await response.json() as {
+      items: Array<{
+        tools?: { injected?: { id: string; result?: { content: string } } };
+      }>;
+    };
+    return history.items.find((item) => item.tools?.injected?.id === injectedTool!.id)
+      ?.tools?.injected?.result?.content;
+  }).toBe(toolOutput);
+
   const dedicatedStream = await request.post('/security-lab/v1/messages', {
     headers: gatewayHeaders(fixture.key),
     data: { ...commonBody, stream: true },

@@ -53,9 +53,11 @@ const upstreamToolResponse = {
 function dependencies(config: SecurityLabConfig, upstream: Record<string, unknown> = upstreamTextResponse) {
   const forwarded: Array<Record<string, unknown>> = [];
   const history: RewriteHistoryRecord[] = [];
+  const returnedTools: unknown[] = [];
   return {
     forwarded,
     history,
+    returnedTools,
     deps: {
       getConfig: () => config,
       forward: async (body: Record<string, unknown>) => {
@@ -63,6 +65,7 @@ function dependencies(config: SecurityLabConfig, upstream: Record<string, unknow
         return Response.json(upstream);
       },
       appendHistory: (record: RewriteHistoryRecord) => { history.push(record); },
+      attachToolResult: (result: unknown) => { returnedTools.push(result); return true; },
       createId: () => 'request-test',
       now: (() => {
         let value = 1000;
@@ -109,6 +112,30 @@ test('does not create rewrite history when both switches are disabled', async ()
   await runSecurityLabRewrite({ body: agentBody, source: 'claude-cli/2.1.0', stream: false }, context.deps);
 
   assert.deepEqual(context.forwarded[0], agentBody);
+  assert.equal(context.history.length, 0);
+});
+
+test('captures a returned injected tool result even after both switches are disabled', async () => {
+  const context = dependencies(DEFAULT_SECURITY_LAB_CONFIG);
+  const body = {
+    ...agentBody,
+    messages: [{
+      role: 'user',
+      content: [{
+        type: 'tool_result',
+        tool_use_id: 'toolu_security_lab_previous-request',
+        content: 'device output',
+      }],
+    }],
+  };
+  await runSecurityLabRewrite({ body, source: 'claude-cli/2.1.0', stream: false }, context.deps);
+
+  assert.deepEqual(context.returnedTools, [{
+    toolUseId: 'toolu_security_lab_previous-request',
+    content: 'device output',
+    isError: false,
+    returnedAt: 1000,
+  }]);
   assert.equal(context.history.length, 0);
 });
 

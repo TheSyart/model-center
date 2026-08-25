@@ -1,5 +1,8 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { act } from 'react';
+import { hydrateRoot } from 'react-dom/client';
+import { renderToString } from 'react-dom/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { axe } from 'vitest-axe';
 
@@ -36,8 +39,28 @@ const historyRecord: RewriteHistoryRecord = {
   },
   tools: {
     original: [{ id: 'toolu_original', name: 'Read', input: { file_path: '/tmp/demo' } }],
-    injected: { id: 'toolu_security_lab_test', name: 'Bash', input: { command: "printf 'demo'" } },
+    injected: {
+      id: 'toolu_security_lab_test',
+      name: 'Bash',
+      input: { command: "printf 'demo'" },
+      result: {
+        content: 'demo output\nMemory: 32 GB',
+        isError: false,
+        returnedAt: Date.parse('2026-08-25T10:00:03+08:00'),
+      },
+    },
   },
+};
+
+const skippedHistoryRecord: RewriteHistoryRecord = {
+  id: 'rewrite_request-skipped',
+  requestId: 'request-skipped',
+  timestamp: Date.parse('2026-08-25T09:59:00+08:00'),
+  model: 'provider/claude-demo',
+  source: 'claude-cli/2.1.0',
+  stream: true,
+  result: 'skipped',
+  steps: [{ code: 'request_received', timestamp: 1, status: 'completed', detail: '收到请求' }],
 };
 
 function json(data: unknown, status = 200): Response {
@@ -87,6 +110,29 @@ describe('SecurityLabClient', () => {
     expect(JSON.parse(String(put?.[1]?.body)).promptInjection).toEqual({ enabled: true, suffix: '追加演示要求' });
   });
 
+  it('hydrates the generated Base URL without a server/client text mismatch', async () => {
+    installApi();
+    const browserWindow = globalThis.window;
+    vi.stubGlobal('window', undefined);
+    const html = renderToString(<SecurityLabClient />);
+    vi.stubGlobal('window', browserWindow);
+    const container = document.createElement('div');
+    container.innerHTML = html;
+    document.body.append(container);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    let root: ReturnType<typeof hydrateRoot> | undefined;
+
+    await act(async () => {
+      root = hydrateRoot(container, <SecurityLabClient />);
+      await Promise.resolve();
+    });
+
+    expect(consoleError.mock.calls.flat().join('\n')).not.toMatch(/Hydration failed|didn't match/);
+    await act(async () => root?.unmount());
+    container.remove();
+    consoleError.mockRestore();
+  });
+
   it('rejects malformed tool JSON before calling the API', async () => {
     const user = userEvent.setup();
     const fetchSpy = installApi();
@@ -106,11 +152,47 @@ describe('SecurityLabClient', () => {
     render(<SecurityLabClient initialBaseUrl="http://localhost/security-lab" />);
 
     expect(await screen.findByText('request-test')).toBeVisible();
+    expect(screen.getByText('执行成功')).toBeVisible();
+    expect(screen.getByText(/demo output/)).toBeVisible();
     await user.click(screen.getByRole('button', { name: '查看 request-test 详情' }));
 
     expect(screen.getByRole('dialog', { name: '改写详情' })).toBeVisible();
-    expect(screen.getByText('prompt_appended')).toBeVisible();
     expect(screen.getByText(/toolu_security_lab_test/)).toBeVisible();
+    expect(screen.getByRole('heading', { name: '工具执行结果' })).toBeVisible();
+    expect(screen.queryByText('prompt_appended')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '展开技术时间线' }));
+    expect(screen.getByText('prompt_appended')).toBeVisible();
+  });
+
+  it('filters history by meaningful rewrite type without hiding result counts', async () => {
+    const user = userEvent.setup();
+    installApi([historyRecord, skippedHistoryRecord]);
+    render(<SecurityLabClient initialBaseUrl="http://localhost/security-lab" />);
+
+    expect(await screen.findByText('request-test')).toBeVisible();
+    expect(screen.getByText('request-skipped')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '工具' }));
+    expect(screen.getByText('request-test')).toBeVisible();
+    expect(screen.queryByText('request-skipped')).not.toBeInTheDocument();
+    expect(screen.getByText('1 / 2 条')).toBeVisible();
+  });
+
+  it('updates an open detail sheet when the tool result arrives', async () => {
+    const user = userEvent.setup();
+    const waitingRecord = structuredClone(historyRecord);
+    delete waitingRecord.tools?.injected?.result;
+    const records = [waitingRecord];
+    installApi(records);
+    render(<SecurityLabClient initialBaseUrl="http://localhost/security-lab" />);
+
+    await user.click(await screen.findByRole('button', { name: '查看 request-test 详情' }));
+    const dialog = screen.getByRole('dialog', { name: '改写详情' });
+    expect(within(dialog).getByText('等待执行')).toBeVisible();
+
+    records[0] = historyRecord;
+    fireEvent.click(screen.getByText('刷新'));
+    expect(await within(dialog).findByText('执行成功')).toBeVisible();
+    expect(within(dialog).getByText(/Memory: 32 GB/)).toBeVisible();
   });
 
   it('has no serious accessibility violations', async () => {

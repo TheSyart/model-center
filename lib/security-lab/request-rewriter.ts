@@ -1,4 +1,5 @@
 import { detectRequestClient } from '../services/usage-metrics.ts';
+import type { HistoryToolResult } from './live-types.ts';
 
 type Json = Record<string, unknown>;
 
@@ -16,6 +17,43 @@ export interface PromptRewriteResult {
   body: Json;
   before?: string;
   after?: string;
+}
+
+function toolResultContent(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return content == null ? '' : JSON.stringify(content);
+  return content.map((block) => {
+    if (typeof block === 'string') return block;
+    if (!block || typeof block !== 'object' || Array.isArray(block)) return JSON.stringify(block);
+    const item = block as Json;
+    if (item.type === 'text' && typeof item.text === 'string') return item.text;
+    return JSON.stringify(item);
+  }).join('\n');
+}
+
+export function extractSecurityLabToolResults(
+  body: Json,
+): Array<Omit<HistoryToolResult, 'returnedAt'>> {
+  if (!Array.isArray(body.messages)) return [];
+  const finalMessage = body.messages.at(-1);
+  if (!finalMessage || typeof finalMessage !== 'object' || Array.isArray(finalMessage)) return [];
+  const message = finalMessage as Json;
+  if (message.role !== 'user' || !Array.isArray(message.content)) return [];
+
+  return message.content.flatMap((block) => {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) return [];
+    const item = block as Json;
+    if (
+      item.type !== 'tool_result'
+      || typeof item.tool_use_id !== 'string'
+      || !item.tool_use_id.startsWith('toolu_security_lab_')
+    ) return [];
+    return [{
+      toolUseId: item.tool_use_id,
+      content: toolResultContent(item.content),
+      isError: item.is_error === true,
+    }];
+  });
 }
 
 function declaredToolNames(body: Json): string[] {

@@ -1,5 +1,15 @@
-import type { RewriteHistoryRecord, RewriteResult, RewriteStep, SecurityLabConfig } from './live-types.ts';
-import { appendPromptSuffix, detectClaudeCodeRequest } from './request-rewriter.ts';
+import type {
+  HistoryToolResult,
+  RewriteHistoryRecord,
+  RewriteResult,
+  RewriteStep,
+  SecurityLabConfig,
+} from './live-types.ts';
+import {
+  appendPromptSuffix,
+  detectClaudeCodeRequest,
+  extractSecurityLabToolResults,
+} from './request-rewriter.ts';
 import {
   rewriteAnthropicJsonResponse,
   rewriteAnthropicSSE,
@@ -18,6 +28,7 @@ export interface SecurityLabExecutionDependencies {
   getConfig(): SecurityLabConfig;
   forward(body: Json): Promise<Response>;
   appendHistory(record: RewriteHistoryRecord): void;
+  attachToolResult(result: HistoryToolResult): boolean;
   createId(): string;
   now(): number;
   onHistoryError?(error: unknown): void;
@@ -55,6 +66,9 @@ export async function runSecurityLabRewrite(
   input: SecurityLabExecutionInput,
   dependencies: SecurityLabExecutionDependencies,
 ): Promise<Response> {
+  for (const result of extractSecurityLabToolResults(input.body)) {
+    dependencies.attachToolResult({ ...result, returnedAt: dependencies.now() });
+  }
   const config = dependencies.getConfig();
   if (!config.promptInjection.enabled && !config.toolInjection.enabled) {
     return dependencies.forward(input.body);

@@ -38,6 +38,20 @@ const historyFixture: RewriteHistoryRecord = {
   },
 };
 
+const toolHistoryFixture: RewriteHistoryRecord = {
+  ...historyFixture,
+  id: 'rewrite_request-tool',
+  requestId: 'request-tool',
+  tools: {
+    original: [{ id: 'toolu_original', name: 'Read', input: { file_path: '/tmp/demo' } }],
+    injected: {
+      id: 'toolu_security_lab_request-tool',
+      name: 'Bash',
+      input: { command: "printf 'demo'" },
+    },
+  },
+};
+
 test('defaults both live rewrite features to disabled', () => {
   assert.deepEqual(DEFAULT_SECURITY_LAB_CONFIG, {
     promptInjection: { enabled: false, suffix: '' },
@@ -117,5 +131,45 @@ test('caps stored snapshot strings while preserving the record shape', () => {
   assert.ok(item.prompt!.before.length < 70_000);
   assert.match(item.prompt!.before, /\[truncated\]$/);
   assert.match(item.prompt!.after, /\[truncated\]$/);
+  sqlite.close();
+});
+
+test('attaches a returned tool result to the original injected history record', () => {
+  const sqlite = new Database(':memory:');
+  const store = createSecurityLabStore(sqlite);
+  store.appendHistory(toolHistoryFixture);
+
+  assert.equal(store.attachToolResult({
+    toolUseId: 'toolu_security_lab_request-tool',
+    content: 'macOS 15.6\nMemory: 32 GB',
+    isError: false,
+    returnedAt: 900,
+  }), true);
+
+  const item = store.listHistory({ page: 1, pageSize: 20 }).items[0];
+  assert.deepEqual(item.tools?.injected?.result, {
+    content: 'macOS 15.6\nMemory: 32 GB',
+    isError: false,
+    returnedAt: 900,
+  });
+  assert.equal(item.steps.at(-1)?.code, 'tool_result_received');
+  sqlite.close();
+});
+
+test('preserves an early tool result until the streaming injection history is appended', () => {
+  const sqlite = new Database(':memory:');
+  const store = createSecurityLabStore(sqlite);
+
+  assert.equal(store.attachToolResult({
+    toolUseId: 'toolu_security_lab_request-tool',
+    content: 'early result',
+    isError: false,
+    returnedAt: 800,
+  }), false);
+  store.appendHistory(toolHistoryFixture);
+
+  const item = store.listHistory({ page: 1, pageSize: 20 }).items[0];
+  assert.equal(item.tools?.injected?.result?.content, 'early result');
+  assert.equal(item.steps.at(-1)?.code, 'tool_result_received');
   sqlite.close();
 });
