@@ -40,3 +40,14 @@ test('mobile navigation and filter sheet are keyboard-operable', async ({ page }
   await page.getByRole('button', { name: /筛选用量范围/ }).click();
   await expect(page.getByRole('dialog', { name: '筛选用量' })).toBeVisible();
 });
+
+test('raw-data mobile switch has a 44px interactive target', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'mobile-375');
+  await page.goto('/raw-data');
+  const captureSwitch = page.getByRole('switch', { name: '记录所有原始对话' });
+  await expect(captureSwitch).toBeEnabled();
+  const box = await captureSwitch.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.width).toBeGreaterThanOrEqual(44);
+  expect(box!.height).toBeGreaterThanOrEqual(44);
+});

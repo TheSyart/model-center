@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { axe } from 'vitest-axe';
@@ -58,6 +58,16 @@ type ApiOptions = {
   archives?: RawCaptureArchive[];
 };
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function json(data: unknown, responseStatus = 200): Response {
   return new Response(JSON.stringify(data), {
     status: responseStatus,
@@ -81,7 +91,7 @@ function installRawDataApi(options: ApiOptions = {}) {
   let enabled = options.enabled ?? false;
   const putBodies: unknown[] = [];
 
-  const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+  const respond = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = String(input);
     const method = init?.method ?? 'GET';
     if (url === '/api/admin/raw-data/config' && method === 'GET') {
@@ -95,7 +105,9 @@ function installRawDataApi(options: ApiOptions = {}) {
     }
     if (url.startsWith('/api/admin/raw-data/records?') && method === 'GET') {
       const page = Number(new URL(url, 'http://localhost').searchParams.get('page') ?? '1');
-      return json({ items: records, total: records.length, page, pageSize: 20 });
+      const pageSize = 20;
+      const offset = (page - 1) * pageSize;
+      return json({ items: records.slice(offset, offset + pageSize), total: records.length, page, pageSize });
     }
     if (url === `/api/admin/raw-data/records/${record.id}` && method === 'GET') {
       return json({ record });
@@ -121,15 +133,17 @@ function installRawDataApi(options: ApiOptions = {}) {
       return json({ deleted: true, day: archive.day });
     }
     throw new Error(`unexpected request: ${method} ${url}`);
-  });
+  };
+  const fetchSpy = vi.fn(respond);
   vi.stubGlobal('fetch', fetchSpy);
-  return { fetchSpy, putBodies };
+  return { fetchSpy, putBodies, respond };
 }
 
 describe('RawDataClient', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   it('requires confirmation before enabling full raw capture', async () => {
@@ -137,7 +151,9 @@ describe('RawDataClient', () => {
     const api = installRawDataApi();
     renderClient();
 
-    await user.click(await screen.findByRole('switch', { name: '记录所有原始对话' }));
+    const captureSwitch = await screen.findByRole('switch', { name: '记录所有原始对话' });
+    expect(captureSwitch).toHaveClass('h-11', 'md:h-6');
+    await user.click(captureSwitch);
     expect(screen.getByRole('alertdialog', { name: '开启原始数据采集？' })).toBeVisible();
     expect(api.putBodies).toEqual([]);
 
@@ -154,6 +170,8 @@ describe('RawDataClient', () => {
     const [trigger] = await screen.findAllByRole('button', { name: `查看记录 ${record.id}` });
     await user.click(trigger);
     const dialog = screen.getByRole('dialog', { name: '原始记录详情' });
+    expect(within(dialog).getByRole('tab', { name: 'Request' })).toHaveClass('h-11', 'md:h-8');
+    expect(within(dialog).getByRole('button', { name: '关闭' })).toHaveClass('size-11', 'md:size-9');
     const requestRegion = await within(dialog).findByRole('region', { name: '请求原始正文' });
     expect(requestRegion.querySelector('pre')?.textContent).toBe('{  "model":"x" }');
     expect(within(dialog).getByText(/仅预览前/)).toBeVisible();
@@ -208,6 +226,131 @@ describe('RawDataClient', () => {
 
     expect(await screen.findByText('尚无原始记录')).toBeVisible();
     expect(screen.queryByText('第 1 / 1 页，共 1 条')).not.toBeInTheDocument();
+  });
+
+  it('clamps to the last valid page after archive deletion shrinks pagination', async () => {
+    const user = userEvent.setup();
+    const pageRecords = Array.from({ length: 21 }, (_, index): RawCaptureRecord => ({
+      ...record,
+      id: `11111111-1111-4111-8111-${String(index + 1).padStart(12, '0')}`,
+      startedAt: record.startedAt + index,
+      ...(index === 20 ? { day: archive.day, location: 'archived' as const } : {}),
+    }));
+    installRawDataApi({
+      records: pageRecords,
+      archives: [{ ...archive, recordCount: 1 }],
+    });
+    renderClient();
+
+    expect(await screen.findByText('第 1 / 2 页，共 21 条')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: '下一页' }));
+    expect(await screen.findByText('第 2 / 2 页，共 21 条')).toBeVisible();
+    expect((await screen.findAllByRole('button', { name: `查看记录 ${pageRecords[20].id}` }))[0]).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: `删除 ${archive.day} 归档` }));
+    await user.click(screen.getByRole('button', { name: '删除归档' }));
+
+    expect(await screen.findByText('第 1 / 1 页，共 20 条')).toBeVisible();
+    expect((await screen.findAllByRole('button', { name: `查看记录 ${pageRecords[0].id}` }))[0]).toBeVisible();
+    expect(screen.queryByRole('button', { name: `查看记录 ${pageRecords[20].id}` })).not.toBeInTheDocument();
+  });
+
+  it('does not start an overlapping poll while one refresh is pending', async () => {
+    let poll: (() => void) | undefined;
+    vi.spyOn(window, 'setInterval').mockImplementation((handler, timeout) => {
+      if (timeout === 2000) poll = () => handler(undefined);
+      return 1 as unknown as ReturnType<typeof window.setInterval>;
+    });
+    const api = installRawDataApi({ enabled: true });
+    renderClient();
+    await screen.findByText('今日原始数据');
+    await waitFor(() => expect(poll).toBeTypeOf('function'));
+
+    const pendingConfig = deferred<Response>();
+    let pollConfigCalls = 0;
+    api.fetchSpy.mockImplementation((input, init) => {
+      if (String(input) === '/api/admin/raw-data/config' && (!init?.method || init.method === 'GET')) {
+        pollConfigCalls += 1;
+        return pendingConfig.promise;
+      }
+      return api.respond(input, init);
+    });
+
+    act(() => { poll?.(); });
+    act(() => { poll?.(); });
+    expect(pollConfigCalls).toBe(1);
+
+    await act(async () => {
+      pendingConfig.resolve(json({ config: { enabled: true }, status: { ...status, enabled: true } }));
+      await pendingConfig.promise;
+    });
+  });
+
+  it('aborts a pending poll on disable and ignores its stale response', async () => {
+    let poll: (() => void) | undefined;
+    vi.spyOn(window, 'setInterval').mockImplementation((handler, timeout) => {
+      if (timeout === 2000) poll = () => handler(undefined);
+      return 1 as unknown as ReturnType<typeof window.setInterval>;
+    });
+    const api = installRawDataApi({ enabled: true });
+    renderClient();
+    const user = userEvent.setup();
+    const captureSwitch = await screen.findByRole('switch', { name: '记录所有原始对话' });
+    await waitFor(() => expect(poll).toBeTypeOf('function'));
+
+    const staleConfig = deferred<Response>();
+    let pollSignal: AbortSignal | undefined;
+    api.fetchSpy.mockImplementation((input, init) => {
+      if (String(input) === '/api/admin/raw-data/config' && (!init?.method || init.method === 'GET')) {
+        pollSignal = init?.signal ?? undefined;
+        return staleConfig.promise;
+      }
+      return api.respond(input, init);
+    });
+
+    act(() => { poll?.(); });
+    await user.click(captureSwitch);
+    expect(pollSignal?.aborted).toBe(true);
+    expect(await screen.findByRole('status')).toHaveTextContent('原始数据采集已关闭');
+
+    await act(async () => {
+      staleConfig.resolve(json({
+        config: { enabled: true },
+        status: { ...status, enabled: true, todayRecords: 999 },
+      }));
+      await staleConfig.promise;
+    });
+    expect(captureSwitch).not.toBeChecked();
+    expect(screen.queryByText('999 条')).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('aborts outstanding refresh work on unmount', async () => {
+    let poll: (() => void) | undefined;
+    vi.spyOn(window, 'setInterval').mockImplementation((handler, timeout) => {
+      if (timeout === 2000) poll = () => handler(undefined);
+      return 1 as unknown as ReturnType<typeof window.setInterval>;
+    });
+    const api = installRawDataApi({ enabled: true });
+    const view = renderClient();
+    await screen.findByText('今日原始数据');
+    await waitFor(() => expect(poll).toBeTypeOf('function'));
+
+    let pollSignal: AbortSignal | undefined;
+    api.fetchSpy.mockImplementation((input, init) => {
+      if (String(input) === '/api/admin/raw-data/config' && (!init?.method || init.method === 'GET')) {
+        pollSignal = init?.signal ?? undefined;
+        return new Promise<Response>((_resolve, reject) => {
+          pollSignal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+        });
+      }
+      return api.respond(input, init);
+    });
+
+    act(() => { poll?.(); });
+    view.unmount();
+    expect(pollSignal?.aborted).toBe(true);
+    await act(async () => { await Promise.resolve(); });
   });
 
   it('announces API failures without replacing retained records', async () => {

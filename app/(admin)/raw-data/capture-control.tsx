@@ -66,6 +66,7 @@ export function CaptureControl({ config, status, pending, onEnabledChange }: Cap
               <label htmlFor="raw-capture-enabled" className="text-sm font-medium">记录所有原始对话</label>
               <Switch
                 id="raw-capture-enabled"
+                className="h-11 border-y-[10px] bg-clip-padding md:h-6 md:border-y"
                 checked={config?.enabled ?? false}
                 disabled={loading || pending}
                 onCheckedChange={onEnabledChange}

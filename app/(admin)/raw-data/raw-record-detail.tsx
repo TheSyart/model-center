@@ -115,9 +115,9 @@ export function RawRecordDetail({ record, returnFocusRef, onRecordChange, onErro
           {previewError && <div role="alert" className="mb-4 rounded-md border border-destructive/25 bg-destructive-soft px-3 py-3 text-sm text-destructive">{previewError}</div>}
           {record && (
             <Tabs defaultValue="request" key={record.id}>
-              <TabsList aria-label="原始正文类型" className="w-full sm:w-auto">
-                <TabsTrigger value="request" className="flex-1 sm:flex-none">Request</TabsTrigger>
-                <TabsTrigger value="response" className="flex-1 sm:flex-none">Response</TabsTrigger>
+              <TabsList aria-label="原始正文类型" className="h-[52px] w-full md:h-10 md:w-auto">
+                <TabsTrigger value="request" className="h-11 flex-1 md:h-8 md:flex-none">Request</TabsTrigger>
+                <TabsTrigger value="response" className="h-11 flex-1 md:h-8 md:flex-none">Response</TabsTrigger>
               </TabsList>
               <TabsContent value="request"><PreviewPanel record={record} part="request" preview={previews.request} /></TabsContent>
               <TabsContent value="response"><PreviewPanel record={record} part="response" preview={previews.response} /></TabsContent>

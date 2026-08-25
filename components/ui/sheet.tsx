@@ -42,7 +42,7 @@ const SheetContent = React.forwardRef<React.ElementRef<typeof DialogPrimitive.Co
       <DialogPrimitive.Content ref={ref} className={cn(sheetVariants({ side }), className)} {...props}>
         {children}
         {!hideClose && (
-          <DialogPrimitive.Close className="absolute right-3 top-3 flex size-9 items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">
+          <DialogPrimitive.Close className="absolute right-2 top-2 flex size-11 items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring md:right-3 md:top-3 md:size-9">
             <X className="size-4" />
             <span className="sr-only">关闭</span>
           </DialogPrimitive.Close>

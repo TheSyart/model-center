@@ -21,6 +21,17 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
+function recordsUrl(page: number): string {
+  return `/api/admin/raw-data/records?page=${page}&page_size=20`;
+}
+
+async function loadRecordPage(targetPage: number, signal?: AbortSignal): Promise<RawCapturePage> {
+  const requested = await requestJson<RawCapturePage>(recordsUrl(targetPage), { signal });
+  const lastPage = Math.max(1, Math.ceil(requested.total / Math.max(1, requested.pageSize)));
+  if (requested.page <= lastPage) return requested;
+  return requestJson<RawCapturePage>(recordsUrl(lastPage), { signal });
+}
+
 export default function RawDataClient() {
   const [dashboard, setDashboard] = useState<DashboardResponse | null>(null);
   const [records, setRecords] = useState<RawCapturePage>(EMPTY_PAGE);
@@ -34,6 +45,8 @@ export default function RawDataClient() {
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const requestVersion = useRef(0);
+  const refreshController = useRef<AbortController | null>(null);
+  const activeMutations = useRef(0);
   const mounted = useRef(true);
   const detailTriggerRef = useRef<HTMLElement | null>(null);
   const { confirm } = useConfirm();
@@ -44,14 +57,46 @@ export default function RawDataClient() {
     setNotice('');
   }, []);
 
-  const refresh = useCallback(async (targetPage: number, includeArchives: boolean, quiet = false) => {
+  const cancelRefresh = useCallback(() => {
+    requestVersion.current += 1;
+    if (refreshController.current) {
+      refreshController.current.abort();
+      if (mounted.current) setRefreshing(false);
+    }
+  }, []);
+
+  const beginMutation = useCallback(() => {
+    activeMutations.current += 1;
+    cancelRefresh();
+  }, [cancelRefresh]);
+
+  const endMutation = useCallback(() => {
+    activeMutations.current = Math.max(0, activeMutations.current - 1);
+  }, []);
+
+  const refresh = useCallback(async (
+    targetPage: number,
+    includeArchives: boolean,
+    quiet = false,
+    policy: 'replace' | 'skip' = 'replace',
+  ) => {
+    if (activeMutations.current > 0) return;
+    if (refreshController.current) {
+      if (policy === 'skip') return;
+      refreshController.current.abort();
+    }
+
+    const controller = new AbortController();
+    refreshController.current = controller;
     const version = ++requestVersion.current;
-    if (!quiet) setRefreshing(true);
+    if (!quiet && mounted.current) setRefreshing(true);
     try {
       const responses = await Promise.all([
-        requestJson<DashboardResponse>('/api/admin/raw-data/config'),
-        requestJson<RawCapturePage>(`/api/admin/raw-data/records?page=${targetPage}&page_size=20`),
-        includeArchives ? requestJson<ArchivesResponse>('/api/admin/raw-data/archives') : Promise.resolve(null),
+        requestJson<DashboardResponse>('/api/admin/raw-data/config', { signal: controller.signal }),
+        loadRecordPage(targetPage, controller.signal),
+        includeArchives
+          ? requestJson<ArchivesResponse>('/api/admin/raw-data/archives', { signal: controller.signal })
+          : Promise.resolve(null),
       ]);
       if (!mounted.current || version !== requestVersion.current) return;
       const [nextDashboard, nextRecords, nextArchives] = responses;
@@ -63,9 +108,10 @@ export default function RawDataClient() {
         : null);
       setError('');
     } catch (loadError) {
-      if (!mounted.current || version !== requestVersion.current) return;
+      if (controller.signal.aborted || !mounted.current || version !== requestVersion.current) return;
       showError(errorMessage(loadError, '原始数据加载失败'));
     } finally {
+      if (refreshController.current === controller) refreshController.current = null;
       if (mounted.current && version === requestVersion.current) {
         setLoading(false);
         if (!quiet) setRefreshing(false);
@@ -78,13 +124,13 @@ export default function RawDataClient() {
     void refresh(1, true);
     return () => {
       mounted.current = false;
-      requestVersion.current += 1;
+      cancelRefresh();
     };
-  }, [refresh]);
+  }, [cancelRefresh, refresh]);
 
   useEffect(() => {
     if (!dashboard?.config.enabled) return;
-    const timer = window.setInterval(() => { void refresh(records.page, false, true); }, 2000);
+    const timer = window.setInterval(() => { void refresh(records.page, false, true, 'skip'); }, 2000);
     return () => window.clearInterval(timer);
   }, [dashboard?.config.enabled, records.page, refresh]);
 
@@ -99,7 +145,7 @@ export default function RawDataClient() {
       if (!approved) return;
     }
 
-    requestVersion.current += 1;
+    beginMutation();
     setConfigPending(true);
     setError('');
     setNotice('');
@@ -109,20 +155,24 @@ export default function RawDataClient() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled }),
       });
+      if (!mounted.current) return;
       setDashboard(next);
       const message = enabled ? '原始数据采集已开启' : '原始数据采集已关闭';
       setNotice(message);
       toast(message);
     } catch (saveError) {
+      if (!mounted.current) return;
       const message = errorMessage(saveError, '采集配置保存失败');
       showError(message);
       toast(message, 'error');
     } finally {
-      setConfigPending(false);
+      endMutation();
+      if (mounted.current) setConfigPending(false);
     }
   }
 
   async function runArchiveCheck() {
+    beginMutation();
     setArchiveRunning(true);
     setError('');
     setNotice('');
@@ -132,6 +182,7 @@ export default function RawDataClient() {
         requestJson<ArchivesResponse>('/api/admin/raw-data/archives'),
         requestJson<DashboardResponse>('/api/admin/raw-data/config'),
       ]);
+      if (!mounted.current) return;
       setArchives(archiveResponse.archives);
       setDashboard(nextDashboard);
       const message = result.errors.length > 0
@@ -145,11 +196,13 @@ export default function RawDataClient() {
         toast(message);
       }
     } catch (archiveError) {
+      if (!mounted.current) return;
       const message = errorMessage(archiveError, '归档检查失败');
       showError(message);
       toast(message, 'error');
     } finally {
-      setArchiveRunning(false);
+      endMutation();
+      if (mounted.current) setArchiveRunning(false);
     }
   }
 
@@ -161,28 +214,33 @@ export default function RawDataClient() {
       danger: true,
     });
     if (!approved) return;
+    beginMutation();
     setPendingDay(item.day);
     setError('');
     setNotice('');
     try {
       await requestJson<{ deleted: true; day: string }>(`/api/admin/raw-data/archives/${item.day}`, { method: 'DELETE' });
+      if (!mounted.current) return;
       setArchives((current) => current.filter((archive) => archive.day !== item.day));
       if (selected?.day === item.day && selected.location === 'archived') setSelected(null);
       const [nextDashboard, nextRecords] = await Promise.all([
         requestJson<DashboardResponse>('/api/admin/raw-data/config'),
-        requestJson<RawCapturePage>(`/api/admin/raw-data/records?page=${records.page}&page_size=20`),
+        loadRecordPage(records.page),
       ]);
+      if (!mounted.current) return;
       setDashboard(nextDashboard);
       setRecords(nextRecords);
       const message = `${item.day} 归档已删除`;
       setNotice(message);
       toast(message);
     } catch (deleteError) {
+      if (!mounted.current) return;
       const message = errorMessage(deleteError, '归档删除失败');
       showError(message);
       toast(message, 'error');
     } finally {
-      setPendingDay(null);
+      endMutation();
+      if (mounted.current) setPendingDay(null);
     }
   }
 
