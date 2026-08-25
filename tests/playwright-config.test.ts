@@ -44,22 +44,47 @@ test('Playwright config rejects unsafe or out-of-range ports during module load'
   }
 });
 
-test('Playwright config uses a fixed isolated database directory and a validated port', () => {
+test('Playwright config creates one shell-safe isolated run directory per invocation', () => {
   const marker = '.next-playwright data; touch /tmp/model-center-db-injected';
-  const result = loadPlaywrightConfig({
+  const first = loadPlaywrightConfig({
+    PLAYWRIGHT_PORT: '3111',
+    PLAYWRIGHT_DB_DIR: marker,
+  });
+  const second = loadPlaywrightConfig({
     PLAYWRIGHT_PORT: '3111',
     PLAYWRIGHT_DB_DIR: marker,
   });
 
-  assert.equal(result.status, 0, result.stderr);
-  const inspected = JSON.parse(result.stdout.trim()) as {
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(second.status, 0, second.stderr);
+  const inspected = [first, second].map((result) => JSON.parse(result.stdout.trim()) as {
     baseURL: string;
     command: string;
     url: string;
-  };
-  assert.equal(inspected.baseURL, 'http://127.0.0.1:3111');
-  assert.equal(inspected.url, 'http://127.0.0.1:3111');
-  assert.match(inspected.command, /MODEL_CENTER_DB_DIR=\.next-playwright-data/);
-  assert.match(inspected.command, /--port 3111$/);
-  assert.doesNotMatch(inspected.command, /model-center-db-injected/);
+  });
+  const runIds = inspected.map((config) => {
+    assert.equal(config.baseURL, 'http://127.0.0.1:3111');
+    assert.equal(config.url, 'http://127.0.0.1:3111');
+    assert.match(config.command, /--port 3111$/);
+    assert.doesNotMatch(config.command, /model-center-db-injected/);
+
+    const databaseAssignments = [...config.command.matchAll(/MODEL_CENTER_DB_DIR=([^\s]+)/g)]
+      .map((match) => match[1]!);
+    assert.equal(databaseAssignments.length, 2, 'seed and Next must share one database directory');
+    assert.equal(databaseAssignments[0], databaseAssignments[1]);
+    const matched = /^\.next-playwright-data\/([0-9a-f]{32})\/db$/.exec(databaseAssignments[0]!);
+    assert.ok(matched, `unsafe database assignment: ${databaseAssignments[0]}`);
+    const runId = matched[1]!;
+    assert.match(
+      config.command,
+      new RegExp(`MODEL_CENTER_NEXT_DIST_DIR=\\.next-playwright-data/${runId}/next-dist(?:\\s|$)`),
+    );
+    assert.match(
+      config.command,
+      new RegExp(`MODEL_CENTER_NEXT_TSCONFIG=\\.next-playwright-data/${runId}/tsconfig\\.json(?:\\s|$)`),
+    );
+    return runId;
+  });
+
+  assert.notEqual(runIds[0], runIds[1], 'separate config invocations must never reuse a data directory');
 });

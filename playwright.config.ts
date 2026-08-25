@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { defineConfig } from '@playwright/test';
 
 function parsePlaywrightPort(value: string): string {
@@ -12,7 +13,11 @@ function parsePlaywrightPort(value: string): string {
 }
 
 const port = parsePlaywrightPort(process.env.PLAYWRIGHT_PORT ?? '3100');
-const databaseDir = '.next-playwright-data';
+const runId = randomBytes(16).toString('hex');
+const runDir = `.next-playwright-data/${runId}`;
+const databaseDir = `${runDir}/db`;
+const distDir = `${runDir}/next-dist`;
+const tsconfigPath = `${runDir}/tsconfig.json`;
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -38,7 +43,7 @@ export default defineConfig({
       timeout: 30_000,
     },
     {
-      command: `TZ=UTC MODEL_CENTER_DB_DIR=${databaseDir} node --experimental-strip-types tests/raw-capture-e2e-seed.ts && TZ=UTC MODEL_CENTER_DB_DIR=${databaseDir} MODEL_CENTER_NEXT_DIST_DIR=${databaseDir}/next-dist MODEL_CENTER_NEXT_TSCONFIG=.next-playwright-data/tsconfig.json npm run dev -- --hostname 127.0.0.1 --port ${port}`,
+      command: `TZ=UTC MODEL_CENTER_DB_DIR=${databaseDir} node --experimental-strip-types tests/raw-capture-e2e-seed.ts && TZ=UTC MODEL_CENTER_DB_DIR=${databaseDir} MODEL_CENTER_NEXT_DIST_DIR=${distDir} MODEL_CENTER_NEXT_TSCONFIG=${tsconfigPath} npm run dev -- --hostname 127.0.0.1 --port ${port}`,
       url: `http://127.0.0.1:${port}`,
       reuseExistingServer: false,
       timeout: 120_000,
