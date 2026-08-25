@@ -1,22 +1,34 @@
 import { randomUUID } from 'node:crypto';
 import {
   closeSync,
+  constants,
   existsSync,
+  fstatSync,
   fsyncSync,
   mkdirSync,
   openSync,
   readFileSync,
   readdirSync,
   renameSync,
-  statSync,
   unlinkSync,
   writeSync,
 } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { open as openFile, rename as renameFile, unlink as unlinkFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import type Database from 'better-sqlite3';
 
 import { createRawCaptureConfigStore } from './config.ts';
-import { activeRecordDir, assertArchiveDay, assertRecordId, localDay, rawCaptureRoot } from './paths.ts';
+import {
+  activeRecordDir,
+  assertArchiveDay,
+  assertManagedDirectory,
+  assertManagedRegularFile,
+  assertRecordId,
+  ensureManagedDirectory,
+  localDay,
+  managedFilePath,
+  rawCaptureRoot,
+} from './paths.ts';
 import type {
   RawCaptureArchive,
   RawCaptureEntry,
@@ -87,6 +99,18 @@ export interface RawCaptureStoreOptions {
   rootDir?: string;
   now?: () => number;
   id?: () => string;
+  openResponseFile?: (path: string) => Promise<RawCaptureResponseFileHandle>;
+}
+
+export interface RawCaptureResponseFileHandle {
+  write(
+    buffer: Uint8Array,
+    offset: number,
+    length: number,
+    position: number | null,
+  ): Promise<{ bytesWritten: number }>;
+  sync(): Promise<void>;
+  close(): Promise<void>;
 }
 
 export interface BeginRawCaptureRecordInput {
@@ -131,7 +155,7 @@ function archiveFromRow(row: RawCaptureArchiveRow): RawCaptureArchive {
   };
 }
 
-function writeAll(descriptor: number, bytes: Uint8Array): void {
+function writeAllSync(descriptor: number, bytes: Uint8Array): void {
   const buffer = Buffer.from(bytes);
   let offset = 0;
   while (offset < buffer.byteLength) {
@@ -139,21 +163,115 @@ function writeAll(descriptor: number, bytes: Uint8Array): void {
   }
 }
 
-function atomicWriteFile(target: string, bytes: Uint8Array): void {
-  const directory = dirname(target);
-  const temporary = join(directory, `.${basename(target)}.${randomUUID()}.tmp`);
+function atomicWriteFile(rootDir: string, segments: string[], bytes: Uint8Array): void {
+  const target = managedFilePath(rootDir, ...segments);
+  const temporarySegments = [
+    ...segments.slice(0, -1),
+    `.${segments.at(-1)}.${randomUUID()}.tmp`,
+  ];
+  const temporary = managedFilePath(rootDir, ...temporarySegments);
   let descriptor: number | null = null;
   try {
-    descriptor = openSync(temporary, 'wx', 0o600);
-    writeAll(descriptor, bytes);
+    descriptor = openSync(
+      temporary,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    writeAllSync(descriptor, bytes);
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = null;
+    assertManagedRegularFile(rootDir, ...temporarySegments);
+    managedFilePath(rootDir, ...segments);
     renameSync(temporary, target);
   } finally {
     if (descriptor !== null) closeSync(descriptor);
-    if (existsSync(temporary)) unlinkSync(temporary);
+    if (existsSync(temporary)) {
+      assertManagedRegularFile(rootDir, ...temporarySegments);
+      unlinkSync(temporary);
+    }
   }
+}
+
+async function writeAllAsync(
+  handle: RawCaptureResponseFileHandle,
+  bytes: Uint8Array,
+  onWritten: (bytesWritten: number) => void,
+): Promise<void> {
+  const buffer = Buffer.from(bytes);
+  let offset = 0;
+  while (offset < buffer.byteLength) {
+    const { bytesWritten } = await handle.write(buffer, offset, buffer.byteLength - offset, null);
+    if (!Number.isSafeInteger(bytesWritten) || bytesWritten <= 0 || bytesWritten > buffer.byteLength - offset) {
+      throw new Error('异步响应文件写入未取得进展');
+    }
+    offset += bytesWritten;
+    onWritten(bytesWritten);
+  }
+}
+
+async function atomicWriteFileAsync(rootDir: string, segments: string[], bytes: Uint8Array): Promise<void> {
+  const target = managedFilePath(rootDir, ...segments);
+  const temporarySegments = [
+    ...segments.slice(0, -1),
+    `.${segments.at(-1)}.${randomUUID()}.tmp`,
+  ];
+  const temporary = managedFilePath(rootDir, ...temporarySegments);
+  let handle: Awaited<ReturnType<typeof openFile>> | null = null;
+  try {
+    handle = await openFile(
+      temporary,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    let offset = 0;
+    const buffer = Buffer.from(bytes);
+    while (offset < buffer.byteLength) {
+      const { bytesWritten } = await handle.write(buffer, offset, buffer.byteLength - offset, null);
+      if (bytesWritten <= 0) throw new Error('异步元数据写入未取得进展');
+      offset += bytesWritten;
+    }
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    assertManagedRegularFile(rootDir, ...temporarySegments);
+    managedFilePath(rootDir, ...segments);
+    await renameFile(temporary, target);
+  } finally {
+    if (handle) await handle.close().catch(() => undefined);
+    if (existsSync(temporary)) {
+      assertManagedRegularFile(rootDir, ...temporarySegments);
+      await unlinkFile(temporary);
+    }
+  }
+}
+
+async function defaultOpenResponseFile(path: string): Promise<RawCaptureResponseFileHandle> {
+  return openFile(
+    path,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+    0o600,
+  );
+}
+
+function readManagedFileSync(rootDir: string, segments: string[]): Buffer {
+  const { path } = assertManagedRegularFile(rootDir, ...segments);
+  const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    if (!fstatSync(descriptor).isFile()) throw new Error('原始数据文件不是普通文件');
+    return readFileSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error && error.message ? error.message : String(error);
+}
+
+function combineCaptureErrors(...messages: Array<string | null | undefined>): string | null {
+  const values = [...new Set(messages.filter((message): message is string => Boolean(message)))];
+  return values.length > 0 ? values.join('；') : null;
 }
 
 function isEntry(value: unknown): value is RawCaptureEntry {
@@ -209,10 +327,11 @@ export function createRawCaptureStore(sqlite: Database.Database, options: RawCap
   const rootDir = resolve(options.rootDir ?? rawCaptureRoot());
   const now = options.now ?? Date.now;
   const createId = options.id ?? randomUUID;
+  const openResponseFile = options.openResponseFile ?? defaultOpenResponseFile;
   const config = createRawCaptureConfigStore(sqlite);
-  mkdirSync(join(rootDir, 'active'), { recursive: true });
-  mkdirSync(join(rootDir, 'archives'), { recursive: true });
-  mkdirSync(join(rootDir, 'tmp'), { recursive: true });
+  ensureManagedDirectory(rootDir, 'active');
+  ensureManagedDirectory(rootDir, 'archives');
+  ensureManagedDirectory(rootDir, 'tmp');
 
   const insertRecord = sqlite.prepare(`
     INSERT INTO raw_capture_records (
@@ -241,6 +360,7 @@ export function createRawCaptureStore(sqlite: Database.Database, options: RawCap
       complete = excluded.complete,
       capture_error = excluded.capture_error,
       location = excluded.location
+    WHERE raw_capture_records.location != 'archived'
   `);
 
   const updateRecord = sqlite.prepare(`
@@ -317,31 +437,67 @@ export function createRawCaptureStore(sqlite: Database.Database, options: RawCap
   };
 
   const reconcileActiveRecords = (): void => {
-    const activeRoot = join(rootDir, 'active');
+    const activeRoot = assertManagedDirectory(rootDir, 'active');
     for (const dayEntry of readdirSync(activeRoot, { withFileTypes: true })) {
-      if (!dayEntry.isDirectory()) continue;
       try {
         assertArchiveDay(dayEntry.name);
       } catch {
         continue;
       }
-      const dayDir = join(activeRoot, dayEntry.name);
+      const dayDir = assertManagedDirectory(rootDir, 'active', dayEntry.name);
       for (const recordEntry of readdirSync(dayDir, { withFileTypes: true })) {
-        if (!recordEntry.isDirectory()) continue;
         try {
           assertRecordId(recordEntry.name);
         } catch {
           continue;
         }
-        const metadataPath = join(dayDir, recordEntry.name, 'metadata.json');
-        if (!existsSync(metadataPath) || !statSync(metadataPath).isFile()) continue;
+        assertManagedDirectory(rootDir, 'active', dayEntry.name, recordEntry.name);
+        const archived = sqlite.prepare(`
+          SELECT location FROM raw_capture_records WHERE id = ?
+        `).get(recordEntry.name) as { location: 'active' | 'archived' } | undefined;
+        if (archived?.location === 'archived') continue;
         try {
           const recovered = recordFromMetadata(
-            JSON.parse(readFileSync(metadataPath, 'utf8')),
+            JSON.parse(readManagedFileSync(
+              rootDir,
+              ['active', dayEntry.name, recordEntry.name, 'metadata.json'],
+            ).toString('utf8')),
             dayEntry.name,
             recordEntry.name,
           );
-          if (recovered) writeRecordIndex(recovered, true);
+          if (!recovered) continue;
+
+          const recoveryErrors: string[] = [];
+          for (const part of ['request', 'response'] as const) {
+            const fileName = `${part}.body`;
+            try {
+              const { stats } = assertManagedRegularFile(
+                rootDir,
+                'active',
+                dayEntry.name,
+                recordEntry.name,
+                fileName,
+              );
+              const bytesKey = part === 'request' ? 'requestBytes' : 'responseBytes';
+              if (recovered[bytesKey] !== stats.size) {
+                recoveryErrors.push(`${fileName} 大小已按磁盘恢复`);
+                recovered[bytesKey] = stats.size;
+              }
+            } catch (error) {
+              recoveryErrors.push(`${fileName} 安全检查失败: ${errorMessage(error)}`);
+            }
+          }
+          if (!recovered.complete) recoveryErrors.push('进程异常退出后恢复为未完成记录');
+          if (recoveryErrors.length > 0) {
+            recovered.complete = false;
+            recovered.captureError = combineCaptureErrors(recovered.captureError, ...recoveryErrors);
+            atomicWriteFile(
+              rootDir,
+              ['active', recovered.day, recovered.id, 'metadata.json'],
+              Buffer.from(JSON.stringify(recovered)),
+            );
+          }
+          writeRecordIndex(recovered, true);
         } catch {
           // Keep unparseable crash-leftover files untouched; a later repair can inspect them.
         }
@@ -351,8 +507,12 @@ export function createRawCaptureStore(sqlite: Database.Database, options: RawCap
 
   reconcileActiveRecords();
 
-  const persistFinalRecord = (record: RawCaptureRecord, recordDir: string): RawCaptureRecord => {
-    atomicWriteFile(join(recordDir, 'metadata.json'), Buffer.from(JSON.stringify(record)));
+  const persistFinalRecord = async (record: RawCaptureRecord): Promise<RawCaptureRecord> => {
+    await atomicWriteFileAsync(
+      rootDir,
+      ['active', record.day, record.id, 'metadata.json'],
+      Buffer.from(JSON.stringify(record)),
+    );
     updateRecord.run(
       record.completedAt,
       record.status,
@@ -392,65 +552,94 @@ export function createRawCaptureStore(sqlite: Database.Database, options: RawCap
         location: 'active',
       };
       const recordDir = activeRecordDir(rootDir, day, id);
-      mkdirSync(dirname(recordDir), { recursive: true });
-      mkdirSync(recordDir);
-      atomicWriteFile(join(recordDir, 'request.body'), input.requestBody);
-      atomicWriteFile(join(recordDir, 'metadata.json'), Buffer.from(JSON.stringify(record)));
+      ensureManagedDirectory(rootDir, 'active', day);
+      mkdirSync(recordDir, { mode: 0o700 });
+      assertManagedDirectory(rootDir, 'active', day, id);
+      atomicWriteFile(rootDir, ['active', day, id, 'request.body'], input.requestBody);
+      atomicWriteFile(rootDir, ['active', day, id, 'metadata.json'], Buffer.from(JSON.stringify(record)));
       writeRecordIndex(record);
 
-      let responseDescriptor: number | null = openSync(join(recordDir, 'response.body'), 'wx', 0o600);
-      let finalized = false;
+      const responsePath = managedFilePath(rootDir, 'active', day, id, 'response.body');
+      let responseHandle: RawCaptureResponseFileHandle | null = await openResponseFile(responsePath);
+      let acceptingWrites = true;
+      let responseIoError: string | null = null;
+      let writeQueue = Promise.resolve();
+      let finalization: Promise<RawCaptureRecord> | null = null;
 
-      const closeResponse = (): void => {
-        if (responseDescriptor === null) return;
-        const descriptor = responseDescriptor;
-        responseDescriptor = null;
+      const closeResponse = async (): Promise<string | null> => {
+        if (responseHandle === null) return null;
+        const handle = responseHandle;
+        responseHandle = null;
+        const errors: string[] = [];
         try {
-          fsyncSync(descriptor);
-        } finally {
-          closeSync(descriptor);
+          await handle.sync();
+        } catch (error) {
+          errors.push(errorMessage(error));
         }
+        try {
+          await handle.close();
+        } catch (error) {
+          errors.push(errorMessage(error));
+        }
+        return combineCaptureErrors(...errors);
       };
 
-      const finish = async (input: {
-        status: number;
+      const finalize = (input: {
+        status: number | null;
         stream: boolean;
         contentType: string | null;
         complete: boolean;
         captureError?: string | null;
       }): Promise<RawCaptureRecord> => {
-        if (finalized) return record;
-        closeResponse();
-        finalized = true;
-        Object.assign(record, {
-          completedAt: now(),
-          status: input.status,
-          stream: input.stream,
-          contentType: input.contentType,
-          complete: input.complete,
-          captureError: input.captureError ?? null,
-        });
-        return persistFinalRecord(record, recordDir);
+        if (finalization) return finalization;
+        acceptingWrites = false;
+        finalization = (async () => {
+          await writeQueue;
+          const closeError = await closeResponse();
+          const captureError = combineCaptureErrors(input.captureError, responseIoError, closeError);
+          Object.assign(record, {
+            completedAt: now(),
+            status: input.status,
+            stream: input.stream,
+            contentType: input.contentType,
+            complete: input.complete && captureError === null,
+            captureError,
+          });
+          return persistFinalRecord(record);
+        })();
+        return finalization;
       };
 
       return {
         record,
         async appendResponse(chunk: Uint8Array): Promise<void> {
-          if (finalized || responseDescriptor === null) throw new Error('原始响应记录已结束');
-          writeAll(responseDescriptor, chunk);
-          record.responseBytes += chunk.byteLength;
+          if (!acceptingWrites || responseHandle === null) throw new Error('原始响应记录已结束');
+          const capturedChunk = Buffer.from(chunk);
+          const operation = writeQueue.then(async () => {
+            if (responseIoError !== null || responseHandle === null) {
+              throw new Error(responseIoError ?? '原始响应记录已结束');
+            }
+            try {
+              await writeAllAsync(responseHandle, capturedChunk, (bytesWritten) => {
+                record.responseBytes += bytesWritten;
+              });
+            } catch (error) {
+              responseIoError ??= `响应文件写入失败: ${errorMessage(error)}`;
+              throw error;
+            }
+          });
+          writeQueue = operation.catch(() => undefined);
+          return operation;
         },
-        finish,
+        finish: (input) => finalize(input),
         async fail(message: string): Promise<RawCaptureRecord> {
-          if (finalized) return record;
-          closeResponse();
-          finalized = true;
-          Object.assign(record, {
-            completedAt: now(),
+          return finalize({
+            status: record.status,
+            stream: record.stream,
+            contentType: record.contentType,
             complete: false,
             captureError: message,
           });
-          return persistFinalRecord(record, recordDir);
         },
       };
     },
