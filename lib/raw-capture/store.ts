@@ -250,6 +250,53 @@ export function createRawCaptureStore(sqlite: Database.Database, options: RawCap
     WHERE id = ?
   `);
 
+  const commitArchiveTransaction = sqlite.transaction((archive: RawCaptureArchive, recordIds: string[]): void => {
+    const rows = sqlite.prepare(`
+      SELECT * FROM raw_capture_records WHERE day = ? ORDER BY id ASC
+    `).all(archive.day) as RawCaptureRecordRow[];
+    const indexedIds = rows.map((row) => row.id);
+    if (
+      rows.length !== recordIds.length
+      || indexedIds.some((id, index) => id !== recordIds[index])
+      || rows.some((row) => row.complete !== 1)
+    ) {
+      throw new Error('归档记录索引在提交前发生变化');
+    }
+    sqlite.prepare(`
+      INSERT INTO raw_capture_archives (
+        day, record_count, raw_bytes, archive_bytes, created_at, status, error
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(day) DO UPDATE SET
+        record_count = excluded.record_count,
+        raw_bytes = excluded.raw_bytes,
+        archive_bytes = excluded.archive_bytes,
+        created_at = excluded.created_at,
+        status = excluded.status,
+        error = excluded.error
+    `).run(
+      archive.day,
+      archive.recordCount,
+      archive.rawBytes,
+      archive.archiveBytes,
+      archive.createdAt,
+      archive.status,
+      archive.error,
+    );
+    sqlite.prepare(`
+      UPDATE raw_capture_records SET location = 'archived' WHERE day = ?
+    `).run(archive.day);
+  });
+
+  const deleteArchivedDayTransaction = sqlite.transaction((day: string): number => {
+    const archive = sqlite.prepare('SELECT day FROM raw_capture_archives WHERE day = ?').get(day);
+    if (!archive) return 0;
+    sqlite.prepare(`
+      DELETE FROM raw_capture_records WHERE day = ? AND location = 'archived'
+    `).run(day);
+    sqlite.prepare('DELETE FROM raw_capture_archives WHERE day = ?').run(day);
+    return 1;
+  });
+
   const writeRecordIndex = (record: RawCaptureRecord, reconcile = false): void => {
     (reconcile ? reconcileRecord : insertRecord).run(
       record.id,
@@ -322,6 +369,8 @@ export function createRawCaptureStore(sqlite: Database.Database, options: RawCap
   };
 
   return {
+    rootDir,
+
     async beginRecord(input: BeginRawCaptureRecordInput): Promise<RawCaptureSession> {
       const startedAt = now();
       const day = localDay(startedAt);
@@ -422,6 +471,35 @@ export function createRawCaptureStore(sqlite: Database.Database, options: RawCap
       assertRecordId(id);
       const row = sqlite.prepare('SELECT * FROM raw_capture_records WHERE id = ?').get(id) as RawCaptureRecordRow | undefined;
       return row ? recordFromRow(row) : undefined;
+    },
+
+    listRecordsForDay(day: string): RawCaptureRecord[] {
+      assertArchiveDay(day);
+      const rows = sqlite.prepare(`
+        SELECT * FROM raw_capture_records WHERE day = ? ORDER BY id ASC
+      `).all(day) as RawCaptureRecordRow[];
+      return rows.map(recordFromRow);
+    },
+
+    listArchives(): RawCaptureArchive[] {
+      const rows = sqlite.prepare(`
+        SELECT * FROM raw_capture_archives ORDER BY day DESC
+      `).all() as RawCaptureArchiveRow[];
+      return rows.map(archiveFromRow);
+    },
+
+    commitArchive(archive: RawCaptureArchive, recordIds: string[]): void {
+      assertArchiveDay(archive.day);
+      const ids = [...new Set(recordIds.map(assertRecordId))].sort();
+      if (ids.length !== recordIds.length || archive.recordCount !== ids.length || archive.status !== 'ready') {
+        throw new Error('归档记录索引无效');
+      }
+      commitArchiveTransaction(archive, ids);
+    },
+
+    deleteArchivedDay(day: string): boolean {
+      assertArchiveDay(day);
+      return deleteArchivedDayTransaction(day) === 1;
     },
 
     getStatus(): RawCaptureStatus {
