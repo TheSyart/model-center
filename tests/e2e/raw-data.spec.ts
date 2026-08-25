@@ -6,6 +6,14 @@ import {
   type CaptureCandidateObservation,
   type CaptureMatchEvaluation,
 } from '../raw-capture-e2e-match.ts';
+import {
+  accumulateRecordsById,
+  advanceRecordScanStability,
+  initialRecordScanStability,
+  scanBoundedRecords,
+  type RecordScanResult,
+  type RecordScanStability,
+} from '../raw-capture-e2e-scan.ts';
 import { extractSeededRawCaptureTarGzip } from '../raw-capture-e2e-tar.ts';
 
 interface GatewayFixture {
@@ -50,9 +58,24 @@ interface ObservedCaptureCandidate {
   observation: CaptureCandidateObservation;
 }
 
+interface CandidateScanAccumulator {
+  records: Map<string, RawCaptureRecord>;
+  stability: RecordScanStability;
+}
+
+interface CandidateObservationSnapshot {
+  groups: Map<string, ObservedCaptureCandidate[]>;
+  scan: RecordScanResult<RawCaptureRecord>;
+  stability: RecordScanStability;
+  newRelevantIds: string[];
+  metadataFailures: Map<string, string>;
+}
+
 const seededRecordId = '22222222-2222-4222-8222-222222222222';
 const seededRequest = Buffer.from('e2e-archive-request');
 const seededResponse = Buffer.from('e2e-archive-response');
+const maxRecordScanPages = 20;
+const maxRecordScanRecords = 2_000;
 
 function gatewayHeaders(key: string): Record<string, string> {
   return {
@@ -93,18 +116,14 @@ async function listRecords(request: APIRequestContext, page: number): Promise<Ra
 }
 
 async function listAllRecords(request: APIRequestContext): Promise<RawCaptureRecord[]> {
-  const records = new Map<string, RawCaptureRecord>();
-  let pageNumber = 1;
-  let requiredPages = 1;
-
-  while (pageNumber <= requiredPages) {
-    const page = await listRecords(request, pageNumber);
-    for (const record of page.items) records.set(record.id, record);
-    requiredPages = Math.max(requiredPages, Math.ceil(page.total / page.pageSize));
-    pageNumber++;
+  const scan = await scanBoundedRecords(
+    (page) => listRecords(request, page),
+    { maxPages: maxRecordScanPages, maxRecords: maxRecordScanRecords },
+  );
+  if (!scan.coverageComplete) {
+    throw new Error(`raw capture baseline scan was capped: ${scan.diagnostic}`);
   }
-
-  return [...records.values()];
+  return scan.records;
 }
 
 async function getCaptureEnabled(request: APIRequestContext): Promise<boolean> {
@@ -164,6 +183,13 @@ function emptyMatches(): Map<CanonicalPath, RawCaptureRecord[]> {
   return new Map(canonicalPaths.map((path) => [path, []]));
 }
 
+function createCandidateScanAccumulator(): CandidateScanAccumulator {
+  return {
+    records: new Map(),
+    stability: { ...initialRecordScanStability },
+  };
+}
+
 async function compareCapturedPart(
   request: APIRequestContext,
   recordId: string,
@@ -189,15 +215,50 @@ async function observePostBaselineCandidates(
   request: APIRequestContext,
   baselineIds: Set<string>,
   expectedBodies: Map<string, Buffer>,
-): Promise<Map<string, ObservedCaptureCandidate[]>> {
+  accumulator: CandidateScanAccumulator,
+): Promise<CandidateObservationSnapshot> {
   const groups = new Map(
     [...expectedBodies.keys()].map((path) => [path, [] as ObservedCaptureCandidate[]]),
   );
-  const records = await listAllRecords(request);
-  for (const record of records) {
-    if (baselineIds.has(record.id)) continue;
-    const expectedBody = expectedBodies.get(record.path);
-    if (expectedBody === undefined) continue;
+  const scan = await scanBoundedRecords(
+    (page) => listRecords(request, page),
+    {
+      maxPages: maxRecordScanPages,
+      maxRecords: maxRecordScanRecords,
+      isBoundary: (record) => baselineIds.has(record.id),
+    },
+  );
+  const currentRecords = new Map(scan.records.map((record) => [record.id, record]));
+  const newRelevantIds = accumulateRecordsById(
+    accumulator.records,
+    scan.records,
+    (record) => !baselineIds.has(record.id) && expectedBodies.has(record.path),
+  );
+  const metadataFailures = new Map<string, string>();
+
+  // A candidate displaced by OFFSET drift remains in the cross-poll map. Refresh
+  // it by ID so its completion state cannot become stale after leaving this scan.
+  for (const recordId of accumulator.records.keys()) {
+    if (currentRecords.has(recordId)) continue;
+    try {
+      const detailResponse = await request.get(`/api/admin/raw-data/records/${recordId}`);
+      if (!detailResponse.ok()) {
+        metadataFailures.set(recordId, `http_error:${detailResponse.status()}`);
+        continue;
+      }
+      try {
+        const detail = await detailResponse.json() as { record: RawCaptureRecord };
+        accumulator.records.set(recordId, detail.record);
+      } catch {
+        metadataFailures.set(recordId, 'read_error');
+      }
+    } catch {
+      metadataFailures.set(recordId, 'read_error');
+    }
+  }
+
+  for (const record of accumulator.records.values()) {
+    const expectedBody = expectedBodies.get(record.path)!;
     const requestObservation = await compareCapturedPart(request, record.id, 'request', expectedBody);
     groups.get(record.path)!.push({
       record,
@@ -211,7 +272,18 @@ async function observePostBaselineCandidates(
       },
     });
   }
-  return groups;
+  accumulator.stability = advanceRecordScanStability(
+    accumulator.stability,
+    scan,
+    newRelevantIds,
+  );
+  return {
+    groups,
+    scan,
+    stability: accumulator.stability,
+    newRelevantIds,
+    metadataFailures,
+  };
 }
 
 function evaluateCandidates(
@@ -237,24 +309,96 @@ function diagnosticsForGroups(
   )).join('\n');
 }
 
+function diagnosticsForSnapshot(
+  snapshot: CandidateObservationSnapshot,
+  completion: CaptureCompletionExpectation,
+): string {
+  const metadataDiagnostics = [...snapshot.metadataFailures]
+    .map(([id, state]) => `id=${id} state=${state}`)
+    .join('; ');
+  return [
+    `scan={${snapshot.scan.diagnostic}}`,
+    `stability={has_snapshot=${snapshot.stability.hasStableSnapshot} confirmations=${snapshot.stability.confirmations} ready=${snapshot.stability.ready}}`,
+    `new_relevant_ids=[${snapshot.newRelevantIds.join(',')}]`,
+    `metadata_failures=[${metadataDiagnostics}]`,
+    diagnosticsForGroups(snapshot.groups, completion),
+  ].join('\n');
+}
+
+function hasExactMetadataFailure(
+  snapshot: CandidateObservationSnapshot,
+  evaluations: readonly CaptureMatchEvaluation[],
+): boolean {
+  return evaluations.some((evaluation) => (
+    evaluation.exactRequestIds.some((id) => snapshot.metadataFailures.has(id))
+  ));
+}
+
+async function pollForNoExactRecords(
+  request: APIRequestContext,
+  baselineIds: Set<string>,
+  expectedBodies: Map<string, Buffer>,
+): Promise<Map<string, ObservedCaptureCandidate[]>> {
+  const accumulator = createCandidateScanAccumulator();
+  let finalGroups = new Map<string, ObservedCaptureCandidate[]>();
+  const completion = { status: 200, stream: false };
+  await expect.poll(async () => {
+    const snapshot = await observePostBaselineCandidates(
+      request,
+      baselineIds,
+      expectedBodies,
+      accumulator,
+    );
+    finalGroups = snapshot.groups;
+    const candidates = [...snapshot.groups.values()].flat();
+    const hasExactRequest = candidates.some((candidate) => candidate.observation.request.state === 'exact');
+    const hasRequestFailure = candidates.some((candidate) => candidate.observation.request.state === 'error');
+    if (
+      !snapshot.scan.coverageComplete
+      || !snapshot.stability.ready
+      || hasExactRequest
+      || hasRequestFailure
+    ) {
+      return diagnosticsForSnapshot(snapshot, completion);
+    }
+    return 'ready';
+  }, {
+    message: 'expected no exact-request capture while raw capture is disabled',
+    timeout: 7_500,
+  }).toBe('ready');
+  return finalGroups;
+}
+
 async function pollForExactRecords(
   request: APIRequestContext,
   baselineIds: Set<string>,
   expectedBodies: Map<string, Buffer>,
   completion: CaptureCompletionExpectation,
 ): Promise<Map<CanonicalPath, RawCaptureRecord[]>> {
+  const accumulator = createCandidateScanAccumulator();
   let matches = emptyMatches();
   await expect.poll(async () => {
-    const groups = await observePostBaselineCandidates(request, baselineIds, expectedBodies);
+    const snapshot = await observePostBaselineCandidates(
+      request,
+      baselineIds,
+      expectedBodies,
+      accumulator,
+    );
     const evaluations = canonicalPaths.map((path) => (
-      evaluateCandidates(groups.get(path) ?? [], completion)
+      evaluateCandidates(snapshot.groups.get(path) ?? [], completion)
     ));
-    if (!evaluations.every((evaluation) => evaluation.ready)) {
-      return diagnosticsForGroups(groups, completion);
+    if (
+      !snapshot.scan.coverageComplete
+      || !snapshot.stability.ready
+      || hasExactMetadataFailure(snapshot, evaluations)
+      || !evaluations.every((evaluation) => evaluation.ready)
+    ) {
+      return diagnosticsForSnapshot(snapshot, completion);
     }
     matches = emptyMatches();
     for (const path of canonicalPaths) {
-      const candidate = groups.get(path)!.find((item) => item.observation.request.state === 'exact');
+      const candidate = snapshot.groups.get(path)!
+        .find((item) => item.observation.request.state === 'exact');
       matches.set(path, candidate ? [candidate.record] : []);
     }
     return 'ready';
@@ -272,17 +416,24 @@ async function pollForExactRecord(
   expectedBody: Buffer,
   completion: CaptureCompletionExpectation,
 ): Promise<RawCaptureRecord> {
+  const accumulator = createCandidateScanAccumulator();
   let match: RawCaptureRecord | null = null;
   const expectedBodies = new Map([[path, expectedBody]]);
   await expect.poll(async () => {
-    const groups = await observePostBaselineCandidates(request, baselineIds, expectedBodies);
-    const candidates = groups.get(path) ?? [];
+    const snapshot = await observePostBaselineCandidates(
+      request,
+      baselineIds,
+      expectedBodies,
+      accumulator,
+    );
+    const candidates = snapshot.groups.get(path) ?? [];
     let evaluation = evaluateCandidates(candidates, completion);
     const requestFailures = candidates.some((candidate) => candidate.observation.request.state === 'error');
     if (
       completion.responseBody !== undefined
       && evaluation.exactRequestIds.length === 1
       && !requestFailures
+      && !hasExactMetadataFailure(snapshot, [evaluation])
     ) {
       const sole = candidates.find((candidate) => candidate.record.id === evaluation.exactRequestIds[0]);
       if (sole) {
@@ -295,7 +446,14 @@ async function pollForExactRecord(
         evaluation = evaluateCandidates(candidates, completion);
       }
     }
-    if (!evaluation.ready) return `${path} ${evaluation.diagnostic}`;
+    if (
+      !snapshot.scan.coverageComplete
+      || !snapshot.stability.ready
+      || hasExactMetadataFailure(snapshot, [evaluation])
+      || !evaluation.ready
+    ) {
+      return diagnosticsForSnapshot(snapshot, completion);
+    }
     match = candidates.find((candidate) => candidate.observation.request.state === 'exact')?.record ?? null;
     return match ? 'ready' : `${path} exact request candidate disappeared`;
   }, {
@@ -315,7 +473,7 @@ test('manual switch controls exact capture across every model entrypoint', async
     await setCaptureEnabled(request, false);
     const baselineIds = new Set((await listAllRecords(request)).map((record) => record.id));
     const disabledBodies = await sendAllFourRawRequests(request, fixture, `${testMarker}:disabled`);
-    const disabledGroups = await observePostBaselineCandidates(request, baselineIds, disabledBodies);
+    const disabledGroups = await pollForNoExactRecords(request, baselineIds, disabledBodies);
     const disabledDiagnostics = diagnosticsForGroups(
       disabledGroups,
       { status: 200, stream: false },
