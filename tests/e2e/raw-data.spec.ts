@@ -1,5 +1,11 @@
 import { expect, type APIRequestContext, test } from '@playwright/test';
 
+import {
+  evaluateExactOnceCapture,
+  type BodyDownloadObservation,
+  type CaptureCandidateObservation,
+  type CaptureMatchEvaluation,
+} from '../raw-capture-e2e-match.ts';
 import { extractSeededRawCaptureTarGzip } from '../raw-capture-e2e-tar.ts';
 
 interface GatewayFixture {
@@ -37,6 +43,11 @@ interface CaptureCompletionExpectation {
   status: number;
   stream: boolean;
   responseBody?: Buffer;
+}
+
+interface ObservedCaptureCandidate {
+  record: RawCaptureRecord;
+  observation: CaptureCandidateObservation;
 }
 
 const seededRecordId = '22222222-2222-4222-8222-222222222222';
@@ -153,34 +164,77 @@ function emptyMatches(): Map<CanonicalPath, RawCaptureRecord[]> {
   return new Map(canonicalPaths.map((path) => [path, []]));
 }
 
-async function findExactBodyMatches(
+async function compareCapturedPart(
+  request: APIRequestContext,
+  recordId: string,
+  part: 'request' | 'response',
+  expectedBody: Buffer,
+): Promise<BodyDownloadObservation> {
+  try {
+    const response = await request.get(`/api/admin/raw-data/records/${recordId}/${part}?download=1`);
+    if (!response.ok()) return { state: 'error', reason: 'http_error', status: response.status() };
+    try {
+      return (await response.body()).equals(expectedBody)
+        ? { state: 'exact' }
+        : { state: 'different' };
+    } catch {
+      return { state: 'error', reason: 'read_error' };
+    }
+  } catch {
+    return { state: 'error', reason: 'read_error' };
+  }
+}
+
+async function observePostBaselineCandidates(
   request: APIRequestContext,
   baselineIds: Set<string>,
   expectedBodies: Map<string, Buffer>,
-  completion?: CaptureCompletionExpectation,
-): Promise<Map<CanonicalPath, RawCaptureRecord[]>> {
-  const matches = emptyMatches();
+): Promise<Map<string, ObservedCaptureCandidate[]>> {
+  const groups = new Map(
+    [...expectedBodies.keys()].map((path) => [path, [] as ObservedCaptureCandidate[]]),
+  );
   const records = await listAllRecords(request);
   for (const record of records) {
     if (baselineIds.has(record.id)) continue;
-    const expected = expectedBodies.get(record.path);
-    if (!expected || !canonicalPaths.includes(record.path as CanonicalPath)) continue;
-    if (completion && (
-      !record.complete
-      || record.status !== completion.status
-      || record.stream !== completion.stream
-    )) continue;
-    const response = await request.get(`/api/admin/raw-data/records/${record.id}/request?download=1`);
-    if (!response.ok()) continue;
-    if ((await response.body()).equals(expected)) {
-      matches.get(record.path as CanonicalPath)!.push(record);
-    }
+    const expectedBody = expectedBodies.get(record.path);
+    if (expectedBody === undefined) continue;
+    const requestObservation = await compareCapturedPart(request, record.id, 'request', expectedBody);
+    groups.get(record.path)!.push({
+      record,
+      observation: {
+        id: record.id,
+        complete: record.complete,
+        status: record.status,
+        stream: record.stream,
+        request: requestObservation,
+        response: { state: 'not_checked' },
+      },
+    });
   }
-  return matches;
+  return groups;
 }
 
-function matchCounts(matches: Map<CanonicalPath, RawCaptureRecord[]>): number[] {
-  return canonicalPaths.map((path) => matches.get(path)?.length ?? 0);
+function evaluateCandidates(
+  candidates: readonly ObservedCaptureCandidate[],
+  completion: CaptureCompletionExpectation,
+): CaptureMatchEvaluation {
+  return evaluateExactOnceCapture(
+    candidates.map((candidate) => candidate.observation),
+    {
+      status: completion.status,
+      stream: completion.stream,
+      requireResponse: completion.responseBody !== undefined,
+    },
+  );
+}
+
+function diagnosticsForGroups(
+  groups: Map<string, ObservedCaptureCandidate[]>,
+  completion: CaptureCompletionExpectation,
+): string {
+  return [...groups].map(([path, candidates]) => (
+    `${path} ${evaluateCandidates(candidates, completion).diagnostic}`
+  )).join('\n');
 }
 
 async function pollForExactRecords(
@@ -191,38 +245,23 @@ async function pollForExactRecords(
 ): Promise<Map<CanonicalPath, RawCaptureRecord[]>> {
   let matches = emptyMatches();
   await expect.poll(async () => {
-    matches = await findExactBodyMatches(request, baselineIds, expectedBodies, completion);
-    return matchCounts(matches);
-  }, { timeout: 7_500 }).toEqual([1, 1, 1, 1]);
-  return matches;
-}
-
-async function findRecordsByExactRequest(
-  request: APIRequestContext,
-  baselineIds: Set<string>,
-  path: string,
-  expectedBody: Buffer,
-  completion: CaptureCompletionExpectation,
-): Promise<RawCaptureRecord[]> {
-  const matches: RawCaptureRecord[] = [];
-  for (const record of await listAllRecords(request)) {
-    if (
-      baselineIds.has(record.id)
-      || record.path !== path
-      || !record.complete
-      || record.status !== completion.status
-      || record.stream !== completion.stream
-    ) continue;
-    const response = await request.get(`/api/admin/raw-data/records/${record.id}/request?download=1`);
-    if (!response.ok() || !(await response.body()).equals(expectedBody)) continue;
-    if (completion.responseBody !== undefined) {
-      const capturedResponse = await request.get(
-        `/api/admin/raw-data/records/${record.id}/response?download=1`,
-      );
-      if (!capturedResponse.ok() || !(await capturedResponse.body()).equals(completion.responseBody)) continue;
+    const groups = await observePostBaselineCandidates(request, baselineIds, expectedBodies);
+    const evaluations = canonicalPaths.map((path) => (
+      evaluateCandidates(groups.get(path) ?? [], completion)
+    ));
+    if (!evaluations.every((evaluation) => evaluation.ready)) {
+      return diagnosticsForGroups(groups, completion);
     }
-    matches.push(record);
-  }
+    matches = emptyMatches();
+    for (const path of canonicalPaths) {
+      const candidate = groups.get(path)!.find((item) => item.observation.request.state === 'exact');
+      matches.set(path, candidate ? [candidate.record] : []);
+    }
+    return 'ready';
+  }, {
+    message: 'expected exactly one completed exact-request capture for every canonical entrypoint',
+    timeout: 7_500,
+  }).toBe('ready');
   return matches;
 }
 
@@ -233,12 +272,37 @@ async function pollForExactRecord(
   expectedBody: Buffer,
   completion: CaptureCompletionExpectation,
 ): Promise<RawCaptureRecord> {
-  let matches: RawCaptureRecord[] = [];
+  let match: RawCaptureRecord | null = null;
+  const expectedBodies = new Map([[path, expectedBody]]);
   await expect.poll(async () => {
-    matches = await findRecordsByExactRequest(request, baselineIds, path, expectedBody, completion);
-    return matches.length;
-  }, { timeout: 7_500 }).toBe(1);
-  return matches[0]!;
+    const groups = await observePostBaselineCandidates(request, baselineIds, expectedBodies);
+    const candidates = groups.get(path) ?? [];
+    let evaluation = evaluateCandidates(candidates, completion);
+    const requestFailures = candidates.some((candidate) => candidate.observation.request.state === 'error');
+    if (
+      completion.responseBody !== undefined
+      && evaluation.exactRequestIds.length === 1
+      && !requestFailures
+    ) {
+      const sole = candidates.find((candidate) => candidate.record.id === evaluation.exactRequestIds[0]);
+      if (sole) {
+        sole.observation.response = await compareCapturedPart(
+          request,
+          sole.record.id,
+          'response',
+          completion.responseBody,
+        );
+        evaluation = evaluateCandidates(candidates, completion);
+      }
+    }
+    if (!evaluation.ready) return `${path} ${evaluation.diagnostic}`;
+    match = candidates.find((candidate) => candidate.observation.request.state === 'exact')?.record ?? null;
+    return match ? 'ready' : `${path} exact request candidate disappeared`;
+  }, {
+    message: `expected exactly one completed exact-request capture for ${path}`,
+    timeout: 7_500,
+  }).toBe('ready');
+  return match!;
 }
 
 test('manual switch controls exact capture across every model entrypoint', async ({ request }, testInfo) => {
@@ -251,8 +315,24 @@ test('manual switch controls exact capture across every model entrypoint', async
     await setCaptureEnabled(request, false);
     const baselineIds = new Set((await listAllRecords(request)).map((record) => record.id));
     const disabledBodies = await sendAllFourRawRequests(request, fixture, `${testMarker}:disabled`);
-    const disabledMatches = await findExactBodyMatches(request, baselineIds, disabledBodies);
-    expect(matchCounts(disabledMatches)).toEqual([0, 0, 0, 0]);
+    const disabledGroups = await observePostBaselineCandidates(request, baselineIds, disabledBodies);
+    const disabledDiagnostics = diagnosticsForGroups(
+      disabledGroups,
+      { status: 200, stream: false },
+    );
+    expect({
+      exactRequestCounts: canonicalPaths.map((path) => (
+        (disabledGroups.get(path) ?? [])
+          .filter((candidate) => candidate.observation.request.state === 'exact').length
+      )),
+      requestFailureCounts: canonicalPaths.map((path) => (
+        (disabledGroups.get(path) ?? [])
+          .filter((candidate) => candidate.observation.request.state === 'error').length
+      )),
+    }, disabledDiagnostics).toEqual({
+      exactRequestCounts: [0, 0, 0, 0],
+      requestFailureCounts: [0, 0, 0, 0],
+    });
 
     await setCaptureEnabled(request, true);
     const enabledBodies = await sendAllFourRawRequests(request, fixture, `${testMarker}:enabled`);
