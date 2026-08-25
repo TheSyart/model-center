@@ -126,11 +126,16 @@ export function RawRecordDetail({ record, returnFocusRef, onRecordChange, onErro
     const recordId = record.id;
     setPreviews({ request: null, response: null });
     setPreviewError('');
-    void Promise.all([
-      requestJson<{ record: RawCaptureRecord }>(`/api/admin/raw-data/records/${recordId}`, { signal: controller.signal }),
-      loadPreview(recordId, 'request', record.contentType, controller.signal),
-      loadPreview(recordId, 'response', record.contentType, controller.signal),
-    ]).then(([detail, request, response]) => {
+    void requestJson<{ record: RawCaptureRecord }>(
+      `/api/admin/raw-data/records/${recordId}`,
+      { signal: controller.signal },
+    ).then(async (detail) => {
+      const [request, response] = await Promise.all([
+        loadPreview(recordId, 'request', detail.record.contentType, controller.signal),
+        loadPreview(recordId, 'response', detail.record.contentType, controller.signal),
+      ]);
+      return { detail, request, response };
+    }).then(({ detail, request, response }) => {
       if (controller.signal.aborted) return;
       onRecordChange(detail.record);
       setPreviews({ request, response });

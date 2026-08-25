@@ -52,6 +52,7 @@ const status: RawCaptureStatus = {
 
 type ApiOptions = {
   enabled?: boolean;
+  detailRecord?: RawCaptureRecord;
   requestPreview?: string | Uint8Array;
   responsePreview?: string | Uint8Array;
   requestPreviewHeaders?: Record<string, string>;
@@ -118,7 +119,9 @@ function installRawDataApi(options: ApiOptions = {}) {
     }
     const recordMatch = url.match(/^\/api\/admin\/raw-data\/records\/([^/]+)$/);
     if (recordMatch && method === 'GET') {
-      const matchedRecord = records.find((item) => item.id === recordMatch[1]);
+      const matchedRecord = options.detailRecord?.id === recordMatch[1]
+        ? options.detailRecord
+        : records.find((item) => item.id === recordMatch[1]);
       return matchedRecord ? json({ record: matchedRecord }) : json({ error: '记录不存在' }, 404);
     }
     const previewMatch = url.match(/^\/api\/admin\/raw-data\/records\/([^/]+)\/(request|response)$/);
@@ -247,6 +250,72 @@ describe('RawDataClient', () => {
     expect(within(responseRegion).getByText('十六进制预览')).toBeVisible();
     expect(responseRegion.querySelector('pre')?.textContent).toBe('00 ff 10 41');
     expect(within(responseRegion).getByText('完整预览 · 4 B')).toBeVisible();
+  });
+
+  it('uses fresh text contentType from record detail instead of stale list metadata', async () => {
+    const user = userEvent.setup();
+    const staleRecord: RawCaptureRecord = { ...record, contentType: null };
+    const freshRecord: RawCaptureRecord = { ...staleRecord, contentType: 'text/plain; charset=utf-8' };
+    const api = installRawDataApi({
+      records: [staleRecord],
+      detailRecord: freshRecord,
+      responsePreview: '汉字',
+      responsePreviewHeaders: {
+        'Content-Length': '6',
+        'X-Raw-Total-Bytes': '6',
+        'X-Raw-Truncated': 'false',
+      },
+    });
+    renderClient();
+
+    const [trigger] = await screen.findAllByRole('button', { name: `查看记录 ${record.id}` });
+    await user.click(trigger);
+    const dialog = screen.getByRole('dialog', { name: '原始记录详情' });
+    await user.click(within(dialog).getByRole('tab', { name: 'Response' }));
+    const responseRegion = await within(dialog).findByRole('region', { name: '响应原始正文' });
+
+    expect(within(responseRegion).queryByText('十六进制预览')).not.toBeInTheDocument();
+    expect(responseRegion.querySelector('pre')?.textContent).toBe('汉字');
+    expect(within(responseRegion).getByText('完整预览 · 6 B')).toBeVisible();
+    expect(api.fetchSpy.mock.calls.filter(([input]) => (
+      String(input) === `/api/admin/raw-data/records/${record.id}`
+    ))).toHaveLength(1);
+    expect(api.fetchSpy.mock.calls.filter(([input]) => (
+      String(input) === `/api/admin/raw-data/records/${record.id}/response`
+    ))).toHaveLength(1);
+  });
+
+  it('uses fresh binary contentType from record detail instead of stale text metadata', async () => {
+    const user = userEvent.setup();
+    const staleRecord: RawCaptureRecord = { ...record, contentType: 'text/event-stream' };
+    const freshRecord: RawCaptureRecord = { ...staleRecord, contentType: 'application/octet-stream' };
+    const api = installRawDataApi({
+      records: [staleRecord],
+      detailRecord: freshRecord,
+      responsePreview: new Uint8Array([0xe4, 0xb8, 0xad, 0x00]),
+      responsePreviewHeaders: {
+        'Content-Length': '4',
+        'X-Raw-Total-Bytes': '4',
+        'X-Raw-Truncated': 'false',
+      },
+    });
+    renderClient();
+
+    const [trigger] = await screen.findAllByRole('button', { name: `查看记录 ${record.id}` });
+    await user.click(trigger);
+    const dialog = screen.getByRole('dialog', { name: '原始记录详情' });
+    await user.click(within(dialog).getByRole('tab', { name: 'Response' }));
+    const responseRegion = await within(dialog).findByRole('region', { name: '响应原始正文' });
+
+    expect(within(responseRegion).getByText('十六进制预览')).toBeVisible();
+    expect(responseRegion.querySelector('pre')?.textContent).toBe('e4 b8 ad 00');
+    expect(within(responseRegion).getByText('完整预览 · 4 B')).toBeVisible();
+    expect(api.fetchSpy.mock.calls.filter(([input]) => (
+      String(input) === `/api/admin/raw-data/records/${record.id}`
+    ))).toHaveLength(1);
+    expect(api.fetchSpy.mock.calls.filter(([input]) => (
+      String(input) === `/api/admin/raw-data/records/${record.id}/response`
+    ))).toHaveLength(1);
   });
 
   it('runs archive checks and confirms deletion of only one day', async () => {
