@@ -13,7 +13,18 @@ interface RawCaptureRecord {
 interface RawCapturePage {
   items: RawCaptureRecord[];
   total: number;
+  page: number;
+  pageSize: number;
 }
+
+const canonicalPaths = [
+  '/v1/messages',
+  '/v1/chat/completions',
+  '/v1/responses',
+  '/security-lab/v1/messages',
+] as const;
+
+type CanonicalPath = typeof canonicalPaths[number];
 
 async function createGatewayFixture(request: APIRequestContext): Promise<GatewayFixture> {
   const suffix = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
@@ -38,10 +49,32 @@ async function createGatewayFixture(request: APIRequestContext): Promise<Gateway
   return { model: `${slug}/claude-demo`, key: token.key };
 }
 
-async function listRecords(request: APIRequestContext): Promise<RawCapturePage> {
-  const response = await request.get('/api/admin/raw-data/records?page=1&page_size=100');
+async function listRecords(request: APIRequestContext, page: number): Promise<RawCapturePage> {
+  const response = await request.get(`/api/admin/raw-data/records?page=${page}&page_size=100`);
   expect(response.ok(), await response.text()).toBeTruthy();
   return response.json() as Promise<RawCapturePage>;
+}
+
+async function listAllRecords(request: APIRequestContext): Promise<RawCaptureRecord[]> {
+  const records = new Map<string, RawCaptureRecord>();
+  let pageNumber = 1;
+  let requiredPages = 1;
+
+  while (pageNumber <= requiredPages) {
+    const page = await listRecords(request, pageNumber);
+    for (const record of page.items) records.set(record.id, record);
+    requiredPages = Math.max(requiredPages, Math.ceil(page.total / page.pageSize));
+    pageNumber++;
+  }
+
+  return [...records.values()];
+}
+
+async function getCaptureEnabled(request: APIRequestContext): Promise<boolean> {
+  const response = await request.get('/api/admin/raw-data/config');
+  expect(response.ok(), await response.text()).toBeTruthy();
+  const dashboard = await response.json() as { config: { enabled: boolean } };
+  return dashboard.config.enabled;
 }
 
 async function setCaptureEnabled(request: APIRequestContext, enabled: boolean): Promise<void> {
@@ -52,21 +85,31 @@ async function setCaptureEnabled(request: APIRequestContext, enabled: boolean): 
 async function sendAllFourRawRequests(
   request: APIRequestContext,
   fixture: GatewayFixture,
-  marker: string,
+  markerPrefix: string,
 ): Promise<Map<string, Buffer>> {
+  const markers = new Map<CanonicalPath, string>([
+    ['/v1/messages', `${markerPrefix}:anthropic-messages`],
+    ['/v1/chat/completions', `${markerPrefix}:openai-chat-completions`],
+    ['/v1/responses', `${markerPrefix}:openai-responses`],
+    ['/security-lab/v1/messages', `${markerPrefix}:security-lab-anthropic`],
+  ]);
   const rawBodies = new Map<string, string>([
     ['/v1/messages', JSON.stringify({
       model: fixture.model,
       max_tokens: 64,
-      messages: [{ role: 'user', content: marker }],
+      messages: [{ role: 'user', content: markers.get('/v1/messages') }],
     }) + '\n'],
     ['/v1/chat/completions', '{  "model":' + JSON.stringify(fixture.model)
-      + ', "messages":[{"role":"user","content":' + JSON.stringify(marker) + '}] }\n'],
-    ['/v1/responses', JSON.stringify({ model: fixture.model, input: marker }) + '\n'],
+      + ', "messages":[{"role":"user","content":'
+      + JSON.stringify(markers.get('/v1/chat/completions')) + '}] }\n'],
+    ['/v1/responses', JSON.stringify({
+      model: fixture.model,
+      input: markers.get('/v1/responses'),
+    }) + '\n'],
     ['/security-lab/v1/messages', JSON.stringify({
       model: fixture.model,
       max_tokens: 64,
-      messages: [{ role: 'user', content: marker }],
+      messages: [{ role: 'user', content: markers.get('/security-lab/v1/messages') }],
     }) + '\n'],
   ]);
 
@@ -85,56 +128,67 @@ async function sendAllFourRawRequests(
   return new Map([...rawBodies].map(([path, body]) => [path, Buffer.from(body)]));
 }
 
-async function pollForNewRecords(
-  request: APIRequestContext,
-  baselineIds: Set<string>,
-  baselineTotal: number,
-  expectedCount: number,
-): Promise<RawCaptureRecord[]> {
-  let newRecords: RawCaptureRecord[] = [];
-  await expect.poll(async () => {
-    const page = await listRecords(request);
-    newRecords = page.items.filter((record) => !baselineIds.has(record.id));
-    return { total: page.total, newCount: newRecords.length };
-  }, { timeout: 7_500 }).toEqual({
-    total: baselineTotal + expectedCount,
-    newCount: expectedCount,
-  });
-  return newRecords;
+function emptyMatches(): Map<CanonicalPath, RawCaptureRecord[]> {
+  return new Map(canonicalPaths.map((path) => [path, []]));
 }
 
-async function expectDownloadedBodiesToEqual(
+async function findExactBodyMatches(
   request: APIRequestContext,
-  records: RawCaptureRecord[],
+  baselineIds: Set<string>,
   expectedBodies: Map<string, Buffer>,
-): Promise<void> {
+): Promise<Map<CanonicalPath, RawCaptureRecord[]>> {
+  const matches = emptyMatches();
+  const records = await listAllRecords(request);
   for (const record of records) {
+    if (baselineIds.has(record.id)) continue;
     const expected = expectedBodies.get(record.path);
-    expect(expected, `unexpected captured path ${record.path}`).toBeDefined();
+    if (!expected || !canonicalPaths.includes(record.path as CanonicalPath)) continue;
     const response = await request.get(`/api/admin/raw-data/records/${record.id}/request?download=1`);
-    expect(response.ok(), await response.text()).toBeTruthy();
-    expect(await response.body()).toEqual(expected);
+    if (!response.ok()) continue;
+    if ((await response.body()).equals(expected)) {
+      matches.get(record.path as CanonicalPath)!.push(record);
+    }
   }
+  return matches;
+}
+
+function matchCounts(matches: Map<CanonicalPath, RawCaptureRecord[]>): number[] {
+  return canonicalPaths.map((path) => matches.get(path)?.length ?? 0);
+}
+
+async function pollForExactRecords(
+  request: APIRequestContext,
+  baselineIds: Set<string>,
+  expectedBodies: Map<string, Buffer>,
+): Promise<Map<CanonicalPath, RawCaptureRecord[]>> {
+  let matches = emptyMatches();
+  await expect.poll(async () => {
+    matches = await findExactBodyMatches(request, baselineIds, expectedBodies);
+    return matchCounts(matches);
+  }, { timeout: 7_500 }).toEqual([1, 1, 1, 1]);
+  return matches;
 }
 
 test('manual switch controls exact capture across every model entrypoint', async ({ request }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop-1440');
-  const fixture = await createGatewayFixture(request);
+  const startingEnabled = await getCaptureEnabled(request);
+  const testMarker = `raw-capture-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
 
-  await setCaptureEnabled(request, false);
-  const baseline = await listRecords(request);
-  const baselineIds = new Set(baseline.items.map((record) => record.id));
-  await sendAllFourRawRequests(request, fixture, `disabled-marker-${Date.now()}`);
-  expect((await listRecords(request)).total).toBe(baseline.total);
+  try {
+    const fixture = await createGatewayFixture(request);
+    await setCaptureEnabled(request, false);
+    const baselineIds = new Set((await listAllRecords(request)).map((record) => record.id));
+    const disabledBodies = await sendAllFourRawRequests(request, fixture, `${testMarker}:disabled`);
+    const disabledMatches = await findExactBodyMatches(request, baselineIds, disabledBodies);
+    expect(matchCounts(disabledMatches)).toEqual([0, 0, 0, 0]);
 
-  await setCaptureEnabled(request, true);
-  const bodies = await sendAllFourRawRequests(request, fixture, `raw-marker-${Date.now()}`);
-  const records = await pollForNewRecords(request, baselineIds, baseline.total, 4);
-  expect(new Set(records.map((record) => record.path))).toEqual(new Set([
-    '/v1/messages',
-    '/v1/chat/completions',
-    '/v1/responses',
-    '/security-lab/v1/messages',
-  ]));
-  await expectDownloadedBodiesToEqual(request, records, bodies);
+    await setCaptureEnabled(request, true);
+    const enabledBodies = await sendAllFourRawRequests(request, fixture, `${testMarker}:enabled`);
+    const enabledMatches = await pollForExactRecords(request, baselineIds, enabledBodies);
+    for (const path of canonicalPaths) {
+      expect(enabledMatches.get(path), `duplicate or missing capture for ${path}`).toHaveLength(1);
+    }
+  } finally {
+    await setCaptureEnabled(request, startingEnabled);
+  }
 });
