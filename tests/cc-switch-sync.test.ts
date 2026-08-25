@@ -7,6 +7,7 @@ import * as syncLibrary from '../scripts/cc-switch-sync-lib.ts';
 import {
   applyPricingRepairs,
   collectProviderExports,
+  findCaseMismatchedAssetFiles,
   mergeProviderRecords,
   normalizeProviderRecord,
   parseModelPricingSource,
@@ -228,6 +229,16 @@ test('resolves CC Switch icon keys to real copied asset filenames', () => {
   assert.equal(icons.get('ccsub'), 'ccsub.svg');
   assert.equal(icons.get('amux'), 'amuxapi-icon.svg');
   assert.equal(icons.get('aigocode'), 'algocode.svg');
+});
+
+test('detects icon filenames whose casing differs from the pinned upstream tree', () => {
+  assert.deepEqual(
+    findCaseMismatchedAssetFiles(
+      ['ClaudeApi.png', 'deepseek.svg'],
+      ['claudeapi.png', 'deepseek.svg'],
+    ),
+    [{ existing: 'claudeapi.png', expected: 'ClaudeApi.png' }],
+  );
 });
 
 test('groups the pinned 255 variants into exactly 82 logical provider presets', () => {

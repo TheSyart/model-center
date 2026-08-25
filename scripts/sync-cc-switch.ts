@@ -14,6 +14,7 @@ import {
   mergeProviderRecords,
   normalizeProviderRecord,
   parseModelPricingSource,
+  findCaseMismatchedAssetFiles,
   resolveIconAssetFiles,
   type CcSwitchSourceApp,
 } from './cc-switch-sync-lib.ts';
@@ -191,6 +192,18 @@ function copyIcons(sourceRoot: string, check: boolean): { count: number; checksu
   const targetDirectory = path.join(PROJECT_ROOT, 'public/logos');
   const files = fs.readdirSync(sourceDirectory).filter((file) => !['index.ts', 'metadata.ts'].includes(file)).sort();
   if (files.length !== 99) throw new Error(`图标数量应为 99，实际为 ${files.length}`);
+  fs.mkdirSync(targetDirectory, { recursive: true });
+  const caseMismatches = findCaseMismatchedAssetFiles(files, fs.readdirSync(targetDirectory));
+  if (check && caseMismatches.length) {
+    throw new Error(
+      `图标文件名大小写与上游不一致：${caseMismatches.map(({ existing, expected }) => `${existing} -> ${expected}`).join(', ')}`,
+    );
+  }
+  for (const [index, { existing, expected }] of caseMismatches.entries()) {
+    const temporary = path.join(targetDirectory, `.cc-switch-case-rename-${index}`);
+    fs.renameSync(path.join(targetDirectory, existing), temporary);
+    fs.renameSync(temporary, path.join(targetDirectory, expected));
+  }
   const hashes: string[] = [];
   for (const file of files) {
     const content = fs.readFileSync(path.join(sourceDirectory, file));
@@ -199,7 +212,6 @@ function copyIcons(sourceRoot: string, check: boolean): { count: number; checksu
     if (check) {
       if (!fs.existsSync(target) || !fs.readFileSync(target).equals(content)) throw new Error(`图标不是最新状态：public/logos/${file}`);
     } else {
-      fs.mkdirSync(targetDirectory, { recursive: true });
       fs.writeFileSync(target, content);
     }
   }

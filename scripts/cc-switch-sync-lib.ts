@@ -163,6 +163,21 @@ export function resolveIconAssetFiles(indexSource: string, assetFiles: string[])
   return result;
 }
 
+export function findCaseMismatchedAssetFiles(
+  sourceFiles: string[],
+  targetFiles: string[],
+): Array<{ existing: string; expected: string }> {
+  const exactTargets = new Set(targetFiles);
+  const targetsByFoldedName = new Map<string, string>();
+  for (const file of targetFiles) targetsByFoldedName.set(file.toLowerCase(), file);
+
+  return sourceFiles.flatMap((expected) => {
+    if (exactTargets.has(expected)) return [];
+    const existing = targetsByFoldedName.get(expected.toLowerCase());
+    return existing && existing !== expected ? [{ existing, expected }] : [];
+  });
+}
+
 export function collectProviderExports(sourceApp: CcSwitchSourceApp, moduleExports: Record<string, unknown>): Record<string, unknown>[] {
   const rows = moduleExports[PROVIDER_EXPORTS[sourceApp]];
   if (!Array.isArray(rows)) throw new Error(`${sourceApp} 未导出 ${PROVIDER_EXPORTS[sourceApp]} 数组`);
