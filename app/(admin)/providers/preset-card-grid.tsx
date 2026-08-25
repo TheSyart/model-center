@@ -3,7 +3,7 @@
 import { useMemo, useState } from 'react';
 import { getPreset, PROVIDER_PRESETS } from '@/lib/presets';
 import { filterProviderPresets, protocolDisplayName } from '@/lib/services/provider-form';
-import { cardCls, inputCls } from '@/components/ui';
+import { cardCls, inputCls } from '@/components/ui/styles';
 
 export interface PresetCardGridProps {
   selectedPresetKey: string | null;

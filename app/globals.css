@@ -1,6 +1,11 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 @theme inline {
+  --font-sans: var(--font-geist-sans), "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: var(--font-geist-mono), "SF Mono", Menlo, Consolas, monospace;
   --color-background: var(--background);
   --color-surface: var(--surface);
   --color-foreground: var(--foreground);
@@ -8,6 +13,11 @@
   --color-muted-foreground: var(--muted-foreground);
   --color-subtle-foreground: var(--subtle-foreground);
   --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-accent: var(--accent);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
   --color-primary: var(--primary);
   --color-primary-hover: var(--primary-hover);
   --color-primary-soft: var(--primary-soft);
@@ -23,66 +33,90 @@
   --color-chart-cache-read: var(--chart-cache-read);
   --color-chart-cache-write: var(--chart-cache-write);
   --color-chart-cost: var(--chart-cost);
+  --color-brand-surface: var(--brand-surface);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-muted: var(--sidebar-muted);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-hover: var(--sidebar-hover);
+  --color-sidebar-active: var(--sidebar-active);
 }
 
 :root {
-  /* 极简留白：灰白纸面、墨色正文、发丝边界。 */
-  --background: #fafafa;
+  --background: #f7f8fa;
   --surface: #ffffff;
-  --foreground: #111111;
-  --muted: #f3f3f1;
-  --muted-foreground: #696966;
-  --subtle-foreground: #989892;
-  --border: #e7e7e3;
+  --foreground: #15171a;
+  --muted: #f1f3f5;
+  --muted-foreground: #69707a;
+  --subtle-foreground: #929ba6;
+  --border: #dfe3e8;
+  --input: #d6dce3;
+  --ring: #2563eb;
+  --accent: #e9edf2;
+  --popover: #ffffff;
+  --popover-foreground: #15171a;
   --primary: #2563eb;
   --primary-hover: #1d4ed8;
-  --primary-soft: #edf3ff;
+  --primary-soft: #eaf1ff;
   --primary-foreground: #ffffff;
-  --success: #16794c;
-  --success-soft: #edf8f2;
-  --warning: #9a6700;
-  --warning-soft: #fff7df;
-  --destructive: #c93232;
-  --destructive-soft: #fff0f0;
-  --ring: #111111;
+  --success: #137a4d;
+  --success-soft: #eaf8f0;
+  --warning: #946200;
+  --warning-soft: #fff6dc;
+  --destructive: #c9363e;
+  --destructive-soft: #fff0f1;
   --chart-input: #2563eb;
   --chart-output: #16845b;
   --chart-cache-read: #7c3aed;
   --chart-cache-write: #b36b00;
   --chart-cost: #d33a4e;
-  --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-  --mono: "SF Mono", Menlo, Consolas, monospace;
+  --brand-surface: #ffffff;
+  --sidebar: #f3f5f7;
+  --sidebar-foreground: #1d2025;
+  --sidebar-muted: #737c87;
+  --sidebar-border: #dfe3e8;
+  --sidebar-hover: #e9edf1;
+  --sidebar-active: #ffffff;
 }
 
 :root[data-theme="dark"] {
-  --background: #171719;
-  --surface: #1e1e21;
-  --foreground: #f2f2f0;
-  --muted: #27272b;
-  --muted-foreground: #aaa9ad;
-  --subtle-foreground: #79787e;
-  --border: #323237;
-  --primary: #5b8def;
-  --primary-hover: #76a1f5;
-  --primary-soft: #202b40;
+  --background: #0f1115;
+  --surface: #171a20;
+  --foreground: #f4f6f8;
+  --muted: #1e222a;
+  --muted-foreground: #9aa3ae;
+  --subtle-foreground: #707a86;
+  --border: #2a3039;
+  --input: #343b46;
+  --ring: #5b8cff;
+  --accent: #252a33;
+  --popover: #1a1e25;
+  --popover-foreground: #f4f6f8;
+  --primary: #5b8cff;
+  --primary-hover: #76a0ff;
+  --primary-soft: #1b2947;
   --primary-foreground: #ffffff;
-  --success: #43c98a;
-  --success-soft: #1b3027;
-  --warning: #e5ae43;
-  --warning-soft: #342b19;
-  --destructive: #f06d78;
-  --destructive-soft: #382126;
-  --ring: #f2f2f0;
-  --chart-input: #63a0ff;
-  --chart-output: #43d39a;
+  --success: #46c98a;
+  --success-soft: #173126;
+  --warning: #e4ad48;
+  --warning-soft: #352b18;
+  --destructive: #f07178;
+  --destructive-soft: #3a2025;
+  --chart-input: #6b9cff;
+  --chart-output: #46cf98;
   --chart-cache-read: #ad77ff;
   --chart-cache-write: #f0ad42;
-  --chart-cost: #ff667d;
+  --chart-cost: #ff6a7d;
+  --brand-surface: #f5f6f7;
+  --sidebar: #13161b;
+  --sidebar-foreground: #f0f3f6;
+  --sidebar-muted: #8b95a1;
+  --sidebar-border: #262c35;
+  --sidebar-hover: #1c2027;
+  --sidebar-active: #1f242c;
 }
 
-* {
-  box-sizing: border-box;
-}
+* { box-sizing: border-box; border-color: var(--border); }
 
 html {
   background: var(--background);
@@ -92,78 +126,37 @@ html {
 
 body {
   min-width: 320px;
-  font-family: var(--sans);
+  margin: 0;
+  font-family: var(--font-geist-sans), "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   font-size: 15px;
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
 
-code,
-pre,
-.font-mono {
-  font-family: var(--mono);
-}
-
-h1,
-h2,
-h3,
-p {
-  text-wrap: pretty;
-}
-
-::selection {
-  background: var(--foreground);
-  color: var(--background);
-}
-
-:where(a, button, input, select, textarea):focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: 3px;
-}
-
-:where(button, [role="button"]):not(:disabled) {
-  cursor: pointer;
-}
+code, pre, .font-mono { font-family: var(--font-geist-mono), "SF Mono", Menlo, Consolas, monospace; }
+h1, h2, h3, p { text-wrap: pretty; }
+::selection { background: var(--primary); color: #fff; }
+:where(button, [role="button"]):not(:disabled) { cursor: pointer; }
 
 @keyframes interface-rise {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
-.page-enter {
-  animation: interface-rise 320ms ease-out both;
-}
+.page-enter { animation: interface-rise 220ms cubic-bezier(0.22, 1, 0.36, 1) both; }
 
-.minimal-scrollbar {
-  scrollbar-color: var(--border) transparent;
-  scrollbar-width: thin;
-}
+/* Preserved user spacing contract for every management page. */
+.admin-page-content { padding-bottom: 6rem; }
+@media (min-width: 640px) { .admin-page-content { padding-bottom: 8rem; } }
 
-.minimal-scrollbar::-webkit-scrollbar {
-  height: 5px;
-  width: 5px;
-}
-
-.minimal-scrollbar::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 999px;
-}
+.minimal-scrollbar { scrollbar-color: var(--border) transparent; scrollbar-width: thin; }
+.minimal-scrollbar::-webkit-scrollbar { height: 6px; width: 6px; }
+.minimal-scrollbar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
 
 @media (prefers-reduced-motion: reduce) {
-  html {
-    scroll-behavior: auto;
-  }
-
-  *,
-  *::before,
-  *::after {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;

@@ -1,8 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { CheckIcon, CopyIcon } from '@/components/icons';
-import { cardCls } from '@/components/ui';
+import { Check, Copy } from 'lucide-react';
+import { cardCls } from '@/components/ui/styles';
 import { buildGatewayEndpoints } from '@/lib/gateway-endpoints';
 
 async function copyText(text: string): Promise<boolean> {
@@ -48,7 +48,7 @@ function CopyableValue({ label, value }: { label: string; value: string }) {
           aria-label={`复制${label}`}
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-subtle-foreground transition-colors hover:bg-muted hover:text-foreground"
         >
-          {copied ? <CheckIcon className="h-4 w-4 text-success" /> : <CopyIcon className="h-4 w-4" />}
+          {copied ? <Check className="h-4 w-4 text-success" /> : <Copy className="h-4 w-4" />}
         </button>
         <span className="sr-only" role="status" aria-live="polite">{copied ? `${label}已复制` : ''}</span>
       </div>

@@ -2,7 +2,8 @@
 
 import { useState } from 'react';
 import { useConfirm } from '@/components/confirm-dialog';
-import { btn, inputCls, tableHeadCls, toggleSmCls, toggleSmKnobCls } from '@/components/ui';
+import { btn, inputCls, tableHeadCls } from '@/components/ui/styles';
+import { Switch } from '@/components/ui/switch';
 
 export interface ModelItem {
   id: string;
@@ -260,18 +261,14 @@ export default function ModelTable({ providerId, models, onChanged, onToast }: P
                     <div className="mt-1 text-[10px]">模型：{m.synced ? '上游同步' : '手动添加'}</div>
                   </td>
                   <td className="px-3 py-2.5">
-                    {/* 小开关（统一样式：36px 轨道 / 16px 圆点 / 位移 18px） */}
-                    <button
-                      type="button"
-                      onClick={async () => {
+                    <Switch
+                      checked={m.enabled}
+                      onCheckedChange={async () => {
                         await patchModel(m.id, { enabled: !m.enabled });
                         await onChanged();
                       }}
-                      className={toggleSmCls(m.enabled)}
                       aria-label={m.enabled ? '禁用' : '启用'}
-                    >
-                      <span className={toggleSmKnobCls(m.enabled)} />
-                    </button>
+                    />
                   </td>
                   <td className="px-3 py-2.5">
                     <div className="flex gap-3 text-xs">

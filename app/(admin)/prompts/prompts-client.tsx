@@ -1,9 +1,15 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Plus } from 'lucide-react';
 import { useConfirm } from '@/components/confirm-dialog';
 import { EmptyState, SkeletonRows } from '@/components/empty-state';
-import { btn, cardCls, inputCls, tableHeadCls, tableWrapCls } from '@/components/ui';
+import { btn, tableHeadCls, tableWrapCls } from '@/components/ui/styles';
+import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 
 interface Prompt {
   id: string;
@@ -105,52 +111,56 @@ export default function PromptsClient() {
   return (
     <div>
       <div className="mb-5 flex justify-end">
-        <button
-          onClick={() => openForm()}
-          className={btn.primary}
-        >
-          + 新建提示词
-        </button>
+        <Button onClick={() => openForm()}><Plus className="size-4" />新建提示词</Button>
       </div>
 
-      {form && (
-        <form onSubmit={onSubmit} className={`mb-6 ${cardCls} p-5 sm:p-6`}>
-          <h2 className="mb-5 text-base font-semibold tracking-[-0.02em]">{form.id ? '编辑提示词' : '新建提示词'}</h2>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <label className="block">
-              <span className="mb-1.5 block text-sm text-muted-foreground">名称（唯一，网关用 prompt_name 引用）</span>
-              <input
+      <Dialog open={form !== null} onOpenChange={(open) => { if (!open) setForm(null); }}>
+        <DialogContent className="max-w-5xl">
+          <DialogHeader>
+            <DialogTitle>{form?.id ? '编辑提示词' : '新建提示词'}</DialogTitle>
+            <DialogDescription>使用 {'{{变量}}'} 声明运行时变量，右侧会即时显示渲染结果。</DialogDescription>
+          </DialogHeader>
+          {form && <form onSubmit={onSubmit}>
+          <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+            <div className="space-y-4">
+            <div>
+              <Label htmlFor="prompt-name">名称（唯一，网关用 prompt_name 引用）</Label>
+              <Input
+                id="prompt-name"
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
                 placeholder="code-review"
-                className={`w-full ${inputCls}`}
+                className="mt-1.5"
                 required
               />
-            </label>
-            <label className="block">
-              <span className="mb-1.5 block text-sm text-muted-foreground">描述</span>
-              <input
+            </div>
+            <div>
+              <Label htmlFor="prompt-description">描述</Label>
+              <Input
+                id="prompt-description"
                 value={form.description}
                 onChange={(e) => setForm({ ...form, description: e.target.value })}
-                className={`w-full ${inputCls}`}
+                className="mt-1.5"
               />
-            </label>
-            <label className="block md:col-span-2">
-              <span className="mb-1.5 block text-sm text-muted-foreground">内容（支持 {'{{变量}}'} 占位）</span>
-              <textarea
+            </div>
+            <div>
+              <Label htmlFor="prompt-content">内容（支持 {'{{变量}}'} 占位）</Label>
+              <Textarea
+                id="prompt-content"
                 value={form.content}
                 onChange={(e) => setForm({ ...form, content: e.target.value })}
-                rows={8}
+                rows={13}
                 placeholder={'你是资深工程师，请用{{language}}审查以下代码…'}
-                className={`w-full ${inputCls} font-mono`}
+                className="mt-1.5 min-h-64 font-mono"
                 required
               />
-            </label>
-          </div>
+            </div>
+            </div>
 
-          {formVars.length > 0 && (
-            <div className="mt-4 rounded-md border border-border bg-muted/45 p-4">
-              <div className="mb-2 text-sm text-muted-foreground">
+            <div className="min-w-0 rounded-lg border border-border bg-muted/30 p-4">
+              <div className="mb-3 text-sm font-medium">变量预览</div>
+              {formVars.length > 0 ? <>
+              <div className="mb-3 text-sm text-muted-foreground">
                 检测到变量：
                 {formVars.map((v) => (
                   <code key={v} className="ml-1 rounded-sm bg-surface px-1.5 py-0.5 text-xs text-primary">
@@ -158,42 +168,34 @@ export default function PromptsClient() {
                   </code>
                 ))}
               </div>
-              <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 {formVars.map((v) => (
-                  <input
+                  <Input
                     key={v}
                     value={varValues[v] ?? ''}
                     onChange={(e) => setVarValues({ ...varValues, [v]: e.target.value })}
                     placeholder={`${v} 的值`}
-                    className={inputCls}
+                    aria-label={`${v} 的预览值`}
                   />
                 ))}
               </div>
-              <pre className="minimal-scrollbar mt-3 max-h-48 overflow-auto rounded-md border border-border bg-surface p-3 text-sm whitespace-pre-wrap">
+              <pre className="minimal-scrollbar mt-3 max-h-80 min-h-40 overflow-auto rounded-md border border-border bg-surface p-3 text-sm whitespace-pre-wrap">
                 {preview}
               </pre>
+              </> : <p className="text-sm text-muted-foreground">在内容中输入 {'{{变量名}}'} 后，可在这里填写示例值并检查最终结果。</p>}
             </div>
-          )}
+          </div>
 
           {error && <p role="alert" className="mt-3 text-sm text-destructive">{error}</p>}
-          <div className="mt-4 flex gap-2">
-            <button
-              type="submit"
-              disabled={saving}
-              className={btn.primary}
-            >
+          <DialogFooter className="mt-5">
+            <Button type="button" variant="outline" onClick={() => setForm(null)}>取消</Button>
+            <Button type="submit" disabled={saving}>
               {saving ? '保存中…' : '保存'}
-            </button>
-            <button
-              type="button"
-              onClick={() => setForm(null)}
-              className={btn.ghost}
-            >
-              取消
-            </button>
-          </div>
-        </form>
-      )}
+            </Button>
+          </DialogFooter>
+          </form>}
+        </DialogContent>
+      </Dialog>
 
       <div className={tableWrapCls}>
         <table className="min-w-[760px] w-full text-sm">

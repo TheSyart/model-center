@@ -1,8 +1,15 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { Download, ShieldAlert, Trash2, Upload } from 'lucide-react';
+import { useConfirm } from '@/components/confirm-dialog';
 import { PageHeader } from '@/components/page-header';
-import { btn, cardCls, inputCls, sectionTitleCls } from '@/components/ui';
+import { Button, buttonVariants } from '@/components/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Input } from '@/components/ui/input';
+import { Switch } from '@/components/ui/switch';
+import { cn } from '@/lib/utils';
 
 export default function SettingsPage() {
   const [retentionDays, setRetentionDays] = useState<string>('');
@@ -10,6 +17,8 @@ export default function SettingsPage() {
   const [allowHttp, setAllowHttp] = useState(false);
   const [balanceRefresh, setBalanceRefresh] = useState<string>('60');
   const [balanceMsg, setBalanceMsg] = useState('');
+  const [pending, setPending] = useState<string | null>(null);
+  const { confirm } = useConfirm();
 
   async function load() {
     const res = await fetch('/api/admin/settings');
@@ -26,6 +35,7 @@ export default function SettingsPage() {
   }, []);
 
   async function saveBalanceRefresh() {
+    setPending('balance');
     setBalanceMsg('');
     const res = await fetch('/api/admin/settings', {
       method: 'PUT',
@@ -34,18 +44,23 @@ export default function SettingsPage() {
     });
     const data = await res.json();
     setBalanceMsg(res.ok ? '已保存' : data.error || '保存失败');
+    setPending(null);
   }
 
   async function toggleAllowHttp(v: boolean) {
     setAllowHttp(v);
-    await fetch('/api/admin/settings', {
+    setPending('security');
+    const res = await fetch('/api/admin/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ allow_http_providers: v }),
     });
+    if (!res.ok) setAllowHttp(!v);
+    setPending(null);
   }
 
   async function saveRetention() {
+    setPending('retention');
     setRetentionMsg('');
     const res = await fetch('/api/admin/settings', {
       method: 'PUT',
@@ -54,40 +69,43 @@ export default function SettingsPage() {
     });
     const data = await res.json();
     setRetentionMsg(res.ok ? '已保存' : data.error || '保存失败');
+    setPending(null);
   }
 
   async function purgeNow() {
+    if (!(await confirm({ title: '立即清理过期日志？', description: '超过当前保留天数的日志会被永久删除。', confirmText: '立即清理' }))) return;
+    setPending('purge');
     setRetentionMsg('');
     const res = await fetch('/api/admin/logs/purge', { method: 'POST' });
     const data = await res.json();
     setRetentionMsg(res.ok ? `已清理 ${data.deleted} 条过期日志` : data.error || '清理失败');
+    setPending(null);
   }
 
   return (
     <div>
       <PageHeader heading="设置" description="调整日志、余额刷新、网络安全和配置迁移选项。" />
-      <div className="max-w-3xl space-y-6">
-        <section className={`${cardCls} p-5 sm:p-6`}>
-          <h2 className={sectionTitleCls}>运行设置</h2>
-          <div className="mt-5 divide-y divide-border">
+      <div className="max-w-4xl space-y-5">
+        <Card>
+          <CardHeader><CardTitle>运行</CardTitle><CardDescription>日志生命周期和服务商余额刷新策略。</CardDescription></CardHeader>
+          <CardContent className="divide-y divide-border">
             <div className="pb-5">
               <div className="text-sm font-medium">请求日志保留</div>
               <p className="mt-1 text-sm leading-6 text-muted-foreground">超过保留天数的日志会自动清理，也可立即执行一次清理。</p>
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 <label className="flex items-center gap-2">
                   <span className="sr-only">日志保留天数</span>
-                  <input
+                  <Input
                     type="number"
                     min={1}
                     max={3650}
                     value={retentionDays}
                     onChange={(e) => setRetentionDays(e.target.value)}
-                    className={`w-24 ${inputCls}`}
+                    className="w-24"
                   />
                   <span className="text-sm text-muted-foreground">天</span>
                 </label>
-                <button onClick={saveRetention} className={btn.ghost}>保存</button>
-                <button onClick={purgeNow} className={btn.danger}>立即清理</button>
+                <Button onClick={saveRetention} variant="outline" disabled={pending === 'retention'}>{pending === 'retention' ? '保存中…' : '保存'}</Button>
               </div>
               {retentionMsg && <p role="status" className="mt-3 text-sm text-muted-foreground">{retentionMsg}</p>}
             </div>
@@ -98,41 +116,38 @@ export default function SettingsPage() {
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 <label className="flex items-center gap-2">
                   <span className="sr-only">余额自动刷新间隔</span>
-                  <input
+                  <Input
                     type="number"
                     min={0}
                     max={86400}
                     value={balanceRefresh}
                     onChange={(e) => setBalanceRefresh(e.target.value)}
-                    className={`w-24 ${inputCls}`}
+                    className="w-24"
                   />
                   <span className="text-sm text-muted-foreground">秒</span>
                 </label>
-                <button onClick={saveBalanceRefresh} className={btn.ghost}>保存</button>
+                <Button onClick={saveBalanceRefresh} variant="outline" disabled={pending === 'balance'}>{pending === 'balance' ? '保存中…' : '保存'}</Button>
                 {balanceMsg && <span role="status" className="text-sm text-muted-foreground">{balanceMsg}</span>}
               </div>
             </div>
 
-            <label className="flex items-start gap-3 pt-5 text-sm leading-6 text-muted-foreground">
-              <input
-                type="checkbox"
-                checked={allowHttp}
-                onChange={(e) => toggleAllowHttp(e.target.checked)}
-                className="mt-1 h-4 w-4 accent-primary"
-              />
-              <span>
-                <span className="block font-medium text-foreground">允许非 localhost 的 HTTP 服务商</span>
-                默认关闭以降低 SSRF 风险；localhost 始终放行。
-              </span>
-            </label>
-          </div>
-        </section>
+          </CardContent>
+        </Card>
 
-        <section className={`${cardCls} p-5 sm:p-6`}>
-          <h2 className={sectionTitleCls}>导入 / 导出</h2>
-          <p className="mt-2 text-sm leading-6 text-muted-foreground">迁移服务商、端点、模型、别名和提示词配置；API Key 默认脱敏，旧版单端点文件仍可导入。</p>
-          <div className="mt-5"><ExportImport /></div>
-        </section>
+        <Card>
+          <CardHeader><CardTitle>安全</CardTitle><CardDescription>控制服务商地址的网络访问边界。</CardDescription></CardHeader>
+          <CardContent><div className="flex items-start justify-between gap-5"><div><div className="text-sm font-medium">允许非 localhost 的 HTTP 服务商</div><p className="mt-1 text-sm leading-6 text-muted-foreground">默认关闭以降低 SSRF 风险；localhost 始终放行。</p></div><Switch checked={allowHttp} disabled={pending === 'security'} onCheckedChange={toggleAllowHttp} aria-label="允许非 localhost 的 HTTP 服务商" /></div></CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader><CardTitle>导入 / 导出</CardTitle><CardDescription>迁移服务商、端点、模型、别名和提示词配置；API Key 默认脱敏，旧版单端点文件仍可导入。</CardDescription></CardHeader>
+          <CardContent><ExportImport /></CardContent>
+        </Card>
+
+        <Card className="border-destructive/30">
+          <CardHeader><CardTitle className="flex items-center gap-2 text-destructive"><ShieldAlert className="size-5" />Danger Zone</CardTitle><CardDescription>不可恢复的数据清理操作。</CardDescription></CardHeader>
+          <CardContent className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="text-sm font-medium">清理过期请求日志</div><p className="mt-1 text-sm text-muted-foreground">按上方配置的保留天数立即清理。</p></div><Button onClick={purgeNow} variant="destructive" disabled={pending === 'purge'}><Trash2 className="size-4" />{pending === 'purge' ? '清理中…' : '立即清理'}</Button></CardContent>
+        </Card>
       </div>
     </div>
   );
@@ -141,6 +156,7 @@ export default function SettingsPage() {
 function ExportImport() {
   const [includeKeys, setIncludeKeys] = useState(false);
   const [msg, setMsg] = useState('');
+  const { confirm } = useConfirm();
 
   async function onImport(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -173,21 +189,23 @@ function ExportImport() {
       <div className="flex flex-wrap items-center gap-3">
         <a
           href={`/api/admin/export${includeKeys ? '?include_keys=1' : ''}`}
-          className={btn.ghost}
-          onClick={(e) => {
-            if (includeKeys && !window.confirm('导出文件将包含 api_key 明文，确定继续？')) e.preventDefault();
+          className={cn(buttonVariants({ variant: 'outline' }))}
+          onClick={async (e) => {
+            if (!includeKeys) return;
+            e.preventDefault();
+            if (await confirm({ title: '导出明文 API Key？', description: '导出文件将包含所有 api_key 明文，请妥善保管。', confirmText: '继续导出' })) window.location.href = `/api/admin/export?include_keys=1`;
           }}
         >
-          导出 JSON
+          <Download className="size-4" />导出 JSON
         </a>
         <label className="flex items-center gap-2 text-sm text-muted-foreground">
-          <input type="checkbox" checked={includeKeys} onChange={(e) => setIncludeKeys(e.target.checked)} className="h-4 w-4 accent-primary" />
+          <Checkbox checked={includeKeys} onCheckedChange={(checked) => setIncludeKeys(checked === true)} />
           包含 api_key 明文
         </label>
       </div>
       <div>
-        <label className={btn.ghost}>
-          导入 JSON…
+        <label className={cn(buttonVariants({ variant: 'outline' }), 'cursor-pointer')}>
+          <Upload className="size-4" />导入 JSON…
           <input type="file" accept="application/json" className="hidden" onChange={onImport} />
         </label>
       </div>

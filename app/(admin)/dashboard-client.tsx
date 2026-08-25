@@ -1,10 +1,17 @@
 'use client';
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { SlidersHorizontal } from 'lucide-react';
+import { Area, CartesianGrid, ComposedChart, Line, ResponsiveContainer, Tooltip as RechartsTooltip, XAxis, YAxis } from 'recharts';
 import { SkeletonRows } from '@/components/empty-state';
-import { cardCls, inputCls, tableHeadCls, tableWrapCls } from '@/components/ui';
+import { cardCls, tableHeadCls, tableWrapCls } from '@/components/ui/styles';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Sheet, SheetBody, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { getPreset } from '@/lib/presets';
-import { buildActivityCalendar, chartY, monthLabelGridColumn, nearestTrendIndex, smoothLinePath, type ChartPoint } from '@/lib/services/usage-chart';
+import { buildActivityCalendar, monthLabelGridColumn } from '@/lib/services/usage-chart';
 
 type RangePreset = 'today' | '7d' | '30d' | 'custom';
 type Breakdown = 'token' | 'provider' | 'model';
@@ -94,6 +101,10 @@ function todayInput(offsetDays = 0): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
+function DashboardSelect({ label, value, onValueChange, options }: { label: string; value: string; onValueChange: (value: string) => void; options: { value: string; label: string }[] }) {
+  return <Select value={value || '__all'} onValueChange={(next) => onValueChange(next === '__all' ? '' : next)}><SelectTrigger aria-label={label}><SelectValue /></SelectTrigger><SelectContent>{options.map((option) => <SelectItem key={option.value || '__all'} value={option.value || '__all'}>{option.label}</SelectItem>)}</SelectContent></Select>;
+}
+
 function rangeBounds(range: RangePreset, customFrom: string, customTo: string) {
   const now = Date.now();
   const date = new Date(now);
@@ -107,129 +118,31 @@ function rangeBounds(range: RangePreset, customFrom: string, customTo: string) {
 }
 
 function TrendChart({ data, bucket }: { data: TrendPoint[]; bucket: 'hour' | 'day' }) {
-  const width = 1000;
-  const height = 320;
-  const left = 58;
-  const right = width - 58;
-  const top = 22;
-  const bottom = height - 44;
-  const tokenMax = Math.max(1, ...data.flatMap((point) => [point.input_tokens, point.output_tokens, point.cache_read_tokens, point.cache_write_tokens])) * 1.08;
-  const costMax = Math.max(0.000001, ...data.map((point) => point.cost)) * 1.08;
-  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
-  const gradientId = `cache-area-${useId().replaceAll(':', '')}`;
-  const shadowId = `tooltip-shadow-${useId().replaceAll(':', '')}`;
-  const liveRegionId = `trend-live-${useId().replaceAll(':', '')}`;
-  const series = [
-    { key: 'input_tokens' as const, label: '输入', color: 'var(--chart-input)' },
-    { key: 'output_tokens' as const, label: '输出', color: 'var(--chart-output)' },
-    { key: 'cache_read_tokens' as const, label: '缓存命中', color: 'var(--chart-cache-read)' },
-    { key: 'cache_write_tokens' as const, label: '缓存创建', color: 'var(--chart-cache-write)' },
-  ];
-  const labelEvery = Math.max(1, Math.ceil(data.length / 8));
-  const pointsFor = (values: number[], max: number): ChartPoint[] => values.map((value, index) => ({
-    x: left + (values.length === 1 ? (right - left) / 2 : (index / (values.length - 1)) * (right - left)),
-    y: chartY(value, max, top, bottom),
-  }));
-  const plottedSeries = series.map((item) => ({ ...item, points: pointsFor(data.map((point) => point[item.key]), tokenMax) }));
-  const costPoints = pointsFor(data.map((point) => point.cost), costMax);
-  const cachePoints = plottedSeries.find((item) => item.key === 'cache_read_tokens')?.points ?? [];
-  const cacheArea = cachePoints.length
-    ? `${smoothLinePath(cachePoints)} L ${cachePoints.at(-1)!.x.toFixed(2)} ${bottom} L ${cachePoints[0].x.toFixed(2)} ${bottom} Z`
-    : '';
-  const hoveredPoint = hoveredIndex == null ? null : data[hoveredIndex];
-  const hoverX = hoveredIndex == null ? 0 : plottedSeries[0]?.points[hoveredIndex]?.x ?? left;
-  const hoverYs = hoveredIndex == null
-    ? []
-    : [...plottedSeries.map((item) => item.points[hoveredIndex]?.y ?? bottom), costPoints[hoveredIndex]?.y ?? bottom];
-  const tooltipWidth = 196;
-  const tooltipHeight = 124;
-  const tooltipX = hoverX + 14 + tooltipWidth > right ? hoverX - tooltipWidth - 14 : hoverX + 14;
-  const tooltipY = Math.max(top + 4, Math.min(bottom - tooltipHeight - 4, Math.min(...hoverYs, bottom) + 10));
-  const axisLabel = (start: string) => bucket === 'hour'
-    ? `${start.slice(5, 10).replace('-', '/')} ${start.slice(11, 16)}`
-    : start.slice(5, 10).replace('-', '/');
-  const tooltipLabel = (start: string) => bucket === 'hour'
-    ? `${start.slice(0, 10).replaceAll('-', '/')} ${start.slice(11, 16)}`
-    : start.slice(0, 10).replaceAll('-', '/');
-  const trendA11yText = hoveredPoint
-    ? `${tooltipLabel(hoveredPoint.start)}，输入 ${fmtTokens(hoveredPoint.input_tokens)}，输出 ${fmtTokens(hoveredPoint.output_tokens)}，缓存命中 ${fmtTokens(hoveredPoint.cache_read_tokens)}，缓存创建 ${fmtTokens(hoveredPoint.cache_write_tokens)}，成本 ${fmtCost(hoveredPoint.cost)}`
-    : '使用左右方向键查看各时间点明细';
-  const updateHoveredIndex = (clientX: number, svg: SVGSVGElement | null) => {
-    const rect = svg?.getBoundingClientRect();
-    if (!rect) return;
-    const pointerX = ((clientX - rect.left) / rect.width) * width;
-    setHoveredIndex(nearestTrendIndex(pointerX, left, right, data.length));
-  };
-
+  const axisLabel = (start: string) => bucket === 'hour' ? start.slice(11, 16) : start.slice(5, 10).replace('-', '/');
+  if (!data.length) return <div className="flex h-72 items-center justify-center text-sm text-subtle-foreground">当前时间范围暂无趋势数据</div>;
+  const latest = data.at(-1)!;
   return (
-    <div className="minimal-scrollbar overflow-x-auto">
-      <svg viewBox={`0 0 ${width} ${height}`} className="h-[320px] min-w-[760px] w-full select-none" role="group" aria-label="Token 用量与成本趋势">
-        <defs>
-          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="var(--chart-cache-read)" stopOpacity="0.28" />
-            <stop offset="100%" stopColor="var(--chart-cache-read)" stopOpacity="0.01" />
-          </linearGradient>
-          <filter id={shadowId} x="-20%" y="-20%" width="140%" height="150%">
-            <feDropShadow dx="0" dy="4" stdDeviation="5" floodColor="#000" floodOpacity="0.16" />
-          </filter>
-        </defs>
-        {[0, 0.25, 0.5, 0.75, 1].map((ratio) => {
-          const y = top + (bottom - top) * ratio;
-          return <g key={ratio}><line x1={left} x2={right} y1={y} y2={y} stroke="var(--border)" strokeDasharray="2 6" /><text x={left - 9} y={y + 4} textAnchor="end" fill="var(--subtle-foreground)" fontSize="10">{fmtTokens(Math.round(tokenMax * (1 - ratio)))}</text><text x={right + 7} y={y + 4} fill="var(--subtle-foreground)" fontSize="10">{fmtCost(costMax * (1 - ratio))}</text></g>;
-        })}
-        {cacheArea && <path d={cacheArea} fill={`url(#${gradientId})`} pointerEvents="none" />}
-        {plottedSeries.map((item) => <path key={item.key} d={smoothLinePath(item.points)} fill="none" stroke={item.color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" pointerEvents="none" />)}
-        <path d={smoothLinePath(costPoints)} fill="none" stroke="var(--chart-cost)" strokeWidth="1.8" strokeDasharray="5 5" strokeLinejoin="round" strokeLinecap="round" pointerEvents="none" />
-        {data.map((point, index) => {
-          const x = plottedSeries[0]?.points[index]?.x ?? left;
-          return (index % labelEvery === 0 || index === data.length - 1) && <text key={point.start} x={x} y={height - 16} textAnchor="middle" fill="var(--subtle-foreground)" fontSize="10">{axisLabel(point.start)}</text>;
-        })}
-        <rect
-          x={left}
-          y={top}
-          width={right - left}
-          height={bottom - top}
-          fill="transparent"
-          pointerEvents="all"
-          tabIndex={0}
-          role="slider"
-          aria-valuemin={0}
-          aria-valuemax={Math.max(0, data.length - 1)}
-          aria-valuenow={hoveredIndex ?? Math.max(0, data.length - 1)}
-          aria-valuetext={trendA11yText}
-          aria-describedby={liveRegionId}
-          aria-label="悬停或使用左右方向键查看各时间点明细"
-          onPointerMove={(event) => updateHoveredIndex(event.clientX, event.currentTarget.ownerSVGElement)}
-          onMouseMove={(event) => updateHoveredIndex(event.clientX, event.currentTarget.ownerSVGElement)}
-          onPointerLeave={() => setHoveredIndex(null)}
-          onMouseLeave={() => setHoveredIndex(null)}
-          onFocus={() => setHoveredIndex(data.length ? data.length - 1 : null)}
-          onBlur={() => setHoveredIndex(null)}
-          onKeyDown={(event) => {
-            if (!data.length) return;
-            if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
-            event.preventDefault();
-            const delta = event.key === 'ArrowLeft' ? -1 : 1;
-            setHoveredIndex((current) => Math.min(data.length - 1, Math.max(0, (current ?? data.length - 1) + delta)));
-          }}
-        />
-        {hoveredPoint && hoveredIndex != null && <g role="tooltip" aria-label={`${tooltipLabel(hoveredPoint.start)} 用量明细`} pointerEvents="none">
-          <line x1={hoverX} x2={hoverX} y1={top} y2={bottom} stroke="var(--muted-foreground)" strokeWidth="1" opacity="0.75" />
-          {plottedSeries.map((item) => <circle key={item.key} cx={item.points[hoveredIndex].x} cy={item.points[hoveredIndex].y} r="4" fill={item.color} stroke="var(--surface)" strokeWidth="2" />)}
-          <circle cx={costPoints[hoveredIndex].x} cy={costPoints[hoveredIndex].y} r="4" fill="var(--chart-cost)" stroke="var(--surface)" strokeWidth="2" />
-          <g transform={`translate(${tooltipX} ${tooltipY})`} filter={`url(#${shadowId})`}>
-            <rect width={tooltipWidth} height={tooltipHeight} rx="8" fill="var(--surface)" stroke="var(--muted-foreground)" />
-            <text x="12" y="21" fill="var(--foreground)" fontSize="12" fontWeight="600">{tooltipLabel(hoveredPoint.start)}</text>
-            {plottedSeries.map((item, row) => <g key={item.key} transform={`translate(0 ${35 + row * 18})`}><circle cx="13" cy="0" r="3" fill={item.color} /><text x="22" y="4" fill={item.color} fontSize="11">{item.label}: {fmtTokens(hoveredPoint[item.key])}</text></g>)}
-            <g transform="translate(0 107)"><circle cx="13" cy="0" r="3" fill="var(--chart-cost)" /><text x="22" y="4" fill="var(--chart-cost)" fontSize="11">成本: {fmtCost(hoveredPoint.cost)}</text></g>
-          </g>
-        </g>}
-      </svg>
-      <div id={liveRegionId} className="sr-only" aria-live="polite">{trendA11yText}</div>
-      <div className="flex flex-wrap justify-center gap-x-5 gap-y-2 text-xs text-muted-foreground">
-        {series.map((item) => <span key={item.key} className="flex items-center gap-1.5"><i className="h-0.5 w-4" style={{ background: item.color }} />{item.label}</span>)}
-        <span className="flex items-center gap-1.5"><i className="h-0 w-4 border-t border-dashed border-chart-cost" />成本</span>
-      </div>
+    <div className="h-[320px] w-full" role="img" aria-label="Token 用量与成本趋势">
+      <ResponsiveContainer width="100%" height="100%">
+        <ComposedChart data={data} margin={{ top: 12, right: 12, left: 0, bottom: 0 }}>
+          <CartesianGrid stroke="var(--border)" strokeDasharray="3 6" vertical={false} />
+          <XAxis dataKey="start" tickFormatter={axisLabel} tick={{ fill: 'var(--subtle-foreground)', fontSize: 11 }} tickLine={false} axisLine={false} minTickGap={28} />
+          <YAxis yAxisId="tokens" tickFormatter={fmtTokens} tick={{ fill: 'var(--subtle-foreground)', fontSize: 11 }} tickLine={false} axisLine={false} width={54} />
+          <YAxis yAxisId="cost" orientation="right" tickFormatter={fmtCost} tick={{ fill: 'var(--subtle-foreground)', fontSize: 11 }} tickLine={false} axisLine={false} width={58} />
+          <RechartsTooltip
+            cursor={{ stroke: 'var(--muted-foreground)', strokeDasharray: '3 3' }}
+            contentStyle={{ background: 'var(--popover)', border: '1px solid var(--border)', borderRadius: 8, boxShadow: '0 12px 36px rgba(0,0,0,.16)', fontSize: 12 }}
+            labelFormatter={(label) => String(label).replace('T', ' ').slice(0, 16)}
+            formatter={(value, name) => [name === '成本' ? fmtCost(Number(value)) : fmtTokens(Number(value)), name]}
+          />
+          <Area yAxisId="tokens" type="monotone" dataKey="cache_read_tokens" name="缓存命中" stroke="var(--chart-cache-read)" fill="var(--chart-cache-read)" fillOpacity={0.12} strokeWidth={2} />
+          <Line yAxisId="tokens" type="monotone" dataKey="input_tokens" name="输入" stroke="var(--chart-input)" strokeWidth={2} dot={false} activeDot={{ r: 3 }} />
+          <Line yAxisId="tokens" type="monotone" dataKey="output_tokens" name="输出" stroke="var(--chart-output)" strokeWidth={2} dot={false} activeDot={{ r: 3 }} />
+          <Line yAxisId="tokens" type="monotone" dataKey="cache_write_tokens" name="缓存创建" stroke="var(--chart-cache-write)" strokeWidth={1.8} dot={false} />
+          <Line yAxisId="cost" type="monotone" dataKey="cost" name="成本" stroke="var(--chart-cost)" strokeWidth={1.8} strokeDasharray="5 5" dot={false} />
+        </ComposedChart>
+      </ResponsiveContainer>
+      <span className="sr-only">最近数据点：输入 {fmtTokens(latest.input_tokens)}，输出 {fmtTokens(latest.output_tokens)}，成本 {fmtCost(latest.cost)}</span>
     </div>
   );
 }
@@ -330,6 +243,7 @@ export default function DashboardClient() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [ready, setReady] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const usageRequestId = useRef(0);
 
   useEffect(() => {
@@ -405,29 +319,34 @@ export default function DashboardClient() {
   ];
   const rows = breakdown === 'token' ? usage?.by_token : breakdown === 'provider' ? usage?.by_provider : usage?.by_model;
   const rowName = (row: UsageRow) => breakdown === 'token' ? row.token_name ?? row.token_prefix ?? '未识别令牌' : breakdown === 'provider' ? row.provider_name ?? row.provider_slug ?? '已删除服务商' : [row.provider_slug, row.model_id].filter(Boolean).join('/') || '未知模型';
+  const filterControls = <>
+    <DashboardSelect label="网关令牌" value={token} onValueChange={setToken} options={[{ value: '', label: '全部令牌' }, ...tokens.map((item) => ({ value: item.id, label: `${item.name} · ${item.prefix}` }))]} />
+    <DashboardSelect label="服务商" value={provider} onValueChange={(next) => { setProvider(next); setModel(''); }} options={[{ value: '', label: '全部服务商' }, ...providers.map((item) => ({ value: item.id, label: item.name }))]} />
+    <DashboardSelect label="模型" value={model} onValueChange={setModel} options={[{ value: '', label: '全部模型' }, ...visibleModels.filter((item) => item.enabled).map((item) => ({ value: item.model_id, label: item.display_name ?? item.model_id }))]} />
+    <DashboardSelect label="时间范围" value={range} onValueChange={(next) => setRange(next as RangePreset)} options={[{ value: 'today', label: '当天' }, { value: '7d', label: '近 7 天' }, { value: '30d', label: '近 30 天' }, { value: 'custom', label: '自定义' }]} />
+    <DashboardSelect label="自动刷新" value={refresh} onValueChange={setRefresh} options={[{ value: '0', label: '不自动刷新' }, { value: '30', label: '每 30 秒' }, { value: '60', label: '每 60 秒' }, { value: '300', label: '每 5 分钟' }]} />
+    {range === 'custom' && <div className="col-span-full flex flex-col gap-3 border-t border-border pt-3 sm:flex-row sm:items-center"><label className="flex items-center gap-2 text-xs text-muted-foreground">开始<Input type="date" value={customFrom} max={customTo} onChange={(event) => setCustomFrom(event.target.value)} /></label><label className="flex items-center gap-2 text-xs text-muted-foreground">结束<Input type="date" value={customTo} min={customFrom} max={todayInput()} onChange={(event) => setCustomTo(event.target.value)} /></label><span className="text-xs text-subtle-foreground">最长 90 天；48 小时以内按小时显示</span></div>}
+  </>;
 
   return (
     <div className="space-y-6">
-      <section className={`${cardCls} p-4`} aria-label="用量筛选">
+      <section className={`${cardCls} hidden p-4 md:block`} aria-label="用量筛选">
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_1fr_auto_auto]">
-          <select aria-label="网关令牌" value={token} onChange={(event) => setToken(event.target.value)} className={inputCls}><option value="">全部令牌</option>{tokens.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.prefix}</option>)}</select>
-          <select aria-label="服务商" value={provider} onChange={(event) => { setProvider(event.target.value); setModel(''); }} className={inputCls}><option value="">全部服务商</option>{providers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
-          <select aria-label="模型" value={model} onChange={(event) => setModel(event.target.value)} className={inputCls}><option value="">全部模型</option>{visibleModels.filter((item) => item.enabled).map((item) => <option key={item.id} value={item.model_id}>{item.display_name ?? item.model_id}</option>)}</select>
-          <select aria-label="时间范围" value={range} onChange={(event) => setRange(event.target.value as RangePreset)} className={inputCls}><option value="today">当天</option><option value="7d">近 7 天</option><option value="30d">近 30 天</option><option value="custom">自定义</option></select>
-          <select aria-label="自动刷新" value={refresh} onChange={(event) => setRefresh(event.target.value)} className={inputCls}><option value="0">不自动刷新</option><option value="30">每 30 秒</option><option value="60">每 60 秒</option><option value="300">每 5 分钟</option></select>
+          {filterControls}
         </div>
-        {range === 'custom' && <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-border pt-3"><label className="flex items-center gap-2 text-xs text-muted-foreground">开始<input type="date" value={customFrom} max={customTo} onChange={(event) => setCustomFrom(event.target.value)} className={inputCls} /></label><label className="flex items-center gap-2 text-xs text-muted-foreground">结束<input type="date" value={customTo} min={customFrom} max={todayInput()} onChange={(event) => setCustomTo(event.target.value)} className={inputCls} /></label><span className="text-xs text-subtle-foreground">最长 90 天；48 小时以内按小时显示</span></div>}
       </section>
+      <Button type="button" variant="outline" onClick={() => setFiltersOpen(true)} className="w-full md:hidden"><SlidersHorizontal className="size-4" />筛选用量范围</Button>
+      <Sheet open={filtersOpen} onOpenChange={setFiltersOpen}><SheetContent side="bottom"><SheetHeader><SheetTitle>筛选用量</SheetTitle><SheetDescription>选择统计范围，数据和地址栏查询参数会自动更新。</SheetDescription></SheetHeader><SheetBody><div className="grid gap-3">{filterControls}</div><Button className="mt-5 w-full" onClick={() => setFiltersOpen(false)}>查看结果</Button></SheetBody></SheetContent></Sheet>
 
       {error && <div role="alert" className="rounded-lg border border-destructive/25 bg-destructive-soft px-4 py-3 text-sm text-destructive">{error}</div>}
 
       <section className={`${cardCls} overflow-hidden`} aria-labelledby="usage-overview-heading">
-        <div className="grid gap-px bg-border lg:grid-cols-[1.4fr_.8fr_.8fr]">
-          <div className="bg-surface p-5 sm:p-6"><div id="usage-overview-heading" className="text-xs text-muted-foreground">真实消耗 Tokens</div><div className="mt-2 text-3xl font-semibold tracking-[-0.04em] tabular-nums sm:text-4xl">{overview ? fmtTokens(overview.effective_tokens) : '—'}</div><div className="mt-2 text-xs text-subtle-foreground">缓存指标覆盖 {overview ? fmtPercent(overview.cache_coverage) : '—'}</div></div>
+        <div className="grid grid-cols-2 gap-px bg-border lg:grid-cols-[1.4fr_.8fr_.8fr]">
+          <div className="col-span-2 bg-surface p-5 sm:p-6 lg:col-span-1"><div id="usage-overview-heading" className="text-xs text-muted-foreground">真实消耗 Tokens</div><div className="mt-2 text-3xl font-semibold tracking-[-0.04em] tabular-nums sm:text-4xl">{overview ? fmtTokens(overview.effective_tokens) : '—'}</div><div className="mt-2 text-xs text-subtle-foreground">缓存指标覆盖 {overview ? fmtPercent(overview.cache_coverage) : '—'}</div></div>
           <div className="bg-surface p-5 sm:p-6"><div className="text-xs text-muted-foreground">总请求数</div><div className="mt-3 text-2xl font-semibold tabular-nums">{overview?.requests.toLocaleString('zh-CN') ?? '—'}</div><div className="mt-2 text-xs text-subtle-foreground">成功率 {overview ? fmtPercent(overview.success_rate) : '—'}</div></div>
           <div className="bg-surface p-5 sm:p-6"><div className="text-xs text-muted-foreground">估算成本</div><div className="mt-3 text-2xl font-semibold tabular-nums text-success">{overview ? fmtCost(overview.cost) : '—'}</div><div className="mt-2 text-xs text-subtle-foreground">已定价 {overview?.priced_requests ?? 0} 次</div></div>
         </div>
-        <div className="grid gap-px border-t border-border bg-border sm:grid-cols-2 lg:grid-cols-5">{metricCards.map((item) => <div key={item.label} className="bg-surface px-5 py-4"><div className="text-[11px] text-muted-foreground">{item.label}</div><div className={`mt-1 text-base font-semibold tabular-nums ${item.tone}`}>{item.value}</div></div>)}</div>
+        <div className="grid grid-cols-2 gap-px border-t border-border bg-border lg:grid-cols-5">{metricCards.map((item) => <div key={item.label} className="bg-surface px-4 py-4 sm:px-5"><div className="text-[11px] text-muted-foreground">{item.label}</div><div className={`mt-1 text-base font-semibold tabular-nums ${item.tone}`}>{item.value}</div></div>)}</div>
       </section>
 
       <section className={`${cardCls} p-5 sm:p-6`} aria-labelledby="trend-heading"><div className="mb-5 flex items-center justify-between gap-4"><h2 id="trend-heading" className="text-sm font-semibold">使用趋势</h2><span className="text-xs text-subtle-foreground">{usage?.range.bucket === 'hour' ? '小时' : '自然日'}粒度</span></div>{loading && !usage ? <SkeletonRows rows={4} /> : <TrendChart data={usage?.trend ?? []} bucket={usage?.range.bucket ?? 'hour'} />}</section>
@@ -435,7 +354,7 @@ export default function DashboardClient() {
       <section className={`${cardCls} p-5 sm:p-6`} aria-labelledby="activity-heading"><div className="mb-5 flex items-end justify-between gap-4"><div><h2 id="activity-heading" className="text-sm font-semibold">Token 活跃度</h2><p className="mt-1 text-xs text-muted-foreground">最近 365 天，响应当前令牌、服务商和模型筛选</p></div><span className="text-xs text-subtle-foreground">越深表示用量越高</span></div>{usage ? <ActivityHeatmap data={usage.activity} /> : <SkeletonRows rows={2} />}</section>
 
       <section aria-labelledby="breakdown-heading">
-        <div className="mb-3 flex w-max rounded-md bg-muted p-1" role="tablist" aria-label="统计维度">{([['token', '网关令牌'], ['provider', 'Provider'], ['model', '模型']] as const).map(([key, label]) => <button key={key} type="button" role="tab" aria-selected={breakdown === key} onClick={() => setBreakdown(key)} className="min-h-9 rounded px-4 text-sm text-muted-foreground transition-colors aria-selected:bg-surface aria-selected:text-foreground aria-selected:shadow-sm">{label}</button>)}</div>
+        <Tabs value={breakdown} onValueChange={(value) => setBreakdown(value as Breakdown)} className="mb-3"><TabsList aria-label="统计维度"><TabsTrigger value="token">网关令牌</TabsTrigger><TabsTrigger value="provider">Provider</TabsTrigger><TabsTrigger value="model">模型</TabsTrigger></TabsList></Tabs>
         <h2 id="breakdown-heading" className="sr-only">多维统计</h2>
         <div className={tableWrapCls}><table className="min-w-[880px] w-full text-sm"><thead className={tableHeadCls}><tr><th className="px-4 py-3 font-medium">{breakdown === 'token' ? '令牌' : breakdown === 'provider' ? '服务商' : '模型'}</th><th className="px-4 py-3 text-right font-medium">请求数</th><th className="px-4 py-3 text-right font-medium">Tokens</th><th className="px-4 py-3 text-right font-medium">成本</th><th className="px-4 py-3 text-right font-medium">成功率</th><th className="px-4 py-3 text-right font-medium">平均耗时</th></tr></thead><tbody className="divide-y divide-border">{!usage ? <tr><td colSpan={6}><SkeletonRows rows={3} /></td></tr> : !rows?.length ? <tr><td colSpan={6} className="px-4 py-10 text-center text-sm text-subtle-foreground">当前筛选范围暂无用量</td></tr> : rows.map((row, index) => <tr key={`${rowName(row)}-${index}`} className="hover:bg-muted/35"><td className="px-4 py-3 font-medium">{rowName(row)}</td><td className="px-4 py-3 text-right tabular-nums">{row.requests.toLocaleString('zh-CN')}</td><td className="px-4 py-3 text-right tabular-nums">{fmtTokens(row.effective_tokens)}</td><td className="px-4 py-3 text-right tabular-nums">{fmtCost(row.cost)}</td><td className="px-4 py-3 text-right tabular-nums">{fmtPercent(row.success_rate)}</td><td className="px-4 py-3 text-right tabular-nums text-muted-foreground">{fmtDuration(row.avg_duration_ms)}</td></tr>)}</tbody></table></div>
       </section>

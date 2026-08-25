@@ -1,12 +1,17 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { Check as CheckIcon, ChevronDown as ChevronIcon, Copy as CopyIcon, Eye as EyeIcon, EyeOff as EyeOffIcon, Plus, RefreshCw as RefreshIcon } from 'lucide-react';
 import { getPreset } from '@/lib/presets';
 import { useConfirm } from '@/components/confirm-dialog';
 import { EmptyState, SkeletonRows } from '@/components/empty-state';
-import { CheckIcon, ChevronIcon, CopyIcon, EyeIcon, EyeOffIcon, RefreshIcon } from '@/components/icons';
 import { useToast } from '@/components/toast';
-import { btn, cardCls, toggleCls, toggleKnobCls } from '@/components/ui';
+import { btn, cardCls } from '@/components/ui/styles';
+import { Button } from '@/components/ui/button';
+import { Sheet, SheetBody, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { Switch } from '@/components/ui/switch';
+import { Progress } from '@/components/ui/progress';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import ModelTable from './model-table';
 import type { ModelItem } from './model-table';
 import ProviderForm from './provider-form';
@@ -267,22 +272,21 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
 
   return (
     <div>
-      <div className="mb-4 flex justify-end">
-        <button onClick={() => setForm({ ...EMPTY_FORM })} className={btn.primary}>
-          + 新建服务商
-        </button>
+      <div className="mb-5 flex justify-end">
+        <Button onClick={() => setForm({ ...EMPTY_FORM })}><Plus className="size-4" />新建服务商</Button>
       </div>
 
-      {form && (
-        <ProviderForm
-          value={form}
-          error={error}
-          saving={saving}
-          onChange={setForm}
-          onSubmit={onSubmit}
-          onCancel={() => { setForm(null); setError(''); }}
-        />
-      )}
+      <Sheet open={form !== null} onOpenChange={(open) => { if (!open) { setForm(null); setError(''); } }}>
+        <SheetContent side="right" className="w-[min(96vw,48rem)] sm:max-w-none">
+          <SheetHeader>
+            <SheetTitle>{form?.id ? '编辑服务商' : '新建服务商'}</SheetTitle>
+            <SheetDescription>{form?.id ? '更新凭据、端点和服务商信息。' : '选择预设并配置 API Key，模型将在创建后自动同步。'}</SheetDescription>
+          </SheetHeader>
+          <SheetBody>
+            {form && <ProviderForm value={form} error={error} saving={saving} onChange={setForm} onSubmit={onSubmit} onCancel={() => { setForm(null); setError(''); }} embedded />}
+          </SheetBody>
+        </SheetContent>
+      </Sheet>
 
       {/* 服务商卡片列表 */}
       <div className="space-y-3">
@@ -357,7 +361,15 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
                 </div>
 
                 {isOpen && (
-                  <div id={detailsId} className="border-t border-border">
+                  <Tabs id={detailsId} defaultValue="overview" className="border-t border-border">
+                    <div className="border-b border-border px-4 pt-3 sm:px-5">
+                      <TabsList aria-label={`${p.name}详情`}>
+                        <TabsTrigger value="overview">概览</TabsTrigger>
+                        <TabsTrigger value="endpoints">端点</TabsTrigger>
+                        <TabsTrigger value="models">模型</TabsTrigger>
+                      </TabsList>
+                    </div>
+                    <TabsContent value="overview" className="mt-0">
                     <div className="grid gap-5 bg-muted/35 px-4 py-5 sm:grid-cols-[minmax(0,1fr)_auto] sm:px-5">
                       <div className="grid gap-4 sm:grid-cols-2">
                         <div>
@@ -398,11 +410,7 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
 
                       <div className="flex flex-wrap items-center gap-2 sm:justify-end">
                         <div className="mr-2 flex items-center gap-2 text-xs text-muted-foreground">
-                          <button type="button" onClick={() => toggleEnabled(p)} className="flex h-11 w-11 items-center justify-center rounded-md sm:h-10" aria-label={p.enabled ? '禁用服务商' : '启用服务商'}>
-                            <span className={toggleCls(p.enabled)} aria-hidden="true">
-                              <span className={toggleKnobCls(p.enabled)} />
-                            </span>
-                          </button>
+                          <Switch checked={p.enabled} onCheckedChange={() => toggleEnabled(p)} aria-label={p.enabled ? '禁用服务商' : '启用服务商'} />
                           {p.enabled ? '已启用' : '已停用'}
                         </div>
                         <button onClick={() => testProvider(p)} className={btn.ghost}>
@@ -452,19 +460,11 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
                                   <span className="font-medium text-muted-foreground">{label}</span>
                                   <span className={pct >= 90 ? 'text-destructive' : pct >= 70 ? 'text-warning' : 'text-foreground'}>{Math.round(pct)}%</span>
                                 </div>
-                                <div
-                                  role="progressbar"
+                                <Progress
+                                  value={pct}
                                   aria-label={`${label}已用额度`}
-                                  aria-valuemin={0}
-                                  aria-valuemax={100}
-                                  aria-valuenow={Math.round(pct)}
-                                  className="h-1.5 overflow-hidden rounded-full bg-muted"
-                                >
-                                  <div
-                                    className={`h-full rounded-full ${pct >= 90 ? 'bg-destructive' : pct >= 70 ? 'bg-warning' : 'bg-primary'}`}
-                                    style={{ width: `${pct}%` }}
-                                  />
-                                </div>
+                                  indicatorClassName={pct >= 90 ? 'bg-destructive' : pct >= 70 ? 'bg-warning' : 'bg-primary'}
+                                />
                                 {t.resets_at && <div className="mt-2 text-[11px] text-subtle-foreground">重置于 {new Date(t.resets_at).toLocaleString('zh-CN')}</div>}
                               </div>
                             );
@@ -472,7 +472,9 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
                         </div>
                       </div>
                     )}
-                    <div className="border-t border-border px-4 py-5 sm:px-5">
+                    </TabsContent>
+                    <TabsContent value="endpoints" className="mt-0">
+                    <div className="px-4 py-5 sm:px-5">
                       <div className="text-xs font-medium text-muted-foreground">接入端点</div>
                       <div className="minimal-scrollbar mt-3 overflow-x-auto">
                         <table className="min-w-[34rem] w-full text-left text-xs">
@@ -485,8 +487,11 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
                         </table>
                       </div>
                     </div>
-                    <ModelTable providerId={p.id} models={models.filter((m) => m.provider_id === p.id)} onChanged={load} onToast={notify} />
-                  </div>
+                    </TabsContent>
+                    <TabsContent value="models" className="mt-0">
+                      <ModelTable providerId={p.id} models={models.filter((m) => m.provider_id === p.id)} onChanged={load} onToast={notify} />
+                    </TabsContent>
+                  </Tabs>
                 )}
               </div>
             );

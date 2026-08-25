@@ -1,8 +1,10 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { EyeIcon, EyeOffIcon } from '@/components/icons';
-import { btn, cardCls, inputCls } from '@/components/ui';
+import { Eye, EyeOff } from 'lucide-react';
+import { btn, cardCls, inputCls } from '@/components/ui/styles';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { getPreset } from '@/lib/presets';
 import {
   addFormEndpoint,
@@ -25,6 +27,7 @@ export interface ProviderFormProps {
   onChange: (value: ProviderFormState) => void;
   onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
   onCancel: () => void;
+  embedded?: boolean;
 }
 
 function presetEndpoints(presetKey: string): ProviderFormEndpoint[] {
@@ -56,19 +59,19 @@ function EndpointEditor({ endpoints, onChange }: { endpoints: ProviderFormEndpoi
               <input value={endpoint.base_url} onChange={(event) => onChange(endpoints.map((item) => item.protocol === endpoint.protocol ? { ...item, base_url: event.target.value } : item))} placeholder="https://api.example.com/v1" className={`w-full ${inputCls}`} required />
             </label>
             <div className="flex min-h-10 flex-wrap items-center gap-2 sm:justify-end">
-              <label className="inline-flex min-h-11 items-center gap-2 text-xs text-muted-foreground"><input type="checkbox" checked={endpoint.enabled} disabled={endpoint.enabled && endpoints.filter((item) => item.enabled).length === 1} onChange={(event) => onChange(setFormEndpointEnabled(endpoints, endpoint.protocol, event.target.checked))} className="h-4 w-4 accent-primary" />启用</label>
+              <label className="inline-flex min-h-11 items-center gap-2 text-xs text-muted-foreground"><Checkbox checked={endpoint.enabled} disabled={endpoint.enabled && endpoints.filter((item) => item.enabled).length === 1} onCheckedChange={(checked) => onChange(setFormEndpointEnabled(endpoints, endpoint.protocol, checked === true))} />启用</label>
               <label className="inline-flex min-h-11 items-center gap-2 text-xs text-muted-foreground"><input type="radio" name="default-endpoint" checked={endpoint.is_default} disabled={!endpoint.enabled} onChange={() => onChange(setFormDefaultProtocol(endpoints, endpoint.protocol))} className="h-4 w-4 accent-primary" />默认</label>
               <button type="button" onClick={() => onChange(removeFormEndpoint(endpoints, endpoint.protocol))} disabled={endpoints.length === 1} className={`${btn.ghost} min-h-11`}>移除</button>
             </div>
           </div>
         ))}
       </div>
-      {available.length > 0 && <label className="mt-3 flex flex-wrap items-center gap-2 text-sm"><span className="text-muted-foreground">增加协议</span><select aria-label="增加协议端点" defaultValue="" onChange={(event) => { const protocol = event.target.value as ProviderProtocol; if (protocol) { onChange(addFormEndpoint(endpoints, protocol)); event.currentTarget.value = ''; } }} className={inputCls}><option value="">选择协议…</option>{available.map((protocol) => <option key={protocol} value={protocol}>{protocolDisplayName(protocol)} · {protocol}</option>)}</select></label>}
+      {available.length > 0 && <div className="mt-3 flex flex-wrap items-center gap-2 text-sm"><span className="text-muted-foreground">增加协议</span><Select value="" onValueChange={(value) => onChange(addFormEndpoint(endpoints, value as ProviderProtocol))}><SelectTrigger aria-label="增加协议端点" className="w-64"><SelectValue placeholder="选择协议…" /></SelectTrigger><SelectContent>{available.map((protocol) => <SelectItem key={protocol} value={protocol}>{protocolDisplayName(protocol)} · {protocol}</SelectItem>)}</SelectContent></Select></div>}
     </fieldset>
   );
 }
 
-export default function ProviderForm({ value, error, saving, onChange, onSubmit, onCancel }: ProviderFormProps) {
+export default function ProviderForm({ value, error, saving, onChange, onSubmit, onCancel, embedded = false }: ProviderFormProps) {
   const isEdit = value.id !== null;
   const advancedId = isEdit ? 'provider-edit-advanced-config' : 'provider-create-advanced-config';
   const [advanced, setAdvanced] = useState(isEdit || !value.preset_key);
@@ -87,11 +90,11 @@ export default function ProviderForm({ value, error, saving, onChange, onSubmit,
   }
 
   return (
-    <form onSubmit={onSubmit} className={`mb-6 ${cardCls} p-4 sm:p-6`}>
-      <div className="flex flex-wrap items-baseline justify-between gap-2"><h2 className="text-lg font-semibold tracking-[-0.02em]">{isEdit ? '编辑服务商' : '新建服务商'}</h2>{value.preset_key && <span className="text-xs text-muted-foreground">预设：{value.preset_key}</span>}</div>
+    <form onSubmit={onSubmit} className={embedded ? '' : `mb-6 ${cardCls} p-4 sm:p-6`}>
+      <div className="flex flex-wrap items-baseline justify-between gap-2">{!embedded && <h2 className="text-lg font-semibold tracking-[-0.02em]">{isEdit ? '编辑服务商' : '新建服务商'}</h2>}{value.preset_key && <span className="text-xs text-muted-foreground">预设：{value.preset_key}</span>}</div>
       {!isEdit && <div className="mt-5"><PresetCardGrid selectedPresetKey={value.preset_key} onSelectPreset={selectPreset} /></div>}
       <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2">
-        <label className="block md:col-span-2"><span className="mb-1.5 block text-sm font-medium text-muted-foreground">API Key{isEdit ? '（留空则不修改）' : '（加密存储）'}</span><div className="relative"><input type={showKey ? 'text' : 'password'} value={value.api_key} onChange={(event) => onChange({ ...value, api_key: event.target.value })} placeholder={isEdit ? '留空则不修改' : 'sk-…'} className={`w-full ${inputCls} pr-12`} required={!isEdit} /><button type="button" onClick={() => setShowKey((shown) => !shown)} aria-label={showKey ? '隐藏 API Key' : '显示 API Key'} className="absolute right-0.5 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground sm:right-1 sm:h-10 sm:w-10">{showKey ? <EyeOffIcon /> : <EyeIcon />}</button></div></label>
+        <label className="block md:col-span-2"><span className="mb-1.5 block text-sm font-medium text-muted-foreground">API Key{isEdit ? '（留空则不修改）' : '（加密存储）'}</span><div className="relative"><input type={showKey ? 'text' : 'password'} value={value.api_key} onChange={(event) => onChange({ ...value, api_key: event.target.value })} placeholder={isEdit ? '留空则不修改' : 'sk-…'} className={`w-full ${inputCls} pr-12`} required={!isEdit} /><button type="button" onClick={() => setShowKey((shown) => !shown)} aria-label={showKey ? '隐藏 API Key' : '显示 API Key'} className="absolute right-0.5 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground sm:right-1 sm:h-10 sm:w-10">{showKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}</button></div></label>
         <label className="block md:col-span-2"><span className="mb-1.5 block text-sm font-medium text-muted-foreground">备注</span><input value={value.remark} onChange={(event) => onChange({ ...value, remark: event.target.value })} className={`w-full ${inputCls}`} /></label>
       </div>
       <div className="mt-5 border-t border-border pt-4">

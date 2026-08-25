@@ -2,11 +2,18 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
+import { Check, Copy, Eye, EyeOff, KeyRound, Plus } from 'lucide-react';
 import { useConfirm } from '@/components/confirm-dialog';
 import { EmptyState, SkeletonRows } from '@/components/empty-state';
-import { CheckIcon, CopyIcon, EyeIcon, EyeOffIcon } from '@/components/icons';
 import { useToast } from '@/components/toast';
-import { btn, cardCls, inputCls, tableHeadCls, tableWrapCls, toggleCls, toggleKnobCls } from '@/components/ui';
+import { btn, tableHeadCls, tableWrapCls } from '@/components/ui/styles';
+import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Progress } from '@/components/ui/progress';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
 
 interface Token {
   id: string;
@@ -153,96 +160,90 @@ export default function TokensClient() {
 
   return (
     <div>
-      {newKey && (
-        <div className="mb-6 rounded-lg border border-success/25 bg-success-soft px-4 py-4 text-sm" role="status">
-          <div className="mb-2 font-medium text-success">新令牌已创建，请立即保存</div>
-          <div className="flex flex-wrap items-center gap-2">
-            <code className="min-w-0 flex-1 truncate rounded-md border border-success/20 bg-surface px-3 py-2 text-xs">{newKey}</code>
-            <button
+      <Dialog open={newKey !== null} onOpenChange={(open) => { if (!open) setNewKey(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2"><KeyRound className="size-5 text-success" />令牌创建成功</DialogTitle>
+            <DialogDescription>这是唯一一次显示完整密钥。关闭前请复制并保存到安全位置。</DialogDescription>
+          </DialogHeader>
+          {newKey && <div className="rounded-lg border border-success/25 bg-success-soft p-3" role="status">
+            <code className="block break-all text-xs leading-6">{newKey}</code>
+          </div>}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setNewKey(null)}>我已保存</Button>
+            <Button
               type="button"
               onClick={async () => {
-                if (await copyText(newKey)) {
+                if (newKey && await copyText(newKey)) {
                   setNewKeyCopied(true);
                   setTimeout(() => setNewKeyCopied(false), 1500);
                 }
               }}
-              className={btn.ghost}
             >
-              {newKeyCopied ? '已复制' : '复制'}
-            </button>
-            <button type="button" onClick={() => setNewKey(null)} className={btn.link}>
-              关闭
-            </button>
-          </div>
-        </div>
-      )}
+              {newKeyCopied ? <Check className="size-4" /> : <Copy className="size-4" />}{newKeyCopied ? '已复制' : '复制密钥'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <div className="mb-5 flex justify-end">
-        <button
-          onClick={() => setShowForm(!showForm)}
-          className={btn.primary}
-        >
-          + 新建令牌
-        </button>
+        <Button onClick={() => setShowForm(true)}><Plus className="size-4" />新建令牌</Button>
       </div>
 
-      {showForm && (
-        <form onSubmit={onSubmit} className={`mb-6 ${cardCls} p-5 sm:p-6`}>
-          <h2 className="mb-5 text-base font-semibold tracking-[-0.02em]">新建令牌</h2>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-[minmax(180px,1fr)_160px_140px_160px_auto] lg:items-end">
-            <label className="block">
-              <span className="mb-1.5 block text-sm text-muted-foreground">名称</span>
-              <input
+      <Dialog open={showForm} onOpenChange={setShowForm}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>新建网关令牌</DialogTitle><DialogDescription>为客户端创建独立凭据，可选设置有效期与消费限额。</DialogDescription></DialogHeader>
+          <form onSubmit={onSubmit}>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="sm:col-span-2">
+              <Label htmlFor="token-name">名称</Label>
+              <Input id="token-name"
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
                 placeholder="Claude Code 本机"
-                className={`w-full ${inputCls}`}
+                className="mt-1.5"
                 required
               />
-            </label>
-            <label className="block">
-              <span className="mb-1.5 block text-sm text-muted-foreground">过期天数</span>
-              <input
+            </div>
+            <div>
+              <Label htmlFor="token-expiry">过期天数</Label>
+              <Input id="token-expiry"
                 type="number"
                 min={1}
                 value={form.expires_days}
                 onChange={(e) => setForm({ ...form, expires_days: e.target.value })}
                 placeholder="永不过期"
-                className={`w-full ${inputCls}`}
+                className="mt-1.5"
               />
-            </label>
-            <label className="block">
-              <span className="mb-1.5 block text-sm text-muted-foreground">花费限额（$）</span>
-              <input
+            </div>
+            <div>
+              <Label htmlFor="token-limit">花费限额（$）</Label>
+              <Input id="token-limit"
                 type="number"
                 min={0}
                 step="0.01"
                 value={form.spend_limit}
                 onChange={(e) => setForm({ ...form, spend_limit: e.target.value })}
                 placeholder="不限"
-                className={`w-full ${inputCls}`}
+                className="mt-1.5"
               />
-            </label>
-            <label className="block">
-              <span className="mb-1.5 block text-sm text-muted-foreground">限额窗口</span>
-              <select
+            </div>
+            <div className="sm:col-span-2">
+              <Label>限额窗口</Label>
+              <Select
                 value={form.spend_window}
-                onChange={(e) => setForm({ ...form, spend_window: e.target.value })}
-                className={`w-full ${inputCls}`}
+                onValueChange={(spend_window) => setForm({ ...form, spend_window })}
               >
-                <option value="day">当天</option>
-                <option value="week">近 7 天</option>
-                <option value="month">近 30 天</option>
-                <option value="total">累计</option>
-              </select>
-            </label>
-            <button type="submit" className={btn.primary}>
-              创建
-            </button>
+                <SelectTrigger className="mt-1.5"><SelectValue /></SelectTrigger>
+                <SelectContent><SelectItem value="day">当天</SelectItem><SelectItem value="week">近 7 天</SelectItem><SelectItem value="month">近 30 天</SelectItem><SelectItem value="total">累计</SelectItem></SelectContent>
+              </Select>
+            </div>
           </div>
           {error && <p role="alert" className="mt-3 text-sm text-destructive">{error}</p>}
-        </form>
-      )}
+          <DialogFooter className="mt-5"><Button type="button" variant="outline" onClick={() => setShowForm(false)}>取消</Button><Button type="submit">创建令牌</Button></DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       <div className={tableWrapCls}>
         <table className="min-w-[900px] w-full text-sm">
@@ -280,10 +281,10 @@ export default function TokensClient() {
                           {revealed[t.id] ?? `${t.prefix}…`}
                         </code>
                         <button type="button" onClick={() => toggleReveal(t)} className="flex h-8 w-8 items-center justify-center rounded-md text-subtle-foreground hover:bg-muted hover:text-foreground" title={revealed[t.id] ? '隐藏' : '查看明文'} aria-label={revealed[t.id] ? `隐藏${t.name}令牌` : `查看${t.name}令牌明文`}>
-                          {revealed[t.id] ? <EyeOffIcon className="h-3.5 w-3.5" /> : <EyeIcon className="h-3.5 w-3.5" />}
+                          {revealed[t.id] ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
                         </button>
                         <button type="button" onClick={() => copyKey(t)} className="flex h-8 w-8 items-center justify-center rounded-md text-subtle-foreground hover:bg-muted hover:text-foreground" title="复制" aria-label={`复制${t.name}令牌`}>
-                          {copied[t.id] ? <CheckIcon className="h-3.5 w-3.5 text-success" /> : <CopyIcon className="h-3.5 w-3.5" />}
+                          {copied[t.id] ? <Check className="h-3.5 w-3.5 text-success" /> : <Copy className="h-3.5 w-3.5" />}
                         </button>
                       </span>
                     </td>
@@ -294,19 +295,7 @@ export default function TokensClient() {
                             <span className="tabular-nums">${(t.spent ?? 0).toFixed(4)} / ${t.spend_limit}</span>
                             <span className="text-subtle-foreground">{WINDOW_LABELS[t.spend_window ?? 'total']}</span>
                           </div>
-                          <div
-                            className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
-                            role="progressbar"
-                            aria-label={`${t.name}花费限额已用`}
-                            aria-valuemin={0}
-                            aria-valuemax={100}
-                            aria-valuenow={Math.round(pct ?? 0)}
-                          >
-                            <div
-                              className={`h-full rounded-full ${pct != null && pct >= 100 ? 'bg-destructive' : 'bg-primary'}`}
-                              style={{ width: `${pct ?? 0}%` }}
-                            />
-                          </div>
+                          <Progress value={pct ?? 0} aria-label={`${t.name}花费限额已用`} indicatorClassName={pct != null && pct >= 100 ? 'bg-destructive' : 'bg-primary'} />
                         </div>
                       ) : (
                         <span className="text-xs text-subtle-foreground">不限</span>
@@ -316,16 +305,7 @@ export default function TokensClient() {
                       {t.expires_at ? new Date(t.expires_at).toLocaleString('zh-CN') : '永不'}
                     </td>
                     <td className="px-4 py-3">
-                      <button
-                        type="button"
-                        onClick={() => toggleEnabled(t)}
-                        className={toggleCls(t.enabled)}
-                        aria-label={t.enabled ? '禁用' : '启用'}
-                      >
-                        <span
-                          className={toggleKnobCls(t.enabled)}
-                        />
-                      </button>
+                      <Switch checked={t.enabled} onCheckedChange={() => toggleEnabled(t)} aria-label={t.enabled ? '禁用' : '启用'} />
                     </td>
                     <td className="px-4 py-3">
                       <span className="flex items-center gap-3">

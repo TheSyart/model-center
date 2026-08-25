@@ -31,9 +31,9 @@ test('log UI and API expose request protocols as entry while preserving user age
   const service = fs.readFileSync(new URL('../lib/services/log.ts', import.meta.url), 'utf8');
 
   assert.match(ui, /入口协议/);
-  assert.match(ui, /<option value="openai">Chat<\/option>/);
-  assert.match(ui, /<option value="responses">Responses<\/option>/);
-  assert.match(ui, /<option value="anthropic">Messages<\/option>/);
+  assert.match(ui, /value: 'openai', label: 'Chat'/);
+  assert.match(ui, /value: 'responses', label: 'Responses'/);
+  assert.match(ui, /value: 'anthropic', label: 'Messages'/);
   assert.match(ui, /log\.entry_protocol/);
   assert.doesNotMatch(ui, /log\.client_name/);
   assert.match(ui, /log\.source/);

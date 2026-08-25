@@ -1,4 +1,4 @@
-import Nav from '@/components/nav';
+import { AdminShell } from '@/components/admin-shell';
 import { ConfirmProvider } from '@/components/confirm-dialog';
 import { ToastProvider } from '@/components/toast';
 
@@ -7,10 +7,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   return (
     <ToastProvider>
       <ConfirmProvider>
-        <div className="min-h-screen">
-          <Nav />
-          <main className="page-enter mx-auto max-w-6xl px-4 py-10 sm:px-6 sm:py-12">{children}</main>
-        </div>
+        <AdminShell contentClassName="admin-page-content">{children}</AdminShell>
       </ConfirmProvider>
     </ToastProvider>
   );

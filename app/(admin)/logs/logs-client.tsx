@@ -1,8 +1,14 @@
 'use client';
 
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
+import { ChevronRight } from 'lucide-react';
 import { EmptyState, SkeletonRows } from '@/components/empty-state';
-import { btn, inputCls, tableHeadCls, tableWrapCls } from '@/components/ui';
+import { tableHeadCls, tableWrapCls } from '@/components/ui/styles';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Sheet, SheetBody, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 
 interface Provider { id: string; name: string; slug: string; }
 interface Token { id: string; name: string; prefix: string; }
@@ -72,6 +78,15 @@ function fmtDuration(value: number | null): string {
   return value >= 1000 ? `${(value / 1000).toFixed(2)}s` : `${value}ms`;
 }
 
+function FilterSelect({ label, value, onValueChange, options }: { label: string; value: string; onValueChange: (value: string) => void; options: { value: string; label: string }[] }) {
+  return <Select value={value || '__all'} onValueChange={(next) => onValueChange(next === '__all' ? '' : next)}><SelectTrigger aria-label={label}><SelectValue /></SelectTrigger><SelectContent>{options.map((option) => <SelectItem key={option.value || '__all'} value={option.value || '__all'}>{option.label}</SelectItem>)}</SelectContent></Select>;
+}
+
+function LogDetails({ log }: { log: LogRow }) {
+  const success = log.status != null && log.status >= 200 && log.status < 300;
+  return <div><div className="grid gap-4 text-xs sm:grid-cols-2"><div><span className="text-subtle-foreground">路由</span><div className="mt-1 break-all font-mono">{[log.provider_slug, log.model_id].filter(Boolean).join('/') || '—'}</div></div><div><span className="text-subtle-foreground">实际端点 / 上游格式</span><div className="mt-1 break-all font-mono">{log.provider_endpoint_id ?? '旧记录'} / {log.upstream_protocol ?? '—'}</div></div><div><span className="text-subtle-foreground">请求别名 / 提示词</span><div className="mt-1 font-mono">{log.alias ?? '—'} / {log.prompt_id ?? '—'}</div></div><div><span className="text-subtle-foreground">上游响应头</span><div className="mt-1 tabular-nums">{fmtDuration(log.latency_ms)} · {log.stream === 1 ? '流式' : '非流式'}</div></div><div><span className="text-subtle-foreground">原始 Token</span><div className="mt-1 tabular-nums">{fmtTokens(log.prompt_tokens)} + {fmtTokens(log.completion_tokens)} = {fmtTokens(log.total_tokens)}</div></div><div className="sm:col-span-2"><span className="text-subtle-foreground">来源 User-Agent</span><div className="mt-1 break-all font-mono">{log.source ?? 'unknown'}</div></div></div>{log.error ? <pre className={`mt-4 whitespace-pre-wrap break-words rounded-md border px-3 py-3 text-xs ${success ? 'border-warning/25 bg-warning-soft text-warning' : 'border-destructive/25 bg-destructive-soft text-destructive'}`}>{log.error}</pre> : <div className="mt-4 text-xs text-subtle-foreground">请求完成，无错误或 failover 备注。</div>}</div>;
+}
+
 export default function LogsClient() {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [tokens, setTokens] = useState<Token[]>([]);
@@ -81,6 +96,7 @@ export default function LogsClient() {
   const [loadError, setLoadError] = useState('');
   const [page, setPage] = useState(1);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [mobileDetails, setMobileDetails] = useState<LogRow | null>(null);
   const [filters, setFilters] = useState({ provider: '', token: '', entry: '', status: '', range: 'today', q: '' });
   const logRequestId = useRef(0);
   const pageSize = 50;
@@ -134,19 +150,30 @@ export default function LogsClient() {
     <div>
       <section className="mb-5 rounded-lg border border-border bg-surface p-4" aria-label="日志筛选">
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_auto_auto_auto_1.1fr]">
-          <select aria-label="网关令牌" value={filters.token} onChange={(event) => applyFilters({ token: event.target.value })} className={inputCls}><option value="">全部令牌</option>{tokens.map((token) => <option key={token.id} value={token.id}>{token.name} · {token.prefix}</option>)}</select>
-          <select aria-label="服务商" value={filters.provider} onChange={(event) => applyFilters({ provider: event.target.value })} className={inputCls}><option value="">全部服务商</option>{providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}</select>
-          <select aria-label="入口协议" value={filters.entry} onChange={(event) => applyFilters({ entry: event.target.value })} className={inputCls}><option value="">全部入口</option><option value="openai">Chat</option><option value="responses">Responses</option><option value="anthropic">Messages</option></select>
-          <select aria-label="请求状态" value={filters.status} onChange={(event) => applyFilters({ status: event.target.value })} className={inputCls}><option value="">全部状态</option><option value="2xx">成功</option><option value="error">失败</option></select>
-          <select aria-label="时间范围" value={filters.range} onChange={(event) => applyFilters({ range: event.target.value })} className={inputCls}><option value="today">当天</option><option value="7d">近 7 天</option><option value="30d">近 30 天</option><option value="">全部时间</option></select>
-          <input aria-label="搜索错误摘要" value={filters.q} onChange={(event) => applyFilters({ q: event.target.value })} placeholder="搜索错误摘要…" className={inputCls} />
+          <FilterSelect label="网关令牌" value={filters.token} onValueChange={(token) => applyFilters({ token })} options={[{ value: '', label: '全部令牌' }, ...tokens.map((token) => ({ value: token.id, label: `${token.name} · ${token.prefix}` }))]} />
+          <FilterSelect label="服务商" value={filters.provider} onValueChange={(provider) => applyFilters({ provider })} options={[{ value: '', label: '全部服务商' }, ...providers.map((provider) => ({ value: provider.id, label: provider.name }))]} />
+          <FilterSelect label="入口协议" value={filters.entry} onValueChange={(entry) => applyFilters({ entry })} options={[{ value: '', label: '全部入口' }, { value: 'openai', label: 'Chat' }, { value: 'responses', label: 'Responses' }, { value: 'anthropic', label: 'Messages' }]} />
+          <FilterSelect label="请求状态" value={filters.status} onValueChange={(status) => applyFilters({ status })} options={[{ value: '', label: '全部状态' }, { value: '2xx', label: '成功' }, { value: 'error', label: '失败' }]} />
+          <FilterSelect label="时间范围" value={filters.range} onValueChange={(range) => applyFilters({ range })} options={[{ value: 'today', label: '当天' }, { value: '7d', label: '近 7 天' }, { value: '30d', label: '近 30 天' }, { value: '', label: '全部时间' }]} />
+          <Input aria-label="搜索错误摘要" value={filters.q} onChange={(event) => applyFilters({ q: event.target.value })} placeholder="搜索错误摘要…" />
         </div>
         <div className="mt-3 flex items-center justify-between border-t border-border pt-3 text-xs text-subtle-foreground"><span>记录请求元数据，不保存请求或响应正文</span><span className="tabular-nums">共 {total.toLocaleString('zh-CN')} 条</span></div>
       </section>
 
       {loadError && <div className="mb-4 rounded-lg border border-destructive/25 bg-destructive-soft px-4 py-3 text-sm text-destructive" role="alert">{loadError}</div>}
 
-      <div className={tableWrapCls}>
+      <div className="space-y-2 md:hidden">
+        {loading ? <div className="rounded-lg border border-border bg-surface"><SkeletonRows rows={5} /></div> : logs.length === 0 ? <div className="rounded-lg border border-border bg-surface"><EmptyState title="暂无日志" description="当前筛选范围内没有请求记录" /></div> : logs.map((log) => {
+          const success = log.status != null && log.status >= 200 && log.status < 300;
+          return <button key={log.id} type="button" onClick={() => setMobileDetails(log)} className="flex min-h-24 w-full items-center gap-3 rounded-lg border border-border bg-surface p-4 text-left transition-colors hover:bg-muted/35"><div className="min-w-0 flex-1"><div className="mb-2 flex items-center gap-2"><Badge variant={success ? 'success' : 'destructive'}>{log.status ?? '—'}</Badge><span className="text-xs text-muted-foreground">{new Date(log.ts).toLocaleString('zh-CN')}</span></div><div className="truncate text-sm font-medium">{log.provider_name ?? log.provider_slug ?? '—'} / {log.model_id ?? '—'}</div><div className="mt-1 flex gap-3 text-xs text-muted-foreground"><span>{fmtTokens(log.total_tokens)} tokens</span><span>{fmtCost(log.cost)}</span><span>{fmtDuration(log.duration_ms ?? log.latency_ms)}</span></div></div><ChevronRight className="size-4 shrink-0 text-subtle-foreground" /></button>;
+        })}
+      </div>
+
+      <Sheet open={mobileDetails !== null} onOpenChange={(open) => { if (!open) setMobileDetails(null); }}>
+        <SheetContent className="w-[min(96vw,32rem)] sm:max-w-none"><SheetHeader><SheetTitle>请求详情</SheetTitle><SheetDescription>{mobileDetails ? new Date(mobileDetails.ts).toLocaleString('zh-CN') : ''}</SheetDescription></SheetHeader><SheetBody>{mobileDetails && <LogDetails log={mobileDetails} />}</SheetBody></SheetContent>
+      </Sheet>
+
+      <div className={`${tableWrapCls} hidden md:block`}>
         <table className="min-w-[1240px] w-full text-sm">
           <thead className={tableHeadCls}><tr><th className="px-4 py-3 font-medium">时间</th><th className="px-4 py-3 font-medium">令牌</th><th className="px-4 py-3 font-medium">入口</th><th className="px-4 py-3 font-medium">服务商 / 模型</th><th className="px-4 py-3 text-right font-medium">输入</th><th className="px-4 py-3 text-right font-medium">输出</th><th className="px-4 py-3 text-right font-medium">成本</th><th className="px-4 py-3 text-right font-medium">总耗时 / 首字</th><th className="px-4 py-3 font-medium">状态</th><th className="px-4 py-3 font-medium">来源</th></tr></thead>
           <tbody className="divide-y divide-border">
@@ -167,7 +194,7 @@ export default function LogsClient() {
                     <td className="px-4 py-3"><span className={`rounded-full px-2 py-0.5 text-xs ${success ? 'bg-success-soft text-success' : 'bg-destructive-soft text-destructive'}`}>{log.status ?? '—'}</span></td>
                     <td className="px-4 py-3"><div className="max-w-56 truncate font-mono text-[11px] text-muted-foreground" title={log.source ?? 'unknown'}>{log.source ?? 'unknown'}</div></td>
                   </tr>
-                  {expanded === log.id && <tr><td colSpan={10} className="bg-muted/45 px-4 py-4"><div className="grid gap-3 text-xs sm:grid-cols-2 lg:grid-cols-4"><div><span className="text-subtle-foreground">路由</span><div className="mt-1 font-mono">{[log.provider_slug, log.model_id].filter(Boolean).join('/') || '—'}</div></div><div><span className="text-subtle-foreground">实际端点 / 上游格式</span><div className="mt-1 font-mono">{log.provider_endpoint_id ?? '旧记录'} / {log.upstream_protocol ?? '—'}</div></div><div><span className="text-subtle-foreground">请求别名 / 提示词</span><div className="mt-1 font-mono">{log.alias ?? '—'} / {log.prompt_id ?? '—'}</div></div><div><span className="text-subtle-foreground">上游响应头</span><div className="mt-1 tabular-nums">{fmtDuration(log.latency_ms)} · {log.stream === 1 ? '流式' : '非流式'}</div></div><div><span className="text-subtle-foreground">原始 Token</span><div className="mt-1 tabular-nums">{fmtTokens(log.prompt_tokens)} + {fmtTokens(log.completion_tokens)} = {fmtTokens(log.total_tokens)}</div></div><div className="sm:col-span-2 lg:col-span-4"><span className="text-subtle-foreground">来源 User-Agent</span><div className="mt-1 break-all font-mono">{log.source ?? 'unknown'}</div></div></div>{log.error ? <pre className={`mt-4 whitespace-pre-wrap rounded-md border px-3 py-3 text-xs ${success ? 'border-warning/25 bg-warning-soft text-warning' : 'border-destructive/25 bg-destructive-soft text-destructive'}`}>{log.error}</pre> : <div className="mt-4 text-xs text-subtle-foreground">请求完成，无错误或 failover 备注。</div>}</td></tr>}
+                  {expanded === log.id && <tr><td colSpan={10} className="bg-muted/45 px-4 py-4"><LogDetails log={log} /></td></tr>}
                 </Fragment>
               );
             })}
@@ -175,7 +202,7 @@ export default function LogsClient() {
         </table>
       </div>
 
-      <div className="mt-4 flex items-center justify-end gap-2 text-sm"><button type="button" onClick={() => setPage((value) => Math.max(1, value - 1))} disabled={page <= 1} className={btn.ghost}>上一页</button><span className="min-w-20 text-center text-muted-foreground">{page} / {totalPages}</span><button type="button" onClick={() => setPage((value) => Math.min(totalPages, value + 1))} disabled={page >= totalPages} className={btn.ghost}>下一页</button></div>
+      <div className="mt-4 flex items-center justify-end gap-2 text-sm"><Button type="button" variant="outline" onClick={() => setPage((value) => Math.max(1, value - 1))} disabled={page <= 1}>上一页</Button><span className="min-w-20 text-center text-muted-foreground">{page} / {totalPages}</span><Button type="button" variant="outline" onClick={() => setPage((value) => Math.min(totalPages, value + 1))} disabled={page >= totalPages}>下一页</Button></div>
     </div>
   );
 }
