@@ -1,8 +1,6 @@
-import { Readable, type Writable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
-import { createGunzip } from 'node:zlib';
 import { expect, type APIRequestContext, test } from '@playwright/test';
-import * as tar from 'tar-stream';
+
+import { extractSeededRawCaptureTarGzip } from '../raw-capture-e2e-tar.ts';
 
 interface GatewayFixture {
   key: string;
@@ -15,6 +13,7 @@ interface RawCaptureRecord {
   path: string;
   status: number | null;
   stream: boolean;
+  complete: boolean;
   location: 'active' | 'archived';
 }
 
@@ -33,6 +32,12 @@ const canonicalPaths = [
 ] as const;
 
 type CanonicalPath = typeof canonicalPaths[number];
+
+interface CaptureCompletionExpectation {
+  status: number;
+  stream: boolean;
+  responseBody?: Buffer;
+}
 
 const seededRecordId = '22222222-2222-4222-8222-222222222222';
 const seededRequest = Buffer.from('e2e-archive-request');
@@ -152,6 +157,7 @@ async function findExactBodyMatches(
   request: APIRequestContext,
   baselineIds: Set<string>,
   expectedBodies: Map<string, Buffer>,
+  completion?: CaptureCompletionExpectation,
 ): Promise<Map<CanonicalPath, RawCaptureRecord[]>> {
   const matches = emptyMatches();
   const records = await listAllRecords(request);
@@ -159,6 +165,11 @@ async function findExactBodyMatches(
     if (baselineIds.has(record.id)) continue;
     const expected = expectedBodies.get(record.path);
     if (!expected || !canonicalPaths.includes(record.path as CanonicalPath)) continue;
+    if (completion && (
+      !record.complete
+      || record.status !== completion.status
+      || record.stream !== completion.stream
+    )) continue;
     const response = await request.get(`/api/admin/raw-data/records/${record.id}/request?download=1`);
     if (!response.ok()) continue;
     if ((await response.body()).equals(expected)) {
@@ -176,10 +187,11 @@ async function pollForExactRecords(
   request: APIRequestContext,
   baselineIds: Set<string>,
   expectedBodies: Map<string, Buffer>,
+  completion: CaptureCompletionExpectation,
 ): Promise<Map<CanonicalPath, RawCaptureRecord[]>> {
   let matches = emptyMatches();
   await expect.poll(async () => {
-    matches = await findExactBodyMatches(request, baselineIds, expectedBodies);
+    matches = await findExactBodyMatches(request, baselineIds, expectedBodies, completion);
     return matchCounts(matches);
   }, { timeout: 7_500 }).toEqual([1, 1, 1, 1]);
   return matches;
@@ -190,12 +202,26 @@ async function findRecordsByExactRequest(
   baselineIds: Set<string>,
   path: string,
   expectedBody: Buffer,
+  completion: CaptureCompletionExpectation,
 ): Promise<RawCaptureRecord[]> {
   const matches: RawCaptureRecord[] = [];
   for (const record of await listAllRecords(request)) {
-    if (baselineIds.has(record.id) || record.path !== path) continue;
+    if (
+      baselineIds.has(record.id)
+      || record.path !== path
+      || !record.complete
+      || record.status !== completion.status
+      || record.stream !== completion.stream
+    ) continue;
     const response = await request.get(`/api/admin/raw-data/records/${record.id}/request?download=1`);
-    if (response.ok() && (await response.body()).equals(expectedBody)) matches.push(record);
+    if (!response.ok() || !(await response.body()).equals(expectedBody)) continue;
+    if (completion.responseBody !== undefined) {
+      const capturedResponse = await request.get(
+        `/api/admin/raw-data/records/${record.id}/response?download=1`,
+      );
+      if (!capturedResponse.ok() || !(await capturedResponse.body()).equals(completion.responseBody)) continue;
+    }
+    matches.push(record);
   }
   return matches;
 }
@@ -205,34 +231,14 @@ async function pollForExactRecord(
   baselineIds: Set<string>,
   path: string,
   expectedBody: Buffer,
+  completion: CaptureCompletionExpectation,
 ): Promise<RawCaptureRecord> {
   let matches: RawCaptureRecord[] = [];
   await expect.poll(async () => {
-    matches = await findRecordsByExactRequest(request, baselineIds, path, expectedBody);
+    matches = await findRecordsByExactRequest(request, baselineIds, path, expectedBody, completion);
     return matches.length;
   }, { timeout: 7_500 }).toBe(1);
   return matches[0]!;
-}
-
-async function extractTarGzip(bytes: Buffer): Promise<Map<string, Buffer>> {
-  const entries = new Map<string, Buffer>();
-  const extract = tar.extract();
-  extract.on('entry', (header, stream, next) => {
-    const chunks: Buffer[] = [];
-    stream.on('data', (chunk: unknown) => {
-      chunks.push(Buffer.from(chunk as Uint8Array));
-    });
-    stream.once('end', () => {
-      entries.set(header.name, Buffer.concat(chunks));
-      next();
-    });
-  });
-  await pipeline(
-    Readable.from([bytes]),
-    createGunzip(),
-    extract as unknown as Writable,
-  );
-  return entries;
 }
 
 test('manual switch controls exact capture across every model entrypoint', async ({ request }, testInfo) => {
@@ -250,7 +256,12 @@ test('manual switch controls exact capture across every model entrypoint', async
 
     await setCaptureEnabled(request, true);
     const enabledBodies = await sendAllFourRawRequests(request, fixture, `${testMarker}:enabled`);
-    const enabledMatches = await pollForExactRecords(request, baselineIds, enabledBodies);
+    const enabledMatches = await pollForExactRecords(
+      request,
+      baselineIds,
+      enabledBodies,
+      { status: 200, stream: false },
+    );
     for (const path of canonicalPaths) {
       expect(enabledMatches.get(path), `duplicate or missing capture for ${path}`).toHaveLength(1);
     }
@@ -297,6 +308,7 @@ test('records streamed SSE and invalid JSON without changing client responses', 
       baselineIds,
       '/v1/messages',
       streamedRequest,
+      { status: 200, stream: true, responseBody: streamedClientBytes },
     );
     expect(streamRecord.status).toBe(200);
     expect(streamRecord.stream).toBe(true);
@@ -311,6 +323,7 @@ test('records streamed SSE and invalid JSON without changing client responses', 
       baselineIds,
       '/v1/messages',
       invalidRequest,
+      { status: 400, stream: false, responseBody: invalidClientBytes },
     );
     expect(invalidRecord.status).toBe(400);
     expect(invalidRecord.stream).toBe(false);
@@ -370,7 +383,19 @@ test('archives the deterministic previous-day record and deletes only that day',
 
     const archiveDownload = await request.get(`/api/admin/raw-data/archives/${seededDay}`);
     expect(archiveDownload.ok(), await archiveDownload.text()).toBeTruthy();
-    const entries = await extractTarGzip(await archiveDownload.body());
+    const entries = await extractSeededRawCaptureTarGzip(await archiveDownload.body(), seededRecordId);
+    const expectedEntryNames = [
+      `${seededRecordId}/metadata.json`,
+      `${seededRecordId}/request.body`,
+      `${seededRecordId}/response.body`,
+    ];
+    expect([...entries.keys()].sort()).toEqual([...expectedEntryNames].sort());
+    const metadata = JSON.parse(entries.get(`${seededRecordId}/metadata.json`)!.toString('utf8')) as {
+      id: string;
+      day: string;
+      complete: boolean;
+    };
+    expect(metadata).toMatchObject({ id: seededRecordId, day: seededDay, complete: true });
     expect(entries.get(`${seededRecordId}/request.body`)).toEqual(seededRequest);
     expect(entries.get(`${seededRecordId}/response.body`)).toEqual(seededResponse);
 

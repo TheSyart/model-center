@@ -1,11 +1,22 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import Database from 'better-sqlite3';
 
 import { createRawCaptureStore } from '../lib/raw-capture/store.ts';
 
 const SEEDED_RECORD_ID = '22222222-2222-4222-8222-222222222222';
-const PREVIOUS_DAY_MS = 86_400_000;
+
+export function seedTimestampForPreviousUtcDay(startupTimestamp: number): number {
+  const startup = new Date(startupTimestamp);
+  if (!Number.isFinite(startup.getTime())) throw new Error('startup timestamp must be finite');
+  return Date.UTC(
+    startup.getUTCFullYear(),
+    startup.getUTCMonth(),
+    startup.getUTCDate() - 1,
+    12,
+  );
+}
 
 function writePlaywrightTypeScriptConfig(): void {
   const artifactDir = join(process.cwd(), '.next-playwright-data');
@@ -26,7 +37,7 @@ function writePlaywrightTypeScriptConfig(): void {
   }, null, 2)}\n`);
 }
 
-async function seedPreviousDayCapture(): Promise<void> {
+export async function seedPreviousDayCapture(): Promise<void> {
   const startupTimestamp = Date.now();
   const databaseDir = process.env.MODEL_CENTER_DB_DIR;
   if (!databaseDir) throw new Error('MODEL_CENTER_DB_DIR is required for the raw-capture E2E seed');
@@ -36,7 +47,7 @@ async function seedPreviousDayCapture(): Promise<void> {
   const database = new Database(join(databaseDir, 'model-center.db'));
   database.pragma('busy_timeout = 5000');
   try {
-    const seededTimestamp = startupTimestamp - PREVIOUS_DAY_MS;
+    const seededTimestamp = seedTimestampForPreviousUtcDay(startupTimestamp);
     const store = createRawCaptureStore(database, {
       rootDir: join(databaseDir, 'raw-captures'),
       now: () => seededTimestamp,
@@ -61,4 +72,6 @@ async function seedPreviousDayCapture(): Promise<void> {
   }
 }
 
-await seedPreviousDayCapture();
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  await seedPreviousDayCapture();
+}
