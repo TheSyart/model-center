@@ -13,7 +13,18 @@
 - **导入导出**：一键 JSON 导出（api_key 默认脱敏）/导入（冲突跳过）。
 - **安全**：管理后台无认证（**仅限本机/受信网络**）；网关多令牌（sha256 存储）；base_url 强制 https（localhost 例外）。
 
-> ⚠️ **无认证警告**：管理后台和所有 `/api/admin/*` 接口没有登录保护。请勿把本服务暴露到公网或不受信网络；如需公网访问，请在反向代理层加 Basic Auth / IP 白名单并启用 HTTPS。
+> ⚠️ **无认证警告**：管理后台和所有 `/api/admin/*` 接口没有内置登录保护。请勿把本服务直接暴露到公网或不受信网络；生产环境由 ServerOps 在 HTTPS 入口启用统一 Auth，绕过该入口访问上游仍然是不安全的。
+
+## ServerOps 管理
+
+仓库中的 [`.serverops/service.json`](.serverops/service.json) 是 ServerOps 使用的受限部署契约，不是 Model Center 的业务配置文件。它不保存 API Key、主密钥或环境变量，只声明以下固定流程：
+
+- 使用 npm 安装依赖并执行 `npm run build`。
+- 在 `/opt/model-center` 干净工作树上进行 fast-forward 原目录更新。
+- 通过 `model-center.service` 启动或重启服务。
+- 请求 `/` 完成上线后的 HTTP 健康检查。
+
+面板会先展示远端提交差异；构建、重启或健康检查失败时尝试回到旧提交。Model Center 的 `MASTER_KEY`、数据库和服务环境仍由服务器本地配置管理，不进入仓库或 ServerOps 清单。
 
 ## 快速开始
 
