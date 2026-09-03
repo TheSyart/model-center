@@ -10,6 +10,14 @@ CI 工作流 `serverops-image.yml` 只构建、发布 `linux/amd64` 私有 GHCR 
 
 镜像内部固定 3000，使用 Next standalone 并带齐 `.next/static` 和 `public`；`MODEL_CENTER_DB_DIR=/app/data`。迁移旧数据库时必须注入其原有 `MASTER_KEY`，不得在构建阶段提供或在每次启动时生成。
 
+## ServerOps 生产映射
+
+- 服务域名为 `model.shanchen.space`，仓库分支为 `main`；在 Ops“代码与部署”中手动更新，GitHub 推送不自动上线。
+- root 批准的数据目录 `/srv/serverops/data/model-center/data` 挂载到 `/app/data`，容器 UID/GID 为 `1000:1000`；环境文件为 root-only `/etc/serverops/apps/model-center.env`。
+- 宿主机 Nginx 转发到 `127.0.0.1:3000`。管理页面使用 Ops 统一 Auth；精确 `/v1` 和 `/v1/` 下的网关请求豁免浏览器 SSO，继续由业务 Bearer Token 校验。
+- 迁移和恢复需要保存整个 SQLite 数据目录（包括存在的 WAL/SHM）与原加密主密钥。除了健康状态，还需核对服务商、模型记录及密钥可解密性。
+- 旧 `/opt/model-center/data` 和 `model-center.service` 保留为迁移恢复材料，不与容器同时运行；旧目录不是最新数据副本。上线后回退代码默认保留当前数据库，恢复旧数据必须先评估后续写入损失。
+
 ## 检查和启动
 
 ```sh
