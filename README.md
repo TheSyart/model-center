@@ -17,14 +17,7 @@
 
 ## ServerOps 管理
 
-仓库中的 [`.serverops/service.json`](.serverops/service.json) 是 ServerOps 使用的受限部署契约，不是 Model Center 的业务配置文件。它不保存 API Key、主密钥或环境变量，只声明以下固定流程：
-
-- 使用 npm 安装依赖并执行 `npm run build`。
-- 在 `/opt/model-center` 干净工作树上进行 fast-forward 原目录更新。
-- 通过 `model-center.service` 启动或重启服务。
-- 请求 `/` 完成上线后的 HTTP 健康检查。
-
-面板会先展示远端提交差异；构建、重启或健康检查失败时尝试回到旧提交。Model Center 的 `MASTER_KEY`、数据库和服务环境仍由服务器本地配置管理，不进入仓库或 ServerOps 清单。
+仓库中的 [`.serverops/service.json`](.serverops/service.json) 使用 v2 镜像发布约定，声明 `web` 服务、3000 端口、`/` 健康检查和挂载到 `/app/data` 的逻辑 `data`。CI 从同一提交构建 Next standalone、`.next/static` 与完整 `public`，由 ServerOps 校验后按 digest 发布。主密钥和服务环境只在运行时注入。迁移必须沿用该数据库原有的 `MASTER_KEY`，不可重新生成；服务商、模型与定价数据不属于本次适配。
 
 ## 快速开始
 
@@ -43,13 +36,11 @@ npm run dev
 ### Docker
 
 ```bash
-docker build -t model-center .
-docker run -d --name model-center \
-  -e MASTER_KEY=$(openssl rand -hex 32) \
-  -p 3000:3000 \
-  -v model-center-data:/app/data \
-  model-center
+docker compose --env-file /absolute/path/compose.env -f compose.production.yml config
+docker compose --env-file /absolute/path/compose.env -f compose.production.yml up -d
 ```
+
+镜像、外部 env 和数据目录的配置见 [容器部署说明](docker/README.md)。
 
 ### 环境变量
 

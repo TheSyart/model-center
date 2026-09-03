@@ -1,0 +1,25 @@
+# Reference only. ServerOps renders production Compose from root-approved policy.
+services:
+  web:
+    image: ${MODEL_CENTER_IMAGE:?Set the private GHCR image with a verified digest}
+    platform: linux/amd64
+    user: "${MODEL_CENTER_UID:-1000}:${MODEL_CENTER_GID:-1000}"
+    init: true
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ports:
+      - "127.0.0.1:${MODEL_CENTER_PORT:-3000}:3000"
+    env_file:
+      - ${MODEL_CENTER_ENV_FILE:?Set an absolute path to the external runtime env file}
+    volumes:
+      - type: bind
+        source: ${MODEL_CENTER_DATA_DIR:?Set the externally managed data directory}
+        target: /app/data
+        bind:
+          create_host_path: false
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
