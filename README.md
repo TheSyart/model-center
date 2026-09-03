@@ -13,7 +13,11 @@
 - **导入导出**：一键 JSON 导出（api_key 默认脱敏）/导入（冲突跳过）。
 - **安全**：管理后台无认证（**仅限本机/受信网络**）；网关多令牌（sha256 存储）；base_url 强制 https（localhost 例外）。
 
-> ⚠️ **无认证警告**：管理后台和所有 `/api/admin/*` 接口没有登录保护。请勿把本服务暴露到公网或不受信网络；如需公网访问，请在反向代理层加 Basic Auth / IP 白名单并启用 HTTPS。
+> ⚠️ **无认证警告**：管理后台和所有 `/api/admin/*` 接口没有内置登录保护。请勿把本服务直接暴露到公网或不受信网络；生产环境由 ServerOps 在 HTTPS 入口启用统一 Auth，绕过该入口访问上游仍然是不安全的。
+
+## ServerOps 管理
+
+仓库中的 [`.serverops/service.json`](.serverops/service.json) 使用 v2 镜像发布约定，声明 `web` 服务、3000 端口、`/` 健康检查和挂载到 `/app/data` 的逻辑 `data`。CI 从同一提交构建 Next standalone、`.next/static` 与完整 `public`，由 ServerOps 校验后按 digest 发布。主密钥和服务环境只在运行时注入。迁移必须沿用该数据库原有的 `MASTER_KEY`，不可重新生成；服务商、模型与定价数据不属于本次适配。
 
 ## 快速开始
 
@@ -32,13 +36,11 @@ npm run dev
 ### Docker
 
 ```bash
-docker build -t model-center .
-docker run -d --name model-center \
-  -e MASTER_KEY=$(openssl rand -hex 32) \
-  -p 3000:3000 \
-  -v model-center-data:/app/data \
-  model-center
+docker compose --env-file /absolute/path/compose.env -f compose.production.yml config
+docker compose --env-file /absolute/path/compose.env -f compose.production.yml up -d
 ```
+
+镜像、外部 env 和数据目录的配置见 [容器部署说明](docker/README.md)。
 
 ### 环境变量
 
