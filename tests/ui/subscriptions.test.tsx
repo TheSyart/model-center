@@ -3,7 +3,6 @@ import { buildSubscriptionCatalog } from '@/lib/subscriptions/catalog';
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { render, screen, waitFor, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import ModelTable from '@/app/(admin)/providers/model-table';
 import SubscriptionsClient from '@/app/(admin)/subscriptions/subscriptions-client';
 const account = {
   id: 'a',
@@ -222,37 +221,64 @@ describe('subscription accounts UI', () => {
   });
 });
 
-it('subscription model management does not show API prices or pricing restoration', () => {
-  render(
-    <ModelTable
-      subscription
-      providerId="p"
-      models={[
-        {
-          id: 'm',
-          provider_id: 'p',
-          model_id: 'example-model',
-          alias: null,
-          display_name: null,
-          enabled: true,
-          input_price: 100,
-          output_price: 200,
-          cache_read_price: null,
-          cache_write_price: null,
-          pricing_source: 'auto',
-          pricing_source_ref: null,
-          pricing_synced_at: null,
-          context_window: null,
-          synced: false,
-        },
-      ]}
-      onChanged={() => {}}
-      onToast={() => {}}
-    />
+it('manages linked subscription models in a lazily loaded sheet', async () => {
+  const linked = {
+    ...account,
+    quotaError: null,
+    providerId: 'p',
+    providerSlug: 'oauth-codex-a',
+    modelCount: 2,
+    modelsSyncedAt: Date.now(),
+    modelsError: null,
+  };
+  let models = [
+    {
+      id: 'm1',
+      modelId: 'gemini-3.1-pro',
+      displayName: 'Gemini 3.1 Pro',
+      alias: null,
+      enabled: true,
+      synced: true,
+      reasoning: {
+        control: 'level',
+        variants: { low: 'gemini-3.1-pro-low', high: 'gemini-pro-agent' },
+        upstreamDefault: 'gemini-pro-agent',
+      },
+    },
+    { id: 'm2', modelId: 'manual-model', displayName: null, alias: null, enabled: true, synced: false, reasoning: null },
+  ];
+  const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+    if (url.endsWith('/a/models') && (!init?.method || init.method === 'GET'))
+      return Response.json({ models });
+    if (url.endsWith('/a/models/m1') && init?.method === 'PATCH') {
+      models = models.map((m) => (m.id === 'm1' ? { ...m, ...JSON.parse(String(init.body)) } : m));
+      return Response.json({ model: models[0] });
+    }
+    return Response.json({ accounts: [linked] });
+  });
+  vi.stubGlobal('fetch', fetcher);
+  render(<SubscriptionsClient catalog={buildSubscriptionCatalog(PROVIDER_PRESETS)} />);
+  const user = userEvent.setup();
+  expect(await screen.findByText('demo@example.com')).toBeInTheDocument();
+  expect(fetcher.mock.calls.some(([u]) => String(u).endsWith('/a/models'))).toBe(false);
+  await user.click(screen.getByRole('button', { name: '管理模型（2）' }));
+  expect(await screen.findByText('gemini-3.1-pro')).toBeInTheDocument();
+  expect(screen.getByText('low')).toBeInTheDocument();
+  expect(screen.getByText('high')).toHaveClass('font-semibold');
+  expect(screen.getByText('手动添加')).toBeInTheDocument();
+  await user.click(screen.getByRole('switch', { name: '启用 gemini-3.1-pro' }));
+  await waitFor(() =>
+    expect(
+      fetcher.mock.calls.some(
+        ([u, i]) => String(u).endsWith('/a/models/m1') && i?.method === 'PATCH' && JSON.parse(String(i.body)).enabled === false
+      )
+    ).toBe(true)
   );
-  expect(screen.queryByText('四档单价（$/M tokens）')).not.toBeInTheDocument();
-  expect(
-    screen.queryByRole('button', { name: '恢复定价' })
-  ).not.toBeInTheDocument();
-  expect(screen.getByText(/订阅成本未知/)).toBeInTheDocument();
+  await user.type(screen.getByLabelText('gemini-3.1-pro 的别名'), 'pro');
+  await user.click(screen.getByRole('button', { name: '保存别名' }));
+  await waitFor(() =>
+    expect(
+      fetcher.mock.calls.some(([, i]) => i?.method === 'PATCH' && JSON.parse(String(i.body)).alias === 'pro')
+    ).toBe(true)
+  );
 });

@@ -9,8 +9,8 @@
 3. Claude/Codex/Antigravity 授权后，复制浏览器地址栏的完整本地回调 URL。页面显示 localhost 无法访问不影响复制；本应用使用手动粘贴回调，无需开启回调监听端口。Antigravity 的回调为 `http://localhost:51121/oauth-callback`，必须粘贴含 code 和 state 的完整地址，不接受裸授权码。返回 Model Center，粘贴并完成登录。GitHub Copilot 不使用回调：在 GitHub 验证页（`https://github.com/login/device`，固定地址，不跟随上游返回值）输入页面显示的设备码并授权，本页按服务端节奏自动轮询完成登录，无需粘贴；该 GitHub 账号没有 Copilot 订阅时会明确提示。
 4. Antigravity 通过 `ANTIGRAVITY` 元数据发现托管项目，缺少项目时执行有界初始化，无需手工填写 Gemini CLI 的 Google Cloud 项目 ID。账号资格仍由 Google 决定。登录与额度查询分别处理，额度查询失败不会删除有效登录。
 5. 点击 **刷新额度** 或 **刷新全部额度** 获取厂商数据。页面每 60 秒读取本地快照；官方额度仅在登录后或手动刷新时查询，避免打开多个页面重复请求上游。
-6. 登录成功后，系统用该账号的凭据请求厂商官方模型接口（见下方“模型来源”），把返回的全部模型接入网关，并生成独立服务商 slug，例如 `oauth-codex-12345678`。之后点击 **同步模型** 可重新拉取：只新增模型，不删除已有模型，也不改变启停状态；上游不再列出的已同步模型只计数。拉取失败时保留登录并在账号卡片显示原因，可点击 **接入网关** 手动填写模型 ID（每行一个）。不会把公共 API 模型目录当作订阅权限证明，没有内置静态模型表，也不会消费推理额度来试探权限。
-7. 使用现有网关令牌调用 `slug/模型ID`，或到 **别名** 页面配置多个账号的有序回退。模型可在服务商的模型面板中启停、添加和删除。
+6. 登录成功后，系统用该账号的凭据请求厂商官方模型接口（见下方“模型来源”），把返回的全部模型接入网关，并生成独立服务商 slug，例如 `oauth-codex-12345678`。之后点击 **同步模型** 可重新拉取：只新增模型，不删除已有模型，也不改变启停状态；上游不再列出的已同步模型只计数。Antigravity 同一模型的不同思考档位会合并成一个基础模型（见下方“思考强度”）。拉取失败时保留登录并在账号卡片显示原因，可点击 **接入网关** 手动填写模型 ID（每行一个）。不会把公共 API 模型目录当作订阅权限证明，没有内置静态模型表，也不会消费推理额度来试探权限。
+7. 使用现有网关令牌调用 `slug/模型ID`，或到 **别名** 页面配置多个账号的有序回退。模型在账号卡片的 **管理模型** 中启停、修改别名、删除或添加。订阅账号生成的服务商只在订阅页管理，不再出现在服务商页；别名、日志和看板仍然可以使用它们，调用不受影响。删除的模型如果官方仍在列出，下次同步会重新加入，想长期屏蔽请停用。
 
 调用示例（替换三个占位值）：
 
@@ -40,6 +40,29 @@ Copilot 服务商同时建立 Chat（默认）与 Responses 两个协议端点�
 
 同优先级时，裸模型名路由改为优先匹配先创建的服务商，所以自动同步进来的订阅模型不会抢占已有 API Key 服务商的同名模型。需要让订阅账号优先时，调整服务商优先级或使用别名。
 
+## 思考强度
+
+网关对所有服务商统一处理思考强度。客户端用自己协议的原生参数表达：OpenAI Chat 用 `reasoning_effort`，Responses 用 `reasoning.effort`，Anthropic 用 `thinking`（`disabled`、`enabled` 加 `budget_tokens`、`adaptive` 加 `output_config.effort`）。网关先把它规范化，再按目标协议改写，跨协议转换不再丢失强度。请求没有带强度时，网关不干预，沿用上游默认。
+
+档位为 none、minimal、low、medium、high、xhigh、max。档位与预算互换关系为 minimal 512、low 1024、medium 8192、high 24576、xhigh 32768、max 128000，与 CLIProxyAPI 一致。
+
+| 上游协议 | 写法 |
+|---|---|
+| OpenAI Chat | `reasoning_effort` |
+| Responses（含 Codex） | `reasoning.effort` |
+| Anthropic | 4.6 及以后：`thinking: adaptive` 加 `output_config.effort`；Fable、Opus 4.7 及以后、Sonnet 5 同时去掉 temperature/top_p（这些模型会返回 400）。Haiku 4.5 及更早：`enabled` 加 `budget_tokens` |
+| Gemini | Gemini 3：`thinkingConfig.thinkingLevel`；Gemini 2.x 及 Antigravity 上的 Claude：`thinkingBudget`；两者从不同时发送 |
+
+订阅账号还会用到同步时记录的目录元数据：
+
+- **Codex、Copilot：** 记录目录声明的档位（`supported_reasoning_levels`、`capabilities.supports.reasoning_effort`）。请求档位钳制到支持范围内：取最近的档位，距离相同时取较低一档。Copilot 请求带强度、且模型同时支持 `/responses` 时，优先走 `/responses`；`/chat/completions` 只在目录声明了档位时才发送 `reasoning_effort`。
+- **Antigravity：**
+  - 目录用不同 ID 表示强度，例如 `gemini-3.1-pro-low`、`gemini-pro-agent`、`*-flash-high`、`claude-opus-4-6-thinking`、`gpt-oss-120b-medium`。同步时把它们合并成基础模型：`gemini-3.1-pro`、`gemini-3.6-flash`、`claude-opus-4-6`、`gpt-oss-120b`。
+  - 请求带强度时，选对应档位的 ID；没有完全匹配的档位，就取最近的 ID 并附加 `thinkingLevel`。未带强度时用厂商默认档，Gemini 为 high。
+  - 旧 ID 通过 `slug/旧ID`、裸模型名或别名仍可调用，自动换算成基础模型加对应强度，但不再出现在模型列表和 `/v1/models` 中。
+  - 已部署实例需要点击一次 **同步模型** 才会完成合并，旧行上的别名会迁移到基础模型。
+- **Claude Code：** 目录没有强度字段，按上表的模型族规则转换。
+
 ## 额度、账号与故障
 
 - Antigravity 使用 `retrieveUserQuotaSummary`，保留 Gemini、Claude/GPT 等上游额度分组及 5 小时/周窗口，分组之间不相加。
@@ -56,7 +79,8 @@ Copilot 服务商同时建立 Chat（默认）与 Responses 两个协议端点�
 核心文件：
 
 - `lib/subscriptions/oauth.ts`：Claude/Codex PKCE、GitHub Copilot 设备码与会话令牌交换、所有客户端的 state、代码交换、刷新、Google 项目初始化和控制面目标白名单。
-- `models.ts`：四家账号级模型列表的请求、过滤与端点映射。`store.ts` 的 `syncGatewayModels` 负责只增不删的合并，以及 Copilot 双端点目录。
+- `lib/gateway/reasoning.ts`：思考强度的规范化、档位与预算互换、钳制，以及按目录选择上游 ID（`planReasoning`）。`lib/protocols/reasoning-emit.ts`：写入各协议的强度字段，含 Claude 模型族规则表。
+- `models.ts`：四家账号级模型列表的请求、过滤与端点映射，以及 Antigravity 变体合并（`foldAntigravityVariants`）。`store.ts` 的 `syncGatewayModels` 负责只增不删的合并，以及 Copilot 双端点目录。
 - `quota.ts`：现有四家及旧 Gemini 额度解析；`store.ts` / `lifecycle.ts`：加密、会话、版本、刷新和快照。
 - `gateway.ts`：固定官方 URL、OAuth 请求头、Codex SSE 收集、Antigravity 包装、Copilot 按所选端点协议发往 `/chat/completions` 或 `/responses`，以及 Gemini 兼容。
 - `app/api/admin/subscriptions/[[...path]]/route.ts`：管理 API；`app/(admin)/subscriptions/`：交互界面。
@@ -76,6 +100,26 @@ Copilot 服务商同时建立 Chat（默认）与 Responses 两个协议端点�
 - CLIProxyAPI Gemini 删除前版本 **MIT**，SHA [`dd49a5200381f1849e489ed37f201c3741709634`](https://github.com/router-for-me/CLIProxyAPI/tree/dd49a5200381f1849e489ed37f201c3741709634)：历史 Gemini CLI 协议。当前 CLIProxyAPI 已删除 Gemini CLI OAuth，不能仅靠最新版本宣称支持。
 - 管理界面 **MIT**，SHA [`c98751140127a39985df565b827eec0c20d131d3`](https://github.com/router-for-me/Cli-Proxy-API-Management-Center/tree/c98751140127a39985df565b827eec0c20d131d3)：Claude/Codex 额度字段及 Antigravity CLI 分组额度协议。
 - Google Gemini CLI **Apache-2.0**，SHA [`9c1b0a610534d6f8120964cf2672c07807d8fc90`](https://github.com/google-gemini/gemini-cli/tree/9c1b0a610534d6f8120964cf2672c07807d8fc90)：旧 Gemini 兼容实现的授权码粘贴、项目发现、额度接口。完整证据见 `superpowers/specs/2026-09-14-subscription-accounts-design.md`。
+
+### 验证记录（2026-09-15，思考强度参数化与订阅模型管理）
+
+上游 HTTP 全部为模拟响应，**未使用真实账号**。
+
+- **`npm run test:core`**：359 项通过（此前 343 项）。新增覆盖：
+  - 强度的提取、档位与预算互换、钳制、规划，以及各协议写法（`reasoning.test.ts`）。
+  - Antigravity 变体合并，Codex、Copilot 的档位元数据（`subscription-models.test.ts`）。
+  - 同步时合并旧变体行，模型管理的归属、字段和别名校验（`subscription-store.test.ts`）。
+  - `reasoning_json` 迁移、端点偏好协议。
+- **`npm run test:ui`**：11 个文件 82 项通过。覆盖：
+  - Antigravity 按强度选变体，以及用旧名称调用。
+  - Codex 档位钳制。
+  - Copilot 优先走 `/responses`，并去掉不受支持的 chat 强度字段。
+  - Claude：Responses 请求转换为 adaptive 加 effort，并带上 effort beta。
+  - 订阅模型管理接口，服务商列表的 `auth_kind=api_key` 过滤。
+  - 协议转换输出强度；Responses 推理项与 Gemini thought 片段的修复。
+  - 订阅页模型 Sheet 的懒加载、启停与别名。
+- **`npm run typecheck`、`npm run build`、`git diff --check`**：通过；CC Switch 生成文件没有改动。
+- **`npx playwright test tests/e2e/subscriptions.spec.ts`**（注入 Antigravity 测试 client）：三种视口共 9 项通过。模型 Sheet 暂时没有浏览器 e2e。
 
 ### 验证记录（2026-09-14，Copilot 登录与模型自动接入）
 
@@ -107,4 +151,4 @@ Copilot 服务商同时建立 Chat（默认）与 Responses 两个协议端点�
 - `npm run typecheck`、`npm run build`、`git diff --check`。
 - CC Switch 固定 SHA `9a596158ca926e74b56243c08af67d9dd13fc27c` 的 `--check`：540 原始预设、255 变体、82 逻辑服务商、4 排除、192 定价、99 图标；覆盖账本 included 255 + merged 281 + excluded 4 = 540。生成文件无修改。
 
-待真实账号验收：四家各完成一次登录、额度读取、模型自动拉取与接入、JSON 调用与 SSE 调用；重启后确认凭据保留及自然到期刷新。另需确认：Copilot 个人版 `endpoints.api` 的实际值、`/models` 的实际字段、`/responses` 的 JSON/SSE 返回；Claude OAuth 令牌能否调用 `/v1/models`；Codex `/models` 的响应大小，以及 `client_version` 对可见模型的影响；Antigravity `fetchAvailableModels` 对 `project` 的要求。尤其 Claude 对官方客户端身份和传输实现的校验、Google 项目和套餐权限仍需真实响应证明。未实现 CLIProxyAPI 的全部 TLS 指纹、WebSocket、管理面或所有私有客户端扩展，也不宣称与其完全等价。
+待真实账号验收：四家各完成一次登录、额度读取、模型自动拉取与接入、JSON 调用与 SSE 调用；重启后确认凭据保留及自然到期刷新。另需确认：Copilot 个人版 `endpoints.api` 的实际值、`/models` 的实际字段、`/responses` 的 JSON/SSE 返回；Claude OAuth 令牌能否调用 `/v1/models`；Codex `/models` 的响应大小，以及 `client_version` 对可见模型的影响；Antigravity `fetchAvailableModels` 对 `project` 的要求。另需确认：Antigravity 的 `-low`/`-high` 变体是否只有强度不同、`thinkingLevel` 在变体上是否生效、当前真实存在哪些 ID；Copilot `/chat/completions` 是否接受 `reasoning_effort`。Claude 模型族规则表需要随新模型发布维护。尤其 Claude 对官方客户端身份和传输实现的校验、Google 项目和套餐权限仍需真实响应证明。未实现 CLIProxyAPI 的全部 TLS 指纹、WebSocket、管理面或所有私有客户端扩展，也不宣称与其完全等价。

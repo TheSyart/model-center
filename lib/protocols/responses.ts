@@ -7,6 +7,8 @@
  * 出口侧的 output_item item_id（fc_*）由网关生成并在事件序列内保持一致。
  */
 import { encodeSSE, generatorToStream, observeSSEStream, parseSSE, deferred } from './sse';
+import { applyResponsesReasoning } from './reasoning-emit';
+import type { ReasoningIntent } from '@/lib/gateway/reasoning';
 import type { UsageInfo } from '@/lib/gateway/logger';
 import { normalizeResponsesUsage, toPublicUsage } from '@/lib/services/usage-metrics';
 
@@ -62,6 +64,9 @@ export function responsesRequestToIR(body: Json): Json {
       } else if (type === 'function_call_output') {
         flushAssistant();
         messages.push({ role: 'tool', tool_call_id: item.call_id, content: typeof item.output === 'string' ? item.output : JSON.stringify(item.output ?? '') });
+      } else if (type === 'reasoning') {
+        // 推理项只对产生它的上游有效，跨协议没有等价物；丢弃，而不是变成一条空的 user 消息
+        continue;
       } else {
         // message item（type: 'message' 或省略 type 仅带 role）
         flushAssistant();
@@ -97,7 +102,7 @@ export function responsesRequestToIR(body: Json): Json {
 
 // ---------- 请求：IR → Responses（上游适配器用） ----------
 
-export function irRequestToResponses(ir: Json, modelId: string): Json {
+export function irRequestToResponses(ir: Json, modelId: string, reasoning?: ReasoningIntent): Json {
   const instructions: string[] = [];
   const input: Json[] = [];
 
@@ -154,6 +159,7 @@ export function irRequestToResponses(ir: Json, modelId: string): Json {
     if (tc && typeof tc === 'object' && tc.type === 'function') out.tool_choice = { type: 'function', name: tc.function?.name };
     else out.tool_choice = tc;
   }
+  if (reasoning) applyResponsesReasoning(out, reasoning);
   return out;
 }
 

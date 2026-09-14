@@ -76,6 +76,8 @@ export const models = sqliteTable(
     pricingSyncedAt: integer('pricing_synced_at'),
     contextWindow: integer('context_window'),
     synced: integer('synced').notNull().default(0),
+    // JSON ModelReasoning (lib/gateway/reasoning.ts): levels, variants, legacy names
+    reasoningJson: text('reasoning_json'),
   },
   (t) => [uniqueIndex('uq_models_provider_model').on(t.providerId, t.modelId)],
 );

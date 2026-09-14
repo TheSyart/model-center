@@ -1,5 +1,6 @@
 import { observeOpenAIUsageFromSSE } from '@/lib/protocols/anthropic';
 import { normalizeOpenAIUsage } from '@/lib/services/usage-metrics';
+import { applyChatReasoning } from '@/lib/protocols/reasoning-emit';
 import type { AdapterContext, AdapterRequest, ProtocolAdapter, TranslatedStream } from './types';
 
 type Json = Record<string, any>;
@@ -12,13 +13,15 @@ type Json = Record<string, any>;
 export const openaiAdapter: ProtocolAdapter = {
   protocol: 'openai',
   buildRequest(ir: Json, ctx: AdapterContext): AdapterRequest {
+    const body: Json = { ...ir, model: ctx.modelId };
+    if (ctx.reasoning) applyChatReasoning(body, ctx.reasoning);
     return {
       url: `${ctx.provider.baseUrl.replace(/\/+$/, '')}/chat/completions`,
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${ctx.apiKey}`,
       },
-      body: { ...ir, model: ctx.modelId },
+      body,
     };
   },
   convertResponse(nativeJson: Json): Json {

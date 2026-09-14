@@ -85,3 +85,18 @@ test('split complete catalogs route every entry protocol to an endpoint the mode
   assert.equal(selectProviderEndpoint(endpoints, 'anthropic', 'manual', observations)?.id, 'chat');
   assert.equal(selectProviderEndpoint(endpoints, 'openai', 'unlisted', observations), undefined);
 });
+
+test('a preferred protocol wins only when its complete catalog confirms the model', () => {
+  const endpoints = [
+    endpoint({ id: 'chat', protocol: 'openai', isDefault: true, modelCatalogComplete: true }),
+    endpoint({ id: 'responses', protocol: 'openai-responses', modelCatalogComplete: true }),
+  ];
+  const observations = [
+    { endpointId: 'chat', modelId: 'both' },
+    { endpointId: 'responses', modelId: 'both' },
+    { endpointId: 'chat', modelId: 'chat-only' },
+  ];
+  assert.equal(selectProviderEndpoint(endpoints, 'openai', 'both', observations, 'openai-responses')?.id, 'responses');
+  assert.equal(selectProviderEndpoint(endpoints, 'openai', 'chat-only', observations, 'openai-responses')?.id, 'chat');
+  assert.equal(selectProviderEndpoint(endpoints, 'openai', 'both', observations)?.id, 'chat');
+});

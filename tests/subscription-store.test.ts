@@ -28,8 +28,8 @@ function setup() {
   db.exec(`CREATE TABLE providers(id TEXT PRIMARY KEY,slug TEXT UNIQUE,name TEXT,protocol TEXT,base_url TEXT,api_key_enc TEXT,enabled INTEGER,priority INTEGER,created_at INTEGER,updated_at INTEGER);
   CREATE TABLE provider_endpoints(id TEXT PRIMARY KEY,provider_id TEXT REFERENCES providers(id) ON DELETE CASCADE,protocol TEXT,base_url TEXT,enabled INTEGER,is_default INTEGER,model_catalog_complete INTEGER NOT NULL DEFAULT 0,models_observed_at INTEGER,created_at INTEGER,updated_at INTEGER,UNIQUE(provider_id,protocol));
   CREATE TABLE provider_endpoint_models(endpoint_id TEXT NOT NULL REFERENCES provider_endpoints(id) ON DELETE CASCADE,model_id TEXT NOT NULL,source TEXT NOT NULL,observed_at INTEGER,PRIMARY KEY(endpoint_id,model_id));
-  CREATE TABLE models(id TEXT PRIMARY KEY,provider_id TEXT REFERENCES providers(id) ON DELETE CASCADE,model_id TEXT,display_name TEXT,enabled INTEGER,synced INTEGER NOT NULL DEFAULT 0,pricing_source TEXT,UNIQUE(provider_id,model_id));
-  CREATE TABLE route_aliases(id TEXT PRIMARY KEY,targets TEXT);`);
+  CREATE TABLE models(id TEXT PRIMARY KEY,provider_id TEXT REFERENCES providers(id) ON DELETE CASCADE,model_id TEXT,alias TEXT,display_name TEXT,enabled INTEGER,synced INTEGER NOT NULL DEFAULT 0,pricing_source TEXT,reasoning_json TEXT,UNIQUE(provider_id,model_id));
+  CREATE TABLE route_aliases(id TEXT PRIMARY KEY,targets TEXT,alias TEXT);`);
   migrateSubscriptionSchema(db);
   let now = 1000;
   const store = createSubscriptionStore(db, {
@@ -150,7 +150,7 @@ test('gateway link adds new provider with explicit models, protects account dele
     ).enabled,
     0
   );
-  db.prepare('INSERT INTO route_aliases VALUES(?,?)').run(
+  db.prepare('INSERT INTO route_aliases(id,targets) VALUES(?,?)').run(
     'alias',
     JSON.stringify([{ provider_id: link.providerId, model_id: 'model-a' }])
   );
@@ -588,5 +588,102 @@ test('model sync retries one 401 after refresh and records sanitized failures wi
   assert.ok(!JSON.stringify(store.list()).includes('secret-token'));
   assert.equal(store.get(a.id)?.authStatus, 'ready');
   assert.equal(store.get(a.id)?.modelCount, 1);
+  db.close();
+});
+
+test('sync folds legacy variant rows into the base model, keeping aliases, flags and manual rows', () => {
+  const { store, db } = setup();
+  const a = store.saveAccount('antigravity', { ...credential, projectId: 'managed' });
+  store.syncGatewayModels(
+    a.id,
+    discovery([
+      { id: 'gemini-3.1-pro-low', displayName: null, endpoints: ['gemini'] },
+      { id: 'gemini-pro-agent', displayName: null, endpoints: ['gemini'] },
+    ])
+  );
+  const providerId = store.get(a.id)!.providerId!;
+  db.prepare("UPDATE models SET alias='pro-low' WHERE model_id='gemini-3.1-pro-low'").run();
+  store.connectGateway(a.id, ['gemini-3.1-pro-custom']);
+  const reasoning = {
+    control: 'level' as const,
+    upstreamDefault: 'gemini-pro-agent',
+    variants: { low: 'gemini-3.1-pro-low', high: 'gemini-pro-agent' },
+    legacyIds: ['gemini-3.1-pro-low', 'gemini-pro-agent', 'gemini-3.1-pro-custom'],
+  };
+  const result = store.syncGatewayModels(
+    a.id,
+    discovery([{ id: 'gemini-3.1-pro', displayName: 'Gemini 3.1 Pro', endpoints: ['gemini'], reasoning }])
+  );
+  assert.deepEqual({ added: result.added, folded: result.folded, missing: result.missing }, { added: 1, folded: 2, missing: 0 });
+  assert.deepEqual(
+    db.prepare('SELECT model_id,alias,enabled,synced FROM models WHERE provider_id=? ORDER BY model_id').all(providerId),
+    [
+      { model_id: 'gemini-3.1-pro', alias: 'pro-low', enabled: 1, synced: 1 },
+      { model_id: 'gemini-3.1-pro-custom', alias: null, enabled: 1, synced: 0 },
+    ]
+  );
+  assert.deepEqual(store.listModels(a.id)[0].reasoning, reasoning);
+  db.prepare("UPDATE models SET enabled=0 WHERE model_id='gemini-3.1-pro'").run();
+  store.syncGatewayModels(
+    a.id,
+    discovery([
+      { id: 'gemini-3.1-pro', displayName: null, endpoints: ['gemini'], reasoning: { ...reasoning, variants: { low: 'gemini-3.1-pro-low' } } },
+    ])
+  );
+  const base = store.listModels(a.id)[0];
+  assert.equal(base.enabled, false);
+  assert.equal(base.displayName, 'Gemini 3.1 Pro');
+  assert.deepEqual(base.reasoning?.variants, { low: 'gemini-3.1-pro-low' });
+  db.close();
+});
+
+test('a base model that only replaces disabled variants starts disabled', () => {
+  const { store, db } = setup();
+  const a = store.saveAccount('antigravity', { ...credential, projectId: 'managed' });
+  store.syncGatewayModels(a.id, discovery([{ id: 'gemini-3.6-flash-high', displayName: null, endpoints: ['gemini'] }]));
+  db.prepare("UPDATE models SET enabled=0 WHERE model_id='gemini-3.6-flash-high'").run();
+  store.syncGatewayModels(
+    a.id,
+    discovery([
+      {
+        id: 'gemini-3.6-flash',
+        displayName: null,
+        endpoints: ['gemini'],
+        reasoning: { control: 'level', upstreamDefault: 'gemini-3.6-flash-high', variants: { high: 'gemini-3.6-flash-high' }, legacyIds: ['gemini-3.6-flash-high'] },
+      },
+    ])
+  );
+  assert.deepEqual(store.listModels(a.id).map((m) => [m.modelId, m.enabled]), [['gemini-3.6-flash', false]]);
+  db.close();
+});
+
+test('subscription model management enforces ownership, field whitelist and alias uniqueness', () => {
+  const { store, db } = setup();
+  const a = store.saveAccount('codex', credential);
+  const b = store.saveAccount('codex', { ...credential, accountKey: 'account-b' });
+  assert.deepEqual(store.listModels(a.id), []);
+  store.connectGateway(a.id, ['gpt-5.5', 'gpt-5.4']);
+  store.connectGateway(b.id, ['gpt-5.5']);
+  const [first, second] = store.listModels(a.id);
+  const other = store.listModels(b.id)[0];
+  assert.equal(first.modelId, 'gpt-5.4');
+  assert.throws(() => store.updateModel(a.id, other.id, { enabled: false }), /不存在/);
+  assert.throws(() => store.updateModel(a.id, first.id, { input_price: 1 }), /只能修改/);
+  assert.throws(() => store.updateModel(a.id, first.id, { alias: '../bad' }), /别名格式/);
+  const updated = store.updateModel(a.id, first.id, { enabled: false, alias: 'fast', displayName: ' GPT 5.4 ' });
+  assert.deepEqual(
+    { enabled: updated.enabled, alias: updated.alias, displayName: updated.displayName },
+    { enabled: false, alias: 'fast', displayName: 'GPT 5.4' }
+  );
+  assert.throws(
+    () => store.updateModel(a.id, second.id, { alias: 'fast' }),
+    (error: unknown) => (error as { status?: number }).status === 409
+  );
+  db.prepare('INSERT INTO route_aliases(id,targets,alias) VALUES(?,?,?)').run('route', '[]', 'taken');
+  assert.throws(() => store.updateModel(a.id, second.id, { alias: 'taken' }), /占用/);
+  assert.equal(store.updateModel(a.id, first.id, { alias: null }).alias, null);
+  store.deleteModel(a.id, second.id);
+  assert.deepEqual(store.listModels(a.id).map((m) => m.modelId), ['gpt-5.4']);
+  assert.throws(() => store.deleteModel(a.id, other.id), /不存在/);
   db.close();
 });

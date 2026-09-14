@@ -21,7 +21,7 @@ export const anthropicAdapter: ProtocolAdapter = {
         'x-api-key': ctx.apiKey,
         'anthropic-version': ANTHROPIC_VERSION,
       },
-      body: irRequestToAnthropic(ir, ctx.modelId),
+      body: irRequestToAnthropic(ir, ctx.modelId, ctx.reasoning),
     };
   },
   convertResponse(nativeJson: Json, ctx: AdapterContext): Json {

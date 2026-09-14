@@ -1,12 +1,17 @@
-import { and, asc, desc, eq, or } from 'drizzle-orm';
+import { and, asc, desc, eq, like, or } from 'drizzle-orm';
 import { db, schema } from '@/lib/db';
 import type { ProviderRow } from '@/lib/services/provider';
 import { GatewayError } from './errors';
+import { parseModelReasoning, variantEffort, type ModelReasoning, type ReasoningEffort } from './reasoning';
 
 export interface RouteTarget {
   provider: ProviderRow;
-  /** 上游真实模型名 */
+  /** 上游真实模型名（目录中的基础模型名；实际发送的变体由思考强度规划决定） */
   modelId: string;
+  /** 目录记录的思考强度元数据（未登记或未同步时为空） */
+  reasoning?: ModelReasoning | null;
+  /** 旧变体名隐含的思考强度，例如 gemini-3.1-pro-low → low */
+  reasoningHint?: ReasoningEffort;
 }
 
 export interface ResolvedRoute {
@@ -39,10 +44,32 @@ function getProviderById(id: string): ProviderRow | undefined {
 }
 
 /**
+ * 旧变体名兼容：同步时被折叠进基础模型的名称记录在 reasoning_json.legacyIds。
+ * LIKE 只做预筛（`_`/`%` 可能误匹配），命中后解析 JSON 精确校验。
+ */
+function findVariantOwners(variantId: string, providerId?: string) {
+  const conditions = [like(schema.models.reasoningJson, `%${JSON.stringify(variantId)}%`)];
+  if (providerId) conditions.push(eq(schema.models.providerId, providerId));
+  return db
+    .select({ model: schema.models, provider: schema.providers })
+    .from(schema.models)
+    .innerJoin(schema.providers, eq(schema.models.providerId, schema.providers.id))
+    .where(and(...conditions))
+    .orderBy(desc(schema.providers.priority), asc(schema.providers.createdAt))
+    .all()
+    .flatMap((row) => {
+      const meta = parseModelReasoning(row.model.reasoningJson);
+      if (!meta?.legacyIds?.includes(variantId)) return [];
+      return [{ ...row, meta, hint: variantEffort(meta, variantId) }];
+    });
+}
+
+/**
  * 模型解析（文档 §5.1）：model 字段三种形式按序解析——
  *  1. route_aliases 别名：返回 targets 中全部"服务商启用且模型未禁用"的目标（按序，供 failover 降级）；
  *  2. 'provider-slug/model' 显式格式：模型不必登记在 models 表（已登记且禁用则报错）；
  *  3. 全局裸模型名：匹配 models.model_id 或 models.alias，多服务商命中取 priority 最高。
+ * 三种形式都接受已被折叠的旧变体名，解析为基础模型并携带隐含的思考强度。
  * 解析失败抛 GatewayError（404，OpenAI 错误格式由入口统一输出）。
  */
 export function resolveModel(input: string): ResolvedRoute {
@@ -67,7 +94,15 @@ export function resolveModel(input: string): ResolvedRoute {
       if (!provider || provider.enabled !== 1) continue;
       const m = findModelRow(provider.id, t.model_id);
       if (m && m.enabled !== 1) continue;
-      usable.push({ provider, modelId: t.model_id });
+      if (!m) {
+        const owner = findVariantOwners(t.model_id, provider.id)[0];
+        if (owner) {
+          if (owner.model.enabled === 1)
+            usable.push({ provider, modelId: owner.model.modelId, reasoning: owner.meta, reasoningHint: owner.hint });
+          continue;
+        }
+      }
+      usable.push({ provider, modelId: t.model_id, reasoning: parseModelReasoning(m?.reasoningJson) });
     }
     if (usable.length === 0) {
       throw notFound(`路由别名 "${input}" 没有可用目标（服务商或模型已禁用）`);
@@ -91,7 +126,22 @@ export function resolveModel(input: string): ResolvedRoute {
     if (m && m.enabled !== 1) {
       throw notFound(`模型 "${modelId}" 已禁用`);
     }
-    return { targets: [{ provider, modelId }], alias: null, via: 'explicit' };
+    if (!m) {
+      const owner = findVariantOwners(modelId, provider.id)[0];
+      if (owner) {
+        if (owner.model.enabled !== 1) throw notFound(`模型 "${owner.model.modelId}" 已禁用`);
+        return {
+          targets: [{ provider, modelId: owner.model.modelId, reasoning: owner.meta, reasoningHint: owner.hint }],
+          alias: null,
+          via: 'explicit',
+        };
+      }
+    }
+    return {
+      targets: [{ provider, modelId, reasoning: parseModelReasoning(m?.reasoningJson) }],
+      alias: null,
+      via: 'explicit',
+    };
   }
 
   // 3. 裸模型名：models.model_id 或 models.alias 全局匹配，取启用服务商中 priority 最高者；
@@ -110,11 +160,19 @@ export function resolveModel(input: string): ResolvedRoute {
     .all();
   const usable = rows.filter((r) => r.model.enabled === 1);
   if (usable.length === 0) {
+    const owner = findVariantOwners(input).find((o) => o.provider.enabled === 1 && o.model.enabled === 1);
+    if (owner) {
+      return {
+        targets: [{ provider: owner.provider, modelId: owner.model.modelId, reasoning: owner.meta, reasoningHint: owner.hint }],
+        alias: null,
+        via: 'bare',
+      };
+    }
     throw notFound(`模型 "${input}" 未找到（可用路由别名、provider/model 显式格式，或先在「模型」页登记）`);
   }
   const hit = usable[0];
   return {
-    targets: [{ provider: hit.provider, modelId: hit.model.modelId }],
+    targets: [{ provider: hit.provider, modelId: hit.model.modelId, reasoning: parseModelReasoning(hit.model.reasoningJson) }],
     alias: hit.model.alias === input ? input : null,
     via: 'bare',
   };

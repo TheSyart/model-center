@@ -6,6 +6,8 @@
  * 字段尽力映射：temperature / top_p / stop↔stop_sequences / max_tokens / tools / tool_choice / 图片。
  */
 import { encodeSSE, generatorToStream, observeSSEStream, parseSSE, deferred } from './sse';
+import { applyAnthropicReasoning, stripRejectedClaudeSampling } from './reasoning-emit';
+import type { ReasoningIntent } from '@/lib/gateway/reasoning';
 import type { UsageInfo } from '@/lib/gateway/logger';
 import { normalizeAnthropicUsage, normalizeOpenAIUsage, toPublicUsage } from '@/lib/services/usage-metrics';
 
@@ -91,7 +93,7 @@ export function irStopToAnthropic(finish: string | null | undefined): string {
 
 // ---------- 请求：IR → Anthropic（上游适配器用） ----------
 
-export function irRequestToAnthropic(ir: Json, modelId: string): Json {
+export function irRequestToAnthropic(ir: Json, modelId: string, reasoning?: ReasoningIntent): Json {
   const systemParts: string[] = [];
   const merged: Json[] = [];
   const push = (role: string, blocks: Json[]) => {
@@ -165,6 +167,8 @@ export function irRequestToAnthropic(ir: Json, modelId: string): Json {
       out.tool_choice = { type: 'tool', name: tc.function?.name };
     } else out.tool_choice = { type: 'auto' };
   }
+  stripRejectedClaudeSampling(out, modelId);
+  if (reasoning) applyAnthropicReasoning(out, reasoning, modelId);
   return out;
 }
 

@@ -1,6 +1,7 @@
 import type { ProviderRow } from '@/lib/services/provider';
 import type { Protocol } from '@/lib/services/provider';
 import type { UsageInfo } from '@/lib/gateway/logger';
+import type { ReasoningIntent } from '@/lib/gateway/reasoning';
 
 type Json = Record<string, any>;
 
@@ -20,6 +21,10 @@ export interface AdapterContext {
   stream: boolean;
   /** 客户端 stream_options.include_usage，流式末尾是否补 usage chunk */
   includeUsage: boolean;
+  /** 规范化后的思考强度（转换路径据此写入上游协议字段） */
+  reasoning?: ReasoningIntent;
+  /** 目录记录的强度下发方式（level/budget/none），未知时为空 */
+  reasoningControl?: 'level' | 'budget' | 'none';
 }
 
 export interface TranslatedStream {

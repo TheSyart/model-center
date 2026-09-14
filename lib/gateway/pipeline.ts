@@ -12,6 +12,7 @@ import { writeRequestLog } from './logger';
 import type { UsageInfo } from './logger';
 import { observeReadableStream } from './stream-observer';
 import { resolveModel } from './router';
+import { extractReasoning, planReasoning } from './reasoning';
 import type { RouteTarget } from './router';
 import { buildAttemptForEndpoint } from './attempt-builder';
 import { selectProviderEndpoint } from './provider-endpoint-selector';
@@ -190,6 +191,8 @@ export async function runGatewayPipeline(input: PipelineInput): Promise<Response
     const route = resolveModel(requestedModel);
     logBase = { ...logBase, providerId: route.targets[0].provider.id, modelId: route.targets[0].modelId, alias: route.alias };
     activeLogBase = logBase;
+    // 客户端协议里的思考强度，统一规范化；未携带时不干预，沿用上游默认
+    const requestedReasoning = extractReasoning(entry, rawBody);
 
     // 1.4 令牌限额检查（按 request_logs.cost 聚合；未配单价的调用 cost 为 null 不计入）
     if (input.token) {
@@ -225,11 +228,17 @@ export async function runGatewayPipeline(input: PipelineInput): Promise<Response
     return await runTargetAttempts<RouteTarget, SelectableProviderEndpoint, Response, FailureContext>({
       targets: route.targets,
       selectEndpoint(target) {
+        // Copilot 的 /chat/completions 对 reasoning_effort 支持不可靠：请求带强度时优先已确认支持该模型的 /responses
+        const wantsReasoning = !!(requestedReasoning || target.reasoningHint);
+        const preferred = wantsReasoning && subscriptionStore.accountForProvider(target.provider.id)?.vendor === 'copilot'
+          ? 'openai-responses' as const
+          : undefined;
         return selectProviderEndpoint(
           listProviderEndpoints(sqlite, target.provider.id),
           entry,
           target.modelId,
           listProviderEndpointModelObservations(sqlite, target.provider.id),
+          preferred,
         );
       },
       onSelected(target, endpoint) {
@@ -287,14 +296,23 @@ export async function runGatewayPipeline(input: PipelineInput): Promise<Response
           try { credential = await subscriptionLifecycle.credential(subscription.id); }
           catch { return subscriptionFailure(503,'订阅账号暂不可用，请在订阅账号页检查登录状态'); }
         }
-        const attempt = buildAttemptForEndpoint(input, target, endpoint, {
+        let plan = planReasoning(target.modelId, target.reasoning, requestedReasoning, target.reasoningHint);
+        // Copilot chat 只在目录声明了强度档位时才发送 reasoning_effort，否则去掉该字段
+        if (subscription?.vendor === 'copilot' && endpoint.protocol === 'openai' && plan.intent && !target.reasoning?.efforts?.length) {
+          plan = { ...plan, intent: undefined, rewrite: true };
+        }
+        const attempt = buildAttemptForEndpoint(
+          { ...input, reasoning: plan.intent, reasoningControl: target.reasoning?.control, rewriteReasoning: plan.rewrite },
+          { ...target, modelId: plan.upstreamModelId },
+          endpoint,
+          {
           decrypt: credential ? () => credential!.accessToken : decrypt,
           getAdapter,
           protocolNotImplemented,
         });
         const send = () => {
           const wire = subscription && credential
-            ? subscriptionWireRequest(subscription.vendor,credential,attempt,target.modelId,stream,input.anthropicBeta)
+            ? subscriptionWireRequest(subscription.vendor,credential,attempt,plan.upstreamModelId,stream,input.anthropicBeta)
             : attempt;
           return fetchUpstream({url:wire.url,headers:wire.headers,body:wire.body,clientSignal,redirect:subscription?'error':undefined,discardErrorBody:!!subscription,fetcher:subscription?subscriptionFetch:undefined});
         };

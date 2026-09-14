@@ -7,6 +7,7 @@ import { encrypt } from '@/lib/crypto';
 import * as schema from './schema';
 import { migrateUsageSchema } from './usage-migration';
 import { migrateModelPricingSchema } from './pricing-migration';
+import { migrateModelReasoningSchema } from './model-reasoning-migration';
 import { migrateProviderEndpointSchema } from './provider-endpoint-migration';
 import { lookupBundledPricing } from '@/lib/services/model-pricing';
 import ccSwitchManifest from '@/lib/presets/cc-switch-manifest.json';
@@ -71,7 +72,8 @@ CREATE TABLE IF NOT EXISTS models (
   pricing_source_ref TEXT,
   pricing_synced_at INTEGER,
   context_window INTEGER,
-  synced        INTEGER NOT NULL DEFAULT 0
+  synced        INTEGER NOT NULL DEFAULT 0,
+  reasoning_json TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_models_provider_model ON models(provider_id, model_id);
 CREATE TABLE IF NOT EXISTS route_aliases (
@@ -172,6 +174,7 @@ function migrate(sqlite: Database.Database) {
 
   migrateUsageSchema(sqlite);
   migrateModelPricingSchema(sqlite, lookupBundledPricing, ccSwitchManifest.commit);
+  migrateModelReasoningSchema(sqlite);
   migrateProviderEndpointSchema(sqlite);
   migrateSubscriptionSchema(sqlite);
 }

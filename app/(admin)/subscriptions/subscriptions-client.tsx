@@ -11,6 +11,14 @@ import { Textarea } from '@/components/ui/textarea';
 import { Progress } from '@/components/ui/progress';
 import { Switch } from '@/components/ui/switch';
 import {
+  Sheet,
+  SheetBody,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet';
+import {
   Dialog,
   DialogContent,
   DialogHeader,
@@ -25,8 +33,15 @@ import type { SubscriptionCatalogItem } from '@/lib/subscriptions/catalog';
 import { useConfirm } from '@/components/confirm-dialog';
 import type {
   AccountView,
+  SubscriptionModelView,
   SubscriptionVendor,
 } from '@/lib/subscriptions/types';
+import {
+  REASONING_EFFORTS,
+  isReasoningEffort,
+  type ModelReasoning,
+  type ReasoningEffort,
+} from '@/lib/gateway/reasoning';
 
 const names: Record<SubscriptionVendor, string> = {
   claude: 'Claude Code',
@@ -45,6 +60,22 @@ const date = (value: number | null) =>
         minute: '2-digit',
       })
     : '未知';
+/** Levels a model accepts (catalog levels plus folded variants) and its default one. */
+function reasoningSummary(reasoning: ModelReasoning | null) {
+  if (!reasoning || reasoning.control === 'none') return null;
+  const levels = [
+    ...new Set([
+      ...(reasoning.efforts ?? []),
+      ...Object.keys(reasoning.variants ?? {}).filter(isReasoningEffort),
+    ]),
+  ].sort((a, b) => REASONING_EFFORTS.indexOf(a) - REASONING_EFFORTS.indexOf(b));
+  const defaultLevel =
+    reasoning.defaultEffort ??
+    (Object.entries(reasoning.variants ?? {}).find(
+      ([, id]) => id === reasoning.upstreamDefault
+    )?.[0] as ReasoningEffort | undefined);
+  return { levels, defaultLevel, budget: reasoning.control === 'budget' };
+}
 type Session = {
   id: string;
   url: string;
@@ -98,6 +129,12 @@ export default function SubscriptionsClient({
   const [dialogError, setDialogError] = useState('');
   const [gateway, setGateway] = useState<AccountView | null>(null);
   const [models, setModels] = useState('');
+  const [modelSheet, setModelSheet] = useState<AccountView | null>(null);
+  const [sheetModels, setSheetModels] = useState<SubscriptionModelView[] | null>(
+    null
+  );
+  const [sheetError, setSheetError] = useState('');
+  const [aliasDrafts, setAliasDrafts] = useState<Record<string, string>>({});
   const active = useRef<AbortController | null>(null);
   const { confirm } = useConfirm();
   const load = useCallback(async () => {
@@ -269,6 +306,40 @@ export default function SubscriptionsClient({
       setBusy(null);
     }
   }
+  async function loadSheetModels(id: string) {
+    try {
+      setSheetModels((await api(`/${id}/models`)).models);
+    } catch (e) {
+      setSheetError((e as Error).message);
+      setSheetModels([]);
+    }
+  }
+  /** Loaded only when the sheet opens, so the 60-second account poll stays light. */
+  async function openModels(account: AccountView) {
+    setModelSheet(account);
+    setSheetModels(null);
+    setSheetError('');
+    setAliasDrafts({});
+    await loadSheetModels(account.id);
+  }
+  async function changeModel(
+    model: SubscriptionModelView,
+    method: 'PATCH' | 'DELETE',
+    body?: Record<string, unknown>
+  ) {
+    if (!modelSheet) return;
+    setBusy(`model:${model.id}`);
+    setSheetError('');
+    try {
+      await api(`/${modelSheet.id}/models/${model.id}`, method, body);
+      setAliasDrafts(({ [model.id]: _saved, ...rest }) => rest);
+      await Promise.all([loadSheetModels(modelSheet.id), load()]);
+    } catch (e) {
+      setSheetError((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  }
   async function refreshAll() {
     setBusy('all');
     setError('');
@@ -301,6 +372,7 @@ export default function SubscriptionsClient({
           })
         ).account
       );
+      if (modelSheet?.id === gateway.id) void loadSheetModels(gateway.id);
       setGateway(null);
     } catch (e) {
       setDialogError((e as Error).message);
@@ -525,6 +597,16 @@ export default function SubscriptionsClient({
                 >
                   同步模型
                 </Button>
+                {a.providerId && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!!busy}
+                    onClick={() => void openModels(a)}
+                  >
+                    管理模型（{a.modelCount ?? 0}）
+                  </Button>
+                )}
                 <Button
                   size="sm"
                   variant="outline"
@@ -781,6 +863,158 @@ export default function SubscriptionsClient({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <Sheet
+        open={!!modelSheet}
+        onOpenChange={(open) => {
+          if (!open) setModelSheet(null);
+        }}
+      >
+        <SheetContent>
+          <SheetHeader>
+            <SheetTitle>
+              {modelSheet
+                ? `${names[modelSheet.vendor]} · ${modelSheet.displayName}`
+                : '模型'}
+            </SheetTitle>
+            <SheetDescription>
+              停用的模型不再参与网关路由。删除的模型如果官方仍在列出，下次同步会重新加入，想长期屏蔽请停用。思考强度用请求参数控制（reasoning_effort、reasoning.effort 或 thinking）。
+            </SheetDescription>
+          </SheetHeader>
+          <SheetBody className="space-y-3">
+            {sheetError && (
+              <p role="alert" className="text-sm text-destructive">
+                {sheetError}
+              </p>
+            )}
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!!busy || !modelSheet}
+              onClick={() => {
+                if (!modelSheet) return;
+                setGateway(modelSheet);
+                setModels('');
+                setDialogError('');
+              }}
+            >
+              + 添加模型
+            </Button>
+            {sheetModels === null ? (
+              <p role="status" className="py-4 text-sm text-muted-foreground">
+                正在加载模型…
+              </p>
+            ) : !sheetModels.length ? (
+              <p className="py-4 text-sm text-muted-foreground">暂无模型。</p>
+            ) : (
+              <ul className="divide-y rounded-md border">
+                {sheetModels.map((m) => {
+                  const draft = aliasDrafts[m.id] ?? m.alias ?? '';
+                  const summary = reasoningSummary(m.reasoning);
+                  return (
+                    <li
+                      key={m.id}
+                      className={`space-y-2 p-3 ${m.enabled ? '' : 'opacity-60'}`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <code className="break-all text-sm">{m.modelId}</code>
+                          {m.displayName && m.displayName !== m.modelId && (
+                            <p className="text-xs text-muted-foreground">
+                              {m.displayName}
+                            </p>
+                          )}
+                          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+                            <Badge variant="outline">
+                              {m.synced ? '官方同步' : '手动添加'}
+                            </Badge>
+                            {summary && summary.levels.length > 0 && (
+                              <span>
+                                思考强度{' '}
+                                {summary.levels.map((level, index) => (
+                                  <span key={level}>
+                                    {index ? ' · ' : ''}
+                                    <span
+                                      className={
+                                        level === summary.defaultLevel
+                                          ? 'font-semibold text-foreground'
+                                          : undefined
+                                      }
+                                    >
+                                      {level}
+                                    </span>
+                                  </span>
+                                ))}
+                              </span>
+                            )}
+                            {summary &&
+                              !summary.levels.length &&
+                              summary.budget && <span>思考预算可调</span>}
+                          </div>
+                        </div>
+                        <Switch
+                          aria-label={`启用 ${m.modelId}`}
+                          checked={m.enabled}
+                          disabled={!!busy}
+                          onCheckedChange={(enabled) =>
+                            void changeModel(m, 'PATCH', { enabled })
+                          }
+                        />
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Input
+                          aria-label={`${m.modelId} 的别名`}
+                          value={draft}
+                          onChange={(e) =>
+                            setAliasDrafts((drafts) => ({
+                              ...drafts,
+                              [m.id]: e.target.value,
+                            }))
+                          }
+                          placeholder="别名（可选）"
+                          className="h-8 w-40 text-xs"
+                        />
+                        {draft !== (m.alias ?? '') && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={!!busy}
+                            onClick={() =>
+                              void changeModel(m, 'PATCH', {
+                                alias: draft.trim() || null,
+                              })
+                            }
+                          >
+                            保存别名
+                          </Button>
+                        )}
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={!!busy}
+                          onClick={async () => {
+                            if (
+                              await confirm({
+                                title: `删除模型「${m.modelId}」？`,
+                                description: m.synced
+                                  ? '官方仍在列出的模型，下次同步会重新加入；想长期屏蔽请停用。'
+                                  : '删除后可以通过「添加模型」重新填写。',
+                                confirmText: '删除模型',
+                              })
+                            )
+                              void changeModel(m, 'DELETE');
+                          }}
+                        >
+                          删除
+                        </Button>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </SheetBody>
+        </SheetContent>
+      </Sheet>
     </div>
   );
 }

@@ -1,3 +1,5 @@
+import type { ModelReasoning } from '../gateway/reasoning.ts';
+
 export type SubscriptionVendor = 'claude' | 'codex' | 'gemini' | 'antigravity' | 'copilot';
 
 /** 授权交互形态：paste 让用户粘贴授权结果，device 由服务端轮询上游设备码。 */
@@ -43,6 +45,19 @@ export interface DiscoveredModel {
   displayName: string | null;
   /** Only Copilot splits models across endpoints; other vendors list their one protocol. */
   endpoints: ModelEndpoint[];
+  /** Reasoning strength metadata; Antigravity level variants are folded into it. */
+  reasoning?: ModelReasoning;
+}
+
+/** One model of a linked subscription provider, as managed on the subscriptions page. */
+export interface SubscriptionModelView {
+  id: string;
+  modelId: string;
+  displayName: string | null;
+  alias: string | null;
+  enabled: boolean;
+  synced: boolean;
+  reasoning: ModelReasoning | null;
 }
 
 export interface ModelDiscovery {

@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { deleteModel, restoreModelPricing, serializeModel, updateModel } from '@/lib/services/model';
+import { deleteModel, getModelById, restoreModelPricing, serializeModel, updateModel } from '@/lib/services/model';
+import { getProviderSubscriptionId } from '@/lib/services/provider';
+
+const PRICING_FIELDS = ['input_price', 'output_price', 'cache_read_price', 'cache_write_price', 'restore_pricing'] as const;
 
 interface PatchBody {
   alias?: string | null;
@@ -25,6 +28,10 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   }
   if (body.alias && !/^[\w][\w./-]*$/.test(body.alias)) {
     return NextResponse.json({ error: 'alias 格式非法' }, { status: 400 });
+  }
+  const existing = getModelById(id);
+  if (existing && getProviderSubscriptionId(existing.providerId) && PRICING_FIELDS.some((field) => body[field] !== undefined)) {
+    return NextResponse.json({ error: '订阅账号模型不按 API 单价计费，不能设置定价' }, { status: 409 });
   }
 
   const row = body.restore_pricing ? restoreModelPricing(id) : updateModel(id, body);

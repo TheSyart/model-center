@@ -1,6 +1,5 @@
 'use client';
 
-import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { Check as CheckIcon, ChevronDown as ChevronIcon, Copy as CopyIcon, Eye as EyeIcon, EyeOff as EyeOffIcon, Plus, RefreshCw as RefreshIcon } from 'lucide-react';
 import { getPreset } from '@/lib/presets';
@@ -87,7 +86,7 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
   const notify = useCallback((text: string, error = false) => toast(text, error ? 'error' : 'success'), [toast]);
 
   const load = useCallback(async () => {
-    const [pRes, mRes] = await Promise.all([fetch('/api/admin/providers'), fetch('/api/admin/models')]);
+    const [pRes, mRes] = await Promise.all([fetch('/api/admin/providers?auth_kind=api_key'), fetch('/api/admin/models')]);
     if (pRes.ok) setProviders((await pRes.json()).providers);
     if (mRes.ok) setModels((await mRes.json()).models);
     setModelsLoaded(true);
@@ -299,7 +298,7 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
           <div className={cardCls}>
             <EmptyState
               title="还没有服务商"
-              description="添加你的第一个模型服务商，网关即刻可用"
+              description="添加你的第一个模型服务商，网关即刻可用。Claude Code、Codex 等订阅账号请在「订阅账号」页登录管理。"
               actionLabel="新建服务商"
               onAction={() => setForm({ ...EMPTY_FORM })}
             />
@@ -316,7 +315,7 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
                   <ProviderLogo presetKey={p.preset_key} slug={p.slug} name={p.name} />
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                      <span className="font-medium tracking-[-0.01em]">{p.name}</span>{p.auth_kind==='subscription' && <Link href="/subscriptions" className="text-xs text-primary">订阅账号</Link>}
+                      <span className="font-medium tracking-[-0.01em]">{p.name}</span>
                       <span className="text-xs text-muted-foreground">{p.endpoints.length} 种接入格式 · 默认 {protocolDisplayName(p.default_protocol)}</span>
                     </div>
                     <div className="truncate text-xs text-subtle-foreground" title={p.base_url}>
@@ -386,9 +385,9 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
                             {bal?.link && (
                               <a href={bal.link} target="_blank" rel="noreferrer" className={btn.link}>控制台</a>
                             )}
-                            {p.auth_kind!=='subscription' && <button onClick={() => refreshBalance(p)} aria-label="立即刷新余额" className="flex h-11 w-11 items-center justify-center rounded-md text-muted-foreground hover:bg-surface hover:text-foreground sm:h-8 sm:w-8" title="立即刷新余额">
+                            <button onClick={() => refreshBalance(p)} aria-label="立即刷新余额" className="flex h-11 w-11 items-center justify-center rounded-md text-muted-foreground hover:bg-surface hover:text-foreground sm:h-8 sm:w-8" title="立即刷新余额">
                               <RefreshIcon className="h-3.5 w-3.5" />
-                            </button>}
+                            </button>
                           </div>
                         </div>
                         {p.has_key && (
@@ -414,7 +413,7 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
                           <Switch checked={p.enabled} onCheckedChange={() => toggleEnabled(p)} aria-label={p.enabled ? '禁用服务商' : '启用服务商'} />
                           {p.enabled ? '已启用' : '已停用'}
                         </div>
-                        {p.auth_kind==='subscription'?<Link href="/subscriptions" className={btn.ghost}>管理订阅账号</Link>:<><button onClick={() => testProvider(p)} className={btn.ghost}>
+                        <button onClick={() => testProvider(p)} className={btn.ghost}>
                           {test && test.ms < 0 ? '测速中…' : '测速'}
                         </button>
                         <button
@@ -436,7 +435,7 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
                         >
                           编辑
                         </button>
-                        <button onClick={() => onDelete(p)} className={btn.danger}>删除</button></>}
+                        <button onClick={() => onDelete(p)} className={btn.danger}>删除</button>
                         {test && test.ms >= 0 && (
                           <span className={`text-xs ${test.ok ? 'text-success' : 'text-destructive'}`} title={test.detail}>
                             <span className="tabular-nums">{test.ms}</span>ms
@@ -490,7 +489,7 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
                     </div>
                     </TabsContent>
                     <TabsContent value="models" className="mt-0">
-                      <ModelTable subscription={p.auth_kind==='subscription'} providerId={p.id} models={models.filter((m) => m.provider_id === p.id)} onChanged={load} onToast={notify} />
+                      <ModelTable providerId={p.id} models={models.filter((m) => m.provider_id === p.id)} onChanged={load} onToast={notify} />
                     </TabsContent>
                   </Tabs>
                 )}

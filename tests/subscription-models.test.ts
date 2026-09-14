@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fetchSubscriptionModels } from '../lib/subscriptions/models.ts';
+import { fetchSubscriptionModels, foldAntigravityVariants } from '../lib/subscriptions/models.ts';
 import { requestJson, SubscriptionError } from '../lib/subscriptions/oauth.ts';
 import type { Credential } from '../lib/subscriptions/types.ts';
 
@@ -234,4 +234,109 @@ test('model listing targets are pinned shapes; lookalike hosts and extra query v
       (error: unknown) =>
         error instanceof SubscriptionError && error.code === 'invalid_target'
     );
+});
+
+test('Antigravity level variants fold into base models with variant maps and legacy names', () => {
+  const folded = foldAntigravityVariants([
+    { id: 'gemini-3.1-pro-low', displayName: 'Gemini 3.1 Pro (Low)' },
+    { id: 'gemini-pro-agent', displayName: 'Gemini 3.1 Pro (High)' },
+    { id: 'gemini-3.1-pro-high', displayName: 'Gemini 3.1 Pro (High)' },
+    { id: 'gemini-3.6-flash-high', displayName: 'Gemini 3.6 Flash' },
+    { id: 'gemini-3-flash', displayName: 'Gemini 3 Flash' },
+    { id: 'claude-opus-4-6-thinking', displayName: 'Claude Opus 4.6 (Thinking)', maxOutputTokens: 64000 },
+    { id: 'claude-sonnet-4-6', displayName: 'Claude Sonnet 4.6 (Thinking)', maxOutputTokens: 64000 },
+    { id: 'gpt-oss-120b-medium', displayName: 'GPT-OSS 120B (Medium)' },
+  ]);
+  const byId = Object.fromEntries(folded.map((m) => [m.id, m]));
+  assert.deepEqual(Object.keys(byId).sort(), [
+    'claude-opus-4-6',
+    'claude-sonnet-4-6',
+    'gemini-3-flash',
+    'gemini-3.1-pro',
+    'gemini-3.6-flash',
+    'gpt-oss-120b',
+  ]);
+  assert.deepEqual(byId['gemini-3.1-pro'].reasoning, {
+    control: 'level',
+    upstreamDefault: 'gemini-pro-agent',
+    legacyIds: ['gemini-3.1-pro-low', 'gemini-pro-agent', 'gemini-3.1-pro-high'],
+    variants: { low: 'gemini-3.1-pro-low', high: 'gemini-pro-agent' },
+  });
+  assert.equal(byId['gemini-3.1-pro'].displayName, 'Gemini 3.1 Pro');
+  assert.deepEqual(byId['gemini-3.6-flash'].reasoning, {
+    control: 'level',
+    upstreamDefault: 'gemini-3.6-flash-high',
+    legacyIds: ['gemini-3.6-flash-high'],
+    variants: { high: 'gemini-3.6-flash-high' },
+  });
+  assert.deepEqual(byId['gemini-3-flash'].reasoning, { control: 'level' });
+  assert.deepEqual(byId['claude-opus-4-6'].reasoning, {
+    control: 'budget',
+    upstreamDefault: 'claude-opus-4-6-thinking',
+    legacyIds: ['claude-opus-4-6-thinking'],
+    budget: { max: 63999 },
+  });
+  assert.equal(byId['claude-opus-4-6'].displayName, 'Claude Opus 4.6');
+  assert.deepEqual(byId['claude-sonnet-4-6'].reasoning, { control: 'budget', budget: { max: 63999 } });
+  assert.deepEqual(byId['gpt-oss-120b'].reasoning, {
+    control: 'none',
+    upstreamDefault: 'gpt-oss-120b-medium',
+    legacyIds: ['gpt-oss-120b-medium'],
+    variants: { medium: 'gpt-oss-120b-medium' },
+  });
+});
+
+test('Antigravity discovery lists folded base models only', async () => {
+  const result = await fetchSubscriptionModels(
+    'antigravity',
+    credential,
+    recorder(() =>
+      json({
+        models: {
+          'gemini-3.1-pro-low': { displayName: 'Gemini 3.1 Pro (Low)' },
+          'gemini-pro-agent': { displayName: 'Gemini 3.1 Pro (High)' },
+          'claude-opus-4-6-thinking': { displayName: 'Claude Opus 4.6 (Thinking)', maxOutputTokens: 64000 },
+        },
+      })
+    ).fetcher
+  );
+  assert.deepEqual(result.models.map((m) => m.id), ['claude-opus-4-6', 'gemini-3.1-pro']);
+  assert.equal(result.models[1].reasoning?.variants?.low, 'gemini-3.1-pro-low');
+});
+
+test('Codex and Copilot keep catalog reasoning levels for clamping', async () => {
+  const codex = await fetchSubscriptionModels(
+    'codex',
+    credential,
+    recorder(() =>
+      json({
+        models: [
+          {
+            slug: 'gpt-5.5',
+            visibility: 'list',
+            default_reasoning_level: 'medium',
+            supported_reasoning_levels: [{ effort: 'high' }, { effort: 'low' }, { effort: 'ultra' }, { effort: 'medium' }],
+          },
+        ],
+      })
+    ).fetcher
+  );
+  assert.deepEqual(codex.models[0].reasoning, { control: 'level', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' });
+  const copilot = await fetchSubscriptionModels(
+    'copilot',
+    credential,
+    recorder(() =>
+      json({
+        data: [
+          { id: 'gpt-5.1', capabilities: { type: 'chat', supports: { reasoning_effort: ['high', 'low'] } } },
+          { id: 'claude-sonnet-4.5', capabilities: { type: 'chat', supports: { max_thinking_budget: 32000, min_thinking_budget: 1024 } } },
+          { id: 'gpt-4.1', capabilities: { type: 'chat', supports: { tool_calls: true } } },
+        ],
+      })
+    ).fetcher
+  );
+  const byId = Object.fromEntries(copilot.models.map((m) => [m.id, m.reasoning]));
+  assert.deepEqual(byId['gpt-5.1'], { control: 'level', efforts: ['low', 'high'] });
+  assert.deepEqual(byId['claude-sonnet-4.5'], { control: 'budget', budget: { min: 1024, max: 32000 } });
+  assert.equal(byId['gpt-4.1'], undefined);
 });

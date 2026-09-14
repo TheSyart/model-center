@@ -4,6 +4,8 @@
  * 鉴权：x-goog-api-key 头。
  */
 import { encodeSSE, generatorToStream, parseSSE, deferred } from './sse';
+import { applyGeminiReasoning } from './reasoning-emit';
+import type { ReasoningIntent } from '@/lib/gateway/reasoning';
 import type { UsageInfo } from '@/lib/gateway/logger';
 import { normalizeGeminiUsage, toPublicUsage } from '@/lib/services/usage-metrics';
 
@@ -47,7 +49,10 @@ function irImageToGemini(part: Json): Json | null {
 
 // ---------- 请求：IR → Gemini ----------
 
-export function irRequestToGemini(ir: Json): Json {
+export function irRequestToGemini(
+  ir: Json,
+  options: { reasoning?: ReasoningIntent; modelId?: string; control?: 'level' | 'budget' | 'none' } = {},
+): Json {
   const contents: Json[] = [];
   const systemParts: Json[] = [];
   // IR tool 消息只有 tool_call_id，Gemini functionResponse 需要函数名：
@@ -101,6 +106,9 @@ export function irRequestToGemini(ir: Json): Json {
   if (maxTokens !== undefined) generationConfig.maxOutputTokens = maxTokens;
   if (ir.stop !== undefined) generationConfig.stopSequences = Array.isArray(ir.stop) ? ir.stop : [ir.stop];
   if (Object.keys(generationConfig).length) out.generationConfig = generationConfig;
+  if (options.reasoning && options.modelId) {
+    applyGeminiReasoning(out, options.reasoning, options.modelId, { control: options.control });
+  }
 
   const tools = (ir.tools as Json[]) ?? [];
   if (tools.length && ir.tool_choice !== 'none') {
@@ -145,7 +153,8 @@ export function geminiUsageFromJson(json: Json): UsageInfo | null {
 export function geminiResponseToIR(json: Json, model: string): Json {
   const cand = (json.candidates as Json[])?.[0] ?? {};
   const parts = (cand.content?.parts as Json[]) ?? [];
-  const text = parts.filter((p) => typeof p.text === 'string').map((p) => p.text).join('');
+  // thought 片段是思考摘要，不属于正文
+  const text = parts.filter((p) => typeof p.text === 'string' && p.thought !== true).map((p) => p.text).join('');
   const fnParts = parts.filter((p) => p.functionCall);
   const toolCalls = fnParts.map((p, i) => ({
     id: `call_${Math.random().toString(36).slice(2, 10)}_${i}`, // Gemini 无 call id，生成占位
@@ -211,7 +220,7 @@ export function geminiStreamToIR(
         yield chunk({ role: 'assistant', content: '' });
       }
       for (const p of (cand.content?.parts as Json[]) ?? []) {
-        if (typeof p.text === 'string' && p.text) {
+        if (typeof p.text === 'string' && p.text && p.thought !== true) {
           yield chunk({ content: p.text });
         } else if (p.functionCall) {
           yield chunk({

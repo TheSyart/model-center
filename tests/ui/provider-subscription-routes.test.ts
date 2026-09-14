@@ -35,6 +35,7 @@ import { POST as sync } from '@/app/api/admin/providers/[id]/sync-models/route';
 import { GET as balance } from '@/app/api/admin/providers/[id]/balance/route';
 import { PATCH, DELETE } from '@/app/api/admin/providers/[id]/route';
 import { GET as balances } from '@/app/api/admin/balances/route';
+import { GET as providers } from '@/app/api/admin/providers/route';
 
 beforeEach(() => {
   process.env.MASTER_KEY = 'provider-route-tests-only';
@@ -166,5 +167,14 @@ describe('legacy provider routes enforce credential ownership', () => {
       expect.objectContaining({ id: 'key' }),
       'api-secret'
     );
+  });
+});
+
+describe('providers page lists API-key providers only', () => {
+  it('hides subscription providers when API-key providers are requested and keeps them for shared consumers', async () => {
+    const ids = async (url: string) =>
+      ((await (await providers(new NextRequest(url))).json()).providers as { id: string }[]).map((p) => p.id).sort();
+    expect(await ids('http://localhost/api/admin/providers')).toEqual(['key', 'oauth']);
+    expect(await ids('http://localhost/api/admin/providers?auth_kind=api_key')).toEqual(['key']);
   });
 });

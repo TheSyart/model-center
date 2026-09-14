@@ -13,7 +13,7 @@ export const geminiAdapter: ProtocolAdapter = {
         'Content-Type': 'application/json',
         'x-goog-api-key': ctx.apiKey,
       },
-      body: irRequestToGemini(ir),
+      body: irRequestToGemini(ir, { reasoning: ctx.reasoning, modelId: ctx.modelId, control: ctx.reasoningControl }),
     };
   },
   convertResponse(nativeJson: Json, ctx: AdapterContext): Json {

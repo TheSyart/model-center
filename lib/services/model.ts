@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { asc, eq } from 'drizzle-orm';
 import { db, schema, sqlite } from '@/lib/db';
 import type { models } from '@/lib/db/schema';
-import { withDefaultProviderEndpoint, type ProviderRow } from './provider';
+import { getProviderSubscriptionId, withDefaultProviderEndpoint, type ProviderRow } from './provider';
 import { CC_SWITCH_PRICING_SOURCE_REF, lookupBundledPricing } from './model-pricing';
 import { syncProviderModels, type SyncResult } from './model-sync';
 import { addManualModelsToCompleteCatalog } from '@/lib/subscriptions/store';
@@ -74,7 +74,9 @@ export function createModel(input: ModelInput): ModelRow | 'conflict' | 'alias_c
     input.output_price !== undefined ||
     input.cache_read_price !== undefined ||
     input.cache_write_price !== undefined;
-  const pricedProvider = provider ? withDefaultProviderEndpoint(provider) : undefined;
+  // 订阅账号的调用不计 API 金额，不套用内置 API 定价
+  const subscription = !!getProviderSubscriptionId(input.provider_id);
+  const pricedProvider = provider && !subscription ? withDefaultProviderEndpoint(provider) : undefined;
   const bundled = !hasManualPricing && pricedProvider
     ? lookupBundledPricing(pricedProvider.baseUrl, pricedProvider.protocol, input.model_id)
     : null;
@@ -89,11 +91,12 @@ export function createModel(input: ModelInput): ModelRow | 'conflict' | 'alias_c
     outputPrice: hasManualPricing ? (input.output_price ?? null) : (bundled?.output ?? null),
     cacheReadPrice: hasManualPricing ? (input.cache_read_price ?? null) : (bundled?.cacheRead ?? null),
     cacheWritePrice: hasManualPricing ? (input.cache_write_price ?? null) : (bundled?.cacheWrite ?? null),
-    pricingSource: hasManualPricing ? 'manual' : (bundled?.source ?? null),
+    pricingSource: subscription ? 'subscription' : hasManualPricing ? 'manual' : (bundled?.source ?? null),
     pricingSourceRef: bundled ? CC_SWITCH_PRICING_SOURCE_REF : null,
     pricingSyncedAt: bundled ? Date.now() : null,
     contextWindow: input.context_window ?? null,
     synced: 0,
+    reasoningJson: null,
   };
   try {
     db.insert(schema.models).values(row).run();

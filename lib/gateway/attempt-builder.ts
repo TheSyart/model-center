@@ -2,6 +2,8 @@ import type { AdapterContext, ProtocolAdapter } from '../adapters/types.ts';
 import type { RouteTarget } from './router';
 import { isNativeEndpoint, providerForEndpoint, shouldFailoverStatus } from './endpoint-attempt-context.ts';
 import type { ProviderProtocol } from '../presets/types.ts';
+import { writeNativeReasoning } from '../protocols/reasoning-emit.ts';
+import type { ReasoningIntent } from './reasoning.ts';
 
 type Json = Record<string, any>;
 
@@ -15,6 +17,11 @@ export interface AttemptInput {
   stream: boolean;
   includeUsage: boolean;
   anthropicVersion?: string | null;
+  /** 本目标生效的思考强度（已按目录钳制/换算） */
+  reasoning?: ReasoningIntent;
+  reasoningControl?: 'level' | 'budget' | 'none';
+  /** 原生透传时需要按 reasoning 改写客户端的强度字段 */
+  rewriteReasoning?: boolean;
 }
 
 export interface AttemptContext {
@@ -84,10 +91,15 @@ export function buildAttemptForEndpoint(
     modelId: target.modelId,
     stream: input.stream,
     includeUsage: input.includeUsage,
+    reasoning: input.reasoning,
+    reasoningControl: input.reasoningControl,
   };
   const passthrough = isNativeEndpoint(input.entry, provider.protocol);
   if (passthrough) {
     const built = passthroughRequest(input.entry, base, apiKey, input.rawBody, target.modelId, input.anthropicVersion);
+    if (input.rewriteReasoning) {
+      writeNativeReasoning(provider.protocol, built.body, input.reasoning, target.modelId, input.reasoningControl);
+    }
     return { ...built, adapter: undefined, ctx, passthrough: true, endpoint };
   }
   const adapter = dependencies.getAdapter(provider.protocol);

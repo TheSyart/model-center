@@ -13,7 +13,7 @@ export const responsesAdapter: ProtocolAdapter = {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${ctx.apiKey}`,
       },
-      body: irRequestToResponses(ir, ctx.modelId),
+      body: irRequestToResponses(ir, ctx.modelId, ctx.reasoning),
     };
   },
   convertResponse(nativeJson: Json, ctx: AdapterContext): Json {

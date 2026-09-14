@@ -1,12 +1,14 @@
 import crypto from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { replaceEndpointModelCatalogInTransaction } from '../services/provider-endpoint.ts';
+import { parseModelReasoning } from '../gateway/reasoning.ts';
 import type {
   AccountView,
   Authorization,
   Credential,
   ModelDiscovery,
   QuotaSnapshot,
+  SubscriptionModelView,
   SubscriptionVendor,
 } from './types.ts';
 
@@ -127,6 +129,8 @@ export interface ModelSyncResult {
   existing: number;
   /** Previously synced models the vendor no longer lists; they are kept, not deleted. */
   missing: number;
+  /** Legacy level-variant rows folded into their base model (still callable by name). */
+  folded: number;
   skipped: number;
   total: number;
   source: string;
@@ -397,24 +401,76 @@ export function createSubscriptionStore(
       const timestamp = now();
       const providerId = ensureProvider(a, timestamp);
       const existing = db
-        .prepare('SELECT model_id,synced FROM models WHERE provider_id=?')
-        .all(providerId) as { model_id: string; synced: number }[];
-      const known = new Set(existing.map((m) => m.model_id));
+        .prepare(
+          'SELECT model_id,alias,enabled,synced FROM models WHERE provider_id=?'
+        )
+        .all(providerId) as {
+        model_id: string;
+        alias: string | null;
+        enabled: number;
+        synced: number;
+      }[];
+      const rows = new Map(existing.map((m) => [m.model_id, m]));
+      const upstream = new Set(models.map((m) => m.id));
       const insert = db.prepare(
-        "INSERT INTO models(id,provider_id,model_id,display_name,enabled,synced,pricing_source) VALUES(?,?,?,?,1,1,'subscription') ON CONFLICT(provider_id,model_id) DO NOTHING"
+        "INSERT INTO models(id,provider_id,model_id,display_name,enabled,synced,pricing_source,reasoning_json) VALUES(?,?,?,?,?,1,'subscription',?) ON CONFLICT(provider_id,model_id) DO NOTHING"
+      );
+      // Metadata refresh only: enabled flags and aliases stay as the operator set them.
+      const refresh = db.prepare(
+        'UPDATE models SET reasoning_json=?,display_name=CASE WHEN synced=1 THEN COALESCE(?,display_name) ELSE display_name END WHERE provider_id=? AND model_id=?'
       );
       let added = 0;
+      let folded = 0;
       for (const model of models) {
-        if (known.has(model.id)) continue;
-        insert.run(
-          crypto.randomUUID(),
-          providerId,
-          model.id,
-          model.displayName ?? null
-        );
-        known.add(model.id);
-        added++;
+        const reasoningJson = model.reasoning
+          ? JSON.stringify(model.reasoning)
+          : null;
+        // Synced rows for names now folded into this base; manual rows are left alone.
+        const legacy = (model.reasoning?.legacyIds ?? [])
+          .map((legacyId) => rows.get(legacyId))
+          .filter(
+            (row): row is NonNullable<typeof row> =>
+              !!row && row.synced === 1 && !upstream.has(row.model_id)
+          );
+        if (!rows.has(model.id)) {
+          const enabled =
+            legacy.length && legacy.every((row) => row.enabled !== 1) ? 0 : 1;
+          insert.run(
+            crypto.randomUUID(),
+            providerId,
+            model.id,
+            model.displayName ?? null,
+            enabled,
+            reasoningJson
+          );
+          added++;
+        } else
+          refresh.run(
+            reasoningJson,
+            model.displayName ?? null,
+            providerId,
+            model.id
+          );
+        for (const row of legacy) {
+          db.prepare('DELETE FROM models WHERE provider_id=? AND model_id=?').run(
+            providerId,
+            row.model_id
+          );
+          if (row.alias)
+            db.prepare(
+              'UPDATE models SET alias=? WHERE provider_id=? AND model_id=? AND alias IS NULL'
+            ).run(row.alias, providerId, model.id);
+          rows.delete(row.model_id);
+          folded++;
+        }
       }
+      const known = new Set(
+        (
+          db
+            .prepare('SELECT model_id FROM models WHERE provider_id=?')
+            .all(providerId) as { model_id: string }[]
+        ).map((row) => row.model_id)
+      );
       if (a.vendor === 'copilot') {
         // Copilot serves some models only over /responses. One endpoint per protocol,
         // each with a complete catalog, lets the endpoint selector route every entry
@@ -449,18 +505,126 @@ export function createSubscriptionStore(
       db.prepare(
         'UPDATE subscription_accounts SET models_error=NULL,models_synced_at=?,models_attempted_at=? WHERE id=?'
       ).run(timestamp, timestamp, id);
-      const upstream = new Set(models.map((m) => m.id));
       return {
         account: get(id)!,
         added,
         existing: models.length - added,
-        missing: existing.filter(
+        missing: [...rows.values()].filter(
           (m) => m.synced === 1 && !upstream.has(m.model_id)
         ).length,
+        folded,
         skipped: discovery.skipped,
         total: models.length,
         source: discovery.source,
       };
+    })();
+  }
+  const MODEL_COLUMNS = 'id,model_id,display_name,alias,enabled,synced,reasoning_json';
+  type ModelRow = {
+    id: string;
+    model_id: string;
+    display_name: string | null;
+    alias: string | null;
+    enabled: number;
+    synced: number;
+    reasoning_json: string | null;
+  };
+  const modelView = (row: ModelRow): SubscriptionModelView => ({
+    id: row.id,
+    modelId: row.model_id,
+    displayName: row.display_name,
+    alias: row.alias,
+    enabled: row.enabled === 1,
+    synced: row.synced === 1,
+    reasoning: parseModelReasoning(row.reasoning_json),
+  });
+  /** Ownership check: the model must belong to this account's linked provider. */
+  function ownedModel(id: string, modelRowId: string) {
+    required(id);
+    const providerId = get(id)!.providerId;
+    const row = providerId
+      ? (db
+          .prepare(`SELECT ${MODEL_COLUMNS} FROM models WHERE id=? AND provider_id=?`)
+          .get(modelRowId, providerId) as ModelRow | undefined)
+      : undefined;
+    if (!providerId || !row) throw new StoreError('模型不存在', 404);
+    return { providerId, row };
+  }
+  function listModels(id: string): SubscriptionModelView[] {
+    required(id);
+    const providerId = get(id)!.providerId;
+    if (!providerId) return [];
+    return (
+      db
+        .prepare(`SELECT ${MODEL_COLUMNS} FROM models WHERE provider_id=? ORDER BY model_id`)
+        .all(providerId) as ModelRow[]
+    ).map(modelView);
+  }
+  function updateModel(
+    id: string,
+    modelRowId: string,
+    patch: Record<string, unknown>
+  ): SubscriptionModelView {
+    const allowed = new Set(['enabled', 'alias', 'displayName']);
+    const keys = Object.keys(patch ?? {});
+    if (!keys.length || keys.some((key) => !allowed.has(key)))
+      throw new StoreError('只能修改模型的启用状态、别名和显示名');
+    return db.transaction(() => {
+      const { row } = ownedModel(id, modelRowId);
+      const sets: string[] = [];
+      const values: unknown[] = [];
+      if (patch.enabled !== undefined) {
+        if (typeof patch.enabled !== 'boolean')
+          throw new StoreError('enabled 必须为布尔值');
+        sets.push('enabled=?');
+        values.push(patch.enabled ? 1 : 0);
+      }
+      if (patch.alias !== undefined) {
+        const alias =
+          patch.alias === null
+            ? ''
+            : typeof patch.alias === 'string'
+              ? patch.alias.trim()
+              : undefined;
+        if (
+          alias === undefined ||
+          (alias && (alias.length > 200 || !/^[\w][\w./-]*$/.test(alias)))
+        )
+          throw new StoreError('别名格式不正确');
+        if (
+          alias &&
+          (db.prepare('SELECT 1 FROM models WHERE alias=? AND id<>?').get(alias, row.id) ||
+            db.prepare('SELECT 1 FROM route_aliases WHERE alias=?').get(alias))
+        )
+          throw new StoreError(`别名 "${alias}" 已被占用`, 409);
+        sets.push('alias=?');
+        values.push(alias || null);
+      }
+      if (patch.displayName !== undefined) {
+        const name =
+          patch.displayName === null
+            ? ''
+            : typeof patch.displayName === 'string'
+              ? patch.displayName.trim()
+              : undefined;
+        if (name === undefined || name.length > 200 || /[\x00-\x1f\x7f]/.test(name))
+          throw new StoreError('显示名格式不正确');
+        sets.push('display_name=?');
+        values.push(name || null);
+      }
+      db.prepare(`UPDATE models SET ${sets.join(',')} WHERE id=?`).run(...values, row.id);
+      return modelView(
+        db.prepare(`SELECT ${MODEL_COLUMNS} FROM models WHERE id=?`).get(row.id) as ModelRow
+      );
+    })();
+  }
+  function deleteModel(id: string, modelRowId: string) {
+    db.transaction(() => {
+      const { providerId, row } = ownedModel(id, modelRowId);
+      db.prepare('DELETE FROM models WHERE id=?').run(row.id);
+      db.prepare(
+        'DELETE FROM provider_endpoint_models WHERE model_id=? AND endpoint_id IN (SELECT id FROM provider_endpoints WHERE provider_id=?)'
+      ).run(row.model_id, providerId);
     })();
   }
   return {
@@ -469,6 +633,9 @@ export function createSubscriptionStore(
     accountForProvider,
     connectGateway,
     syncGatewayModels,
+    listModels,
+    updateModel,
+    deleteModel,
     list: () =>
       (
         db

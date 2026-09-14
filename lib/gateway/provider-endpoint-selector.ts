@@ -46,8 +46,16 @@ export function selectProviderEndpoint(
   entry: GatewayEntryProtocol,
   modelId: string,
   observations: EndpointModelObservation[],
+  /** Chosen first when its complete catalog confirms the model (e.g. Copilot /responses for reasoning). */
+  preferredProtocol?: ProviderProtocol,
 ): SelectableProviderEndpoint | undefined {
   const enabled = endpoints.filter((endpoint) => endpoint.enabled);
+  if (preferredProtocol) {
+    const preferred = enabled.find(
+      (endpoint) => endpoint.protocol === preferredProtocol && endpoint.modelCatalogComplete && knowsModel(endpoint, modelId, observations),
+    );
+    if (preferred) return preferred;
+  }
   const native = enabled.find((endpoint) => endpoint.protocol === NATIVE_PROTOCOL[entry]);
   if (native && canServe(native, modelId, observations)) return native;
 

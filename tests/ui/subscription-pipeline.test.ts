@@ -682,3 +682,247 @@ test('a failed model fetch keeps the login and leaves the manual gateway path av
   expect(manual.status).toBe(200);
   expect((await manual.json()).account.modelCount).toBe(1);
 });
+
+type Json = Record<string, any>;
+const fixtureDiscovery = (models: Json[]) => ({ models: models as any, skipped: 0, source: 'fixture', checkedAt: Date.now() });
+
+test('Antigravity folded models pick the variant from reasoning strength and keep legacy names callable', async () => {
+  const a = store.saveAccount('antigravity', {
+    accessToken: 'ag-token',
+    refreshToken: 'refresh',
+    accountKey: 'ag-reasoning',
+    email: null,
+    expiresAt: Date.now() + 3600000,
+    projectId: 'managed-project',
+  });
+  const synced = store.syncGatewayModels(
+    a.id,
+    fixtureDiscovery([
+      {
+        id: 'gemini-3.1-pro',
+        displayName: 'Gemini 3.1 Pro',
+        endpoints: ['gemini'],
+        reasoning: {
+          control: 'level',
+          variants: { low: 'gemini-3.1-pro-low', high: 'gemini-pro-agent' },
+          upstreamDefault: 'gemini-pro-agent',
+          legacyIds: ['gemini-3.1-pro-low', 'gemini-pro-agent'],
+        },
+      },
+    ])
+  );
+  const seen: Json[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (_url: string, init: RequestInit) => {
+      seen.push(JSON.parse(String(init.body)));
+      return Response.json({
+        response: { candidates: [{ content: { role: 'model', parts: [{ text: 'ok' }] }, finishReason: 'STOP' }] },
+      });
+    })
+  );
+  const slug = synced.account.providerSlug;
+  const call = (model: string, extra: Json = {}) =>
+    pipeline({
+      entry: 'openai',
+      rawBody: { messages: [{ role: 'user', content: 'hi' }], ...extra },
+      ir: { messages: [{ role: 'user', content: 'hi' }], ...extra },
+      requestedModel: model,
+      stream: false,
+      includeUsage: false,
+      clientSignal: new AbortController().signal,
+    });
+  expect((await call(`${slug}/gemini-3.1-pro`, { reasoning_effort: 'low' })).status).toBe(200);
+  expect((await call(`${slug}/gemini-3.1-pro`)).status).toBe(200);
+  expect((await call(`${slug}/gemini-3.1-pro-low`)).status).toBe(200);
+  expect((await call(`${slug}/gemini-3.1-pro`, { reasoning_effort: 'medium' })).status).toBe(200);
+  expect(seen.map((body) => body.model)).toEqual([
+    'gemini-3.1-pro-low',
+    'gemini-pro-agent',
+    'gemini-3.1-pro-low',
+    'gemini-3.1-pro-low',
+  ]);
+  expect(seen[0].request.generationConfig?.thinkingConfig).toBeUndefined();
+  expect(seen[3].request.generationConfig.thinkingConfig).toEqual({ thinkingLevel: 'medium' });
+  expect(store.listModels(a.id).map((m) => m.modelId)).toEqual(['gemini-3.1-pro']);
+});
+
+test('Codex clamps a chat reasoning_effort to the catalog levels on the Responses upstream', async () => {
+  const a = store.saveAccount('codex', {
+    accessToken: 'codex-token',
+    refreshToken: 'refresh',
+    accountKey: 'codex-reasoning',
+    email: null,
+    expiresAt: Date.now() + 3600000,
+  });
+  const synced = store.syncGatewayModels(
+    a.id,
+    fixtureDiscovery([
+      { id: 'gpt-5.5', displayName: null, endpoints: ['openai-responses'], reasoning: { control: 'level', efforts: ['low', 'medium', 'high', 'xhigh'] } },
+    ])
+  );
+  let upstream: Json = {};
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (_url: string, init: RequestInit) => {
+      upstream = JSON.parse(String(init.body));
+      const completed = {
+        type: 'response.completed',
+        response: {
+          id: 'r1',
+          status: 'completed',
+          output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] }],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      };
+      return new Response(`data: ${JSON.stringify(completed)}\n\n`, { headers: { 'Content-Type': 'text/event-stream' } });
+    })
+  );
+  const response = await pipeline({
+    entry: 'openai',
+    rawBody: { messages: [{ role: 'user', content: 'hi' }], reasoning_effort: 'max' },
+    ir: { messages: [{ role: 'user', content: 'hi' }], reasoning_effort: 'max' },
+    requestedModel: `${synced.account.providerSlug}/gpt-5.5`,
+    stream: false,
+    includeUsage: false,
+    clientSignal: new AbortController().signal,
+  });
+  expect(response.status).toBe(200);
+  expect(upstream.reasoning).toEqual({ effort: 'xhigh' });
+});
+
+test('Copilot prefers /responses for reasoning requests and strips an unsupported chat reasoning_effort', async () => {
+  const a = store.saveAccount('copilot', {
+    accessToken: 'copilot-reasoning-session',
+    refreshToken: 'ghu-refresh',
+    accountKey: 'copilot-reasoning',
+    email: null,
+    expiresAt: Date.now() + 3600000,
+    apiBase: 'https://api.individual.githubcopilot.com',
+  });
+  const synced = store.syncGatewayModels(
+    a.id,
+    fixtureDiscovery([
+      { id: 'gpt-5.1', displayName: null, endpoints: ['openai', 'openai-responses'], reasoning: { control: 'level', efforts: ['low', 'medium', 'high'] } },
+      { id: 'claude-sonnet-4.5', displayName: null, endpoints: ['openai'] },
+    ])
+  );
+  const calls: { url: string; body: Json }[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string, init: RequestInit) => {
+      calls.push({ url, body: JSON.parse(String(init.body)) });
+      if (url.endsWith('/responses'))
+        return Response.json({
+          id: 'r1',
+          object: 'response',
+          status: 'completed',
+          model: 'gpt-5.1',
+          output: [{ type: 'message', id: 'm1', role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] }],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        });
+      return Response.json({
+        id: 'c1',
+        object: 'chat.completion',
+        choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+    })
+  );
+  const call = (model: string, extra: Json = {}) =>
+    pipeline({
+      entry: 'openai',
+      rawBody: { messages: [{ role: 'user', content: 'hi' }], ...extra },
+      ir: { messages: [{ role: 'user', content: 'hi' }], ...extra },
+      requestedModel: `${synced.account.providerSlug}/${model}`,
+      stream: false,
+      includeUsage: false,
+      clientSignal: new AbortController().signal,
+    });
+  expect((await call('gpt-5.1', { reasoning_effort: 'high' })).status).toBe(200);
+  expect((await call('claude-sonnet-4.5', { reasoning_effort: 'high' })).status).toBe(200);
+  expect((await call('gpt-5.1')).status).toBe(200);
+  expect(calls.map((c) => c.url)).toEqual([
+    'https://api.individual.githubcopilot.com/responses',
+    'https://api.individual.githubcopilot.com/chat/completions',
+    'https://api.individual.githubcopilot.com/chat/completions',
+  ]);
+  expect(calls[0].body.reasoning).toEqual({ effort: 'high' });
+  expect('reasoning_effort' in calls[1].body).toBe(false);
+});
+
+test('Claude subscriptions receive adaptive thinking and effort converted from a Responses request', async () => {
+  const a = store.saveAccount('claude', {
+    accessToken: 'claude-reasoning-token',
+    refreshToken: 'refresh',
+    accountKey: 'claude-reasoning',
+    email: null,
+    expiresAt: Date.now() + 3600000,
+  });
+  const linked = store.connectGateway(a.id, ['claude-opus-4-7']);
+  let upstream: Json = {};
+  let betas = '';
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (_url: string, init: RequestInit) => {
+      upstream = JSON.parse(String(init.body));
+      betas = new Headers(init.headers).get('anthropic-beta') ?? '';
+      return Response.json({
+        id: 'msg',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'ok' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    })
+  );
+  const response = await pipeline({
+    entry: 'responses',
+    rawBody: { input: 'hi', reasoning: { effort: 'xhigh' }, temperature: 0.3 },
+    ir: { messages: [{ role: 'user', content: 'hi' }], temperature: 0.3 },
+    requestedModel: `${linked.providerSlug}/claude-opus-4-7`,
+    stream: false,
+    includeUsage: true,
+    clientSignal: new AbortController().signal,
+  });
+  expect(response.status).toBe(200);
+  expect(upstream.thinking).toEqual({ type: 'adaptive' });
+  expect(upstream.output_config).toEqual({ effort: 'xhigh' });
+  expect(upstream.temperature).toBeUndefined();
+  expect(betas.split(',')).toContain('effort-2025-11-24');
+});
+
+test('subscription model routes list without a mutation origin, and patch or delete only owned models', async () => {
+  const route = await import('../../app/api/admin/subscriptions/[[...path]]/route');
+  const a = store.saveAccount('codex', {
+    accessToken: 'route-token',
+    refreshToken: 'refresh',
+    accountKey: 'route-models',
+    email: null,
+    expiresAt: Date.now() + 3600000,
+  });
+  store.connectGateway(a.id, ['gpt-5.5', 'gpt-5.4']);
+  const base = `http://localhost:3000/api/admin/subscriptions/${a.id}/models`;
+  const list = await route.GET(new Request(base), { params: Promise.resolve({ path: [a.id, 'models'] }) });
+  expect(list.status).toBe(200);
+  const { models } = await list.json();
+  expect(models.map((m: Json) => m.modelId)).toEqual(['gpt-5.4', 'gpt-5.5']);
+  const mutate = (method: 'PATCH' | 'DELETE', modelRowId: string, body?: Json, origin = 'http://localhost:3000') =>
+    route[method](
+      new Request(`${base}/${modelRowId}`, {
+        method,
+        headers: { Origin: origin, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+        body: body ? JSON.stringify(body) : undefined,
+      }),
+      { params: Promise.resolve({ path: [a.id, 'models', modelRowId] }) }
+    );
+  expect((await mutate('PATCH', models[0].id, { enabled: false, input_price: 3 })).status).toBe(400);
+  expect((await mutate('PATCH', models[0].id, { enabled: false }, 'https://evil.example')).status).toBe(403);
+  const patched = await mutate('PATCH', models[0].id, { enabled: false });
+  expect(patched.status).toBe(200);
+  expect((await patched.json()).model.enabled).toBe(false);
+  expect((await mutate('DELETE', models[1].id)).status).toBe(200);
+  expect((await mutate('DELETE', models[1].id)).status).toBe(404);
+  expect(store.listModels(a.id).map((m) => m.modelId)).toEqual(['gpt-5.4']);
+});

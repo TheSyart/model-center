@@ -19,6 +19,12 @@ import {
   SubscriptionError,
 } from './oauth.ts';
 import { isValidModelId } from './store.ts';
+import {
+  REASONING_EFFORTS,
+  isReasoningEffort,
+  type ModelReasoning,
+  type ReasoningEffort,
+} from '../gateway/reasoning.ts';
 import { subscriptionFetch } from './transport.ts';
 import type {
   Credential,
@@ -50,7 +56,12 @@ function collector() {
     skip() {
       skipped++;
     },
-    add(id: unknown, displayName: unknown, endpoints: ModelEndpoint[]) {
+    add(
+      id: unknown,
+      displayName: unknown,
+      endpoints: ModelEndpoint[],
+      reasoning?: ModelReasoning
+    ) {
       const value = safeString(id, 200);
       if (!value || !isValidModelId(value) || !endpoints.length) {
         skipped++;
@@ -67,6 +78,7 @@ function collector() {
         id: value,
         displayName: safeString(displayName),
         endpoints: [...endpoints],
+        ...(reasoning ? { reasoning } : {}),
       });
     },
     finish(source: string): ModelDiscovery {
@@ -84,6 +96,117 @@ function collector() {
       };
     },
   };
+}
+
+const sortEfforts = (efforts: ReasoningEffort[]): ReasoningEffort[] =>
+  [...new Set(efforts)].sort(
+    (a, b) => REASONING_EFFORTS.indexOf(a) - REASONING_EFFORTS.indexOf(b)
+  );
+
+interface AntigravityEntry {
+  id: string;
+  displayName: string | null;
+  maxOutputTokens?: number;
+}
+
+/** Irregular IDs Antigravity serves for one level, checked before the suffix rules.
+ * Listed in preference order: OmniRoute reports the advertised gemini-3.1-pro-high slot
+ * answering 400 while gemini-pro-agent serves the high tier. */
+const ANTIGRAVITY_FIXED: Record<string, { base: string; effort: ReasoningEffort }> = {
+  'gemini-pro-agent': { base: 'gemini-3.1-pro', effort: 'high' },
+  'gemini-3.1-pro-high': { base: 'gemini-3.1-pro', effort: 'high' },
+};
+const EFFORT_SUFFIX = /^(.+)-(minimal|low|medium|high|xhigh|max)$/;
+const LEVEL_LABEL = /\s*\((?:minimal|low|medium|high|xhigh|max|thinking)\)\s*$/i;
+const cleanLabel = (name: string | null) =>
+  name ? name.replace(LEVEL_LABEL, '') || null : null;
+
+/**
+ * Antigravity lists one model at several strengths as separate IDs. Fold them into a
+ * base model whose reasoning metadata maps each level to its upstream ID, so clients
+ * pick strength with the reasoning parameter; the old IDs stay callable via legacyIds.
+ */
+export function foldAntigravityVariants(entries: AntigravityEntry[]): DiscoveredModel[] {
+  type Member = AntigravityEntry & {
+    kind: 'base' | 'effort' | 'thinking' | 'tiered';
+    effort?: ReasoningEffort;
+  };
+  const groups = new Map<string, Member[]>();
+  for (const entry of entries) {
+    const fixed = ANTIGRAVITY_FIXED[entry.id];
+    const suffix = EFFORT_SUFFIX.exec(entry.id);
+    let base = entry.id;
+    let member: Member = { ...entry, kind: 'base' };
+    if (fixed) {
+      base = fixed.base;
+      member = { ...entry, kind: 'effort', effort: fixed.effort };
+    } else if (entry.id.endsWith('-thinking')) {
+      base = entry.id.slice(0, -'-thinking'.length);
+      member = { ...entry, kind: 'thinking' };
+    } else if (entry.id.endsWith('-tiered')) {
+      base = entry.id.slice(0, -'-tiered'.length);
+      member = { ...entry, kind: 'tiered' };
+    } else if (suffix) {
+      base = suffix[1];
+      member = { ...entry, kind: 'effort', effort: suffix[2] as ReasoningEffort };
+    }
+    groups.set(base, [...(groups.get(base) ?? []), member]);
+  }
+  const preference = Object.keys(ANTIGRAVITY_FIXED);
+  const rank = (id: string) =>
+    preference.includes(id) ? preference.indexOf(id) : preference.length;
+  const folded: DiscoveredModel[] = [];
+  for (const [base, members] of groups) {
+    const control: ModelReasoning['control'] = base.startsWith('claude-')
+      ? 'budget'
+      : base.startsWith('gemini-')
+        ? 'level'
+        : 'none';
+    const plain = members.find((m) => m.kind === 'base');
+    const thinking = members.find((m) => m.kind === 'thinking');
+    const tiered = members.find((m) => m.kind === 'tiered');
+    const maxOutput = (thinking ?? plain ?? members[0]).maxOutputTokens;
+    const budget =
+      control === 'budget' && maxOutput && maxOutput > 1
+        ? { budget: { max: maxOutput - 1 } }
+        : {};
+    if (plain && members.length === 1) {
+      folded.push({
+        id: base,
+        displayName: cleanLabel(plain.displayName),
+        endpoints: ['gemini'],
+        ...(control === 'none' ? {} : { reasoning: { control, ...budget } }),
+      });
+      continue;
+    }
+    const variants: Partial<Record<ReasoningEffort, string>> = {};
+    for (const m of [...members].sort((a, b) => rank(a.id) - rank(b.id)))
+      if (m.kind === 'effort' && m.effort && !variants[m.effort]) variants[m.effort] = m.id;
+    const levels = sortEfforts(Object.keys(variants).filter(isReasoningEffort));
+    const upstreamDefault =
+      plain?.id ??
+      tiered?.id ??
+      variants.high ??
+      (levels.length ? variants[levels[levels.length - 1]] : undefined) ??
+      thinking?.id ??
+      base;
+    const reasoning: ModelReasoning = {
+      control,
+      upstreamDefault,
+      legacyIds: members.map((m) => m.id).filter((id) => id !== base),
+      ...budget,
+    };
+    if (levels.length) reasoning.variants = variants;
+    if (thinking && plain) reasoning.thinkingVariant = thinking.id;
+    const label = members.find((m) => m.id === upstreamDefault) ?? members[0];
+    folded.push({
+      id: base,
+      displayName: cleanLabel(label.displayName),
+      endpoints: ['gemini'],
+      reasoning,
+    });
+  }
+  return folded;
 }
 
 const semver = (value: unknown): number[] | null => {
@@ -154,7 +277,32 @@ export async function fetchSubscriptionModels(
               : []),
           ]
         : ['openai'];
-      found.add(id, model.name, endpoints);
+      const supports = object(object(model.capabilities).supports);
+      const efforts = Array.isArray(supports.reasoning_effort)
+        ? sortEfforts(supports.reasoning_effort.filter(isReasoningEffort))
+        : [];
+      const minBudget = Number.isFinite(supports.min_thinking_budget)
+        ? (supports.min_thinking_budget as number)
+        : undefined;
+      const maxBudget = Number.isFinite(supports.max_thinking_budget)
+        ? (supports.max_thinking_budget as number)
+        : undefined;
+      const reasoning: ModelReasoning | undefined =
+        efforts.length || minBudget !== undefined || maxBudget !== undefined
+          ? {
+              control: efforts.length ? 'level' : 'budget',
+              ...(efforts.length ? { efforts } : {}),
+              ...(minBudget !== undefined || maxBudget !== undefined
+                ? {
+                    budget: {
+                      ...(minBudget !== undefined ? { min: minBudget } : {}),
+                      ...(maxBudget !== undefined ? { max: maxBudget } : {}),
+                    },
+                  }
+                : {}),
+            }
+          : undefined;
+      found.add(id, model.name, endpoints, reasoning);
     }
     return found.finish(`GET ${new URL(base).host}/models`);
   }
@@ -191,10 +339,26 @@ export async function fetchSubscriptionModels(
         found.skip();
         continue;
       }
+      const levels = Array.isArray(model.supported_reasoning_levels)
+        ? sortEfforts(
+            model.supported_reasoning_levels
+              .map((level: unknown) => object(level).effort ?? level)
+              .filter(isReasoningEffort)
+          )
+        : [];
       found.add(
         safeString(model.slug, 200) ?? safeString(model.id, 200) ?? model.model,
         model.display_name,
-        ['openai-responses']
+        ['openai-responses'],
+        levels.length
+          ? {
+              control: 'level',
+              efforts: levels,
+              ...(isReasoningEffort(model.default_reasoning_level)
+                ? { defaultEffort: model.default_reasoning_level }
+                : {}),
+            }
+          : undefined
       );
     }
     return found.finish('GET chatgpt.com/backend-api/codex/models');
@@ -258,18 +422,28 @@ export async function fetchSubscriptionModels(
     const catalog = body.models;
     if (!catalog || typeof catalog !== 'object' || Array.isArray(catalog))
       throw invalid();
+    const entries: AntigravityEntry[] = [];
     for (const [id, raw] of Object.entries(catalog)) {
       const info = object(raw);
       if (
         info.isInternal === true ||
         ANTIGRAVITY_EXCLUDED.has(id) ||
-        NON_CHAT.test(id)
+        NON_CHAT.test(id) ||
+        !isValidModelId(id)
       ) {
         found.skip();
         continue;
       }
-      found.add(id, info.displayName, ['gemini']);
+      entries.push({
+        id,
+        displayName: safeString(info.displayName),
+        ...(Number.isFinite(info.maxOutputTokens)
+          ? { maxOutputTokens: info.maxOutputTokens as number }
+          : {}),
+      });
     }
+    for (const model of foldAntigravityVariants(entries))
+      found.add(model.id, model.displayName, ['gemini'], model.reasoning);
     return found.finish(
       'POST daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels'
     );

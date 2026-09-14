@@ -5,11 +5,14 @@ import { db, schema, sqlite } from '@/lib/db';
 import { getPreset } from '@/lib/presets';
 import { EndpointValidationError, replaceProviderEndpoints } from '@/lib/services/provider-endpoint';
 import { resolveEndpointSetForCreate } from '@/lib/services/provider-endpoint-request';
-import { getProvider, listProviders, serializeProvider, validateBaseUrl } from '@/lib/services/provider';
+import { getProvider, listProviders, providerAuthPolicy, serializeProvider, validateBaseUrl } from '@/lib/services/provider';
 
-// GET /api/admin/providers：服务商列表（不含 api_key，只返回 has_key）
-export async function GET() {
-  return NextResponse.json({ providers: listProviders().map((provider) => serializeProvider(provider)) });
+// GET /api/admin/providers：服务商列表（不含 api_key，只返回 has_key）。
+// ?auth_kind=api_key 只返回 API Key 服务商（服务商页）；默认含订阅服务商（别名、日志、看板需要）。
+export async function GET(req: Request) {
+  const linked = new URL(req.url).searchParams.get('auth_kind') === 'api_key' ? providerAuthPolicy.linkedProviderIds() : null;
+  const providers = listProviders().filter((provider) => !linked?.has(provider.id));
+  return NextResponse.json({ providers: providers.map((provider) => serializeProvider(provider)) });
 }
 
 interface CreateBody {

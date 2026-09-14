@@ -58,6 +58,11 @@ async function handle(
     const parts = (await context.params).path ?? [];
     if (req.method === 'GET' && !parts.length)
       return json({ accounts: store.list() });
+    // Read-only listing: handled before the mutation guard, which a same-origin GET cannot satisfy.
+    if (req.method === 'GET' && parts.length === 2 && parts[1] === 'models') {
+      if (!store.get(parts[0])) throw new StoreError('账号不存在', 404);
+      return json({ models: store.listModels(parts[0]) });
+    }
     assertSubscriptionMutation(req);
     const body = req.method === 'DELETE' ? {} : await readSubscriptionBody(req);
     if (parts[0] === 'oauth' && parts.length === 1 && req.method === 'POST') {
@@ -210,6 +215,12 @@ async function handle(
         );
       const { account: _synced, ...summary } = result;
       return json({ account, result: summary });
+    }
+    if (parts.length === 3 && parts[1] === 'models' && req.method === 'PATCH')
+      return json({ model: store.updateModel(id, parts[2], body) });
+    if (parts.length === 3 && parts[1] === 'models' && req.method === 'DELETE') {
+      store.deleteModel(id, parts[2]);
+      return json({ ok: true });
     }
     if (parts.length === 2 && parts[1] === 'gateway' && req.method === 'POST')
       return json({
