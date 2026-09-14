@@ -78,7 +78,7 @@ npm run sync:cc-switch -- --ref <SHA>
 2. 同厂商但协议不同，或协议相同但端点不同，保留为独立变体。不要仅按显示名称去重。
 3. slug 来自稳定的厂商名、协议和必要的端点消歧；同步时必须检查 slug 唯一。已有本地 provider 行不会被生成数据覆盖，API Key、Base URL、启用状态、备注和优先级保持不变。
 4. 推荐标记、历史 slug 兼容、余额与 Coding Plan 本地行为通过 `lib/presets/index.ts` 的稳定匹配覆盖，禁止重新拼接 `legacy + generated` 造成重复选择项。
-5. OAuth-only、Bedrock 或其他当前网关无法鉴权的预设保留在 catalog，选择器中禁用并给出 `disabledReason`。
+5. OAuth-only 预设保留在 catalog，从 API Key 服务商选择器移到“订阅账号”；已实现的授权入口按订阅模块能力启用，未实现的厂商保留图标和禁用占位。Bedrock 或其他当前网关无法鉴权的非 OAuth 预设仍在 API Key 选择器中禁用并给出 `disabledReason`。
 6. 无 Base URL 的自定义模板进入 `exclusions`。每条原始记录必须记为 included、merged 或 excluded，三类数量之和必须等于 rawProviderCount，禁止静默丢弃。
 
 ## 逻辑服务商分组与别名审查
@@ -298,7 +298,7 @@ npm run build
 git diff -- lib/presets/cc-switch.ts lib/presets/cc-switch-catalog.json lib/presets/cc-switch-manifest.json lib/pricing/cc-switch.ts public/logos
 ```
 
-审查至少确认：SHA 和 blob SHA 正确；10 类来源都存在；255 个低层变体、82 个逻辑服务商、9 次语义合并和逻辑候选/旧 slug 覆盖均符合基线；数量变化有上游证据；覆盖账本闭合；canonical slug 无重复；OAuth/不支持项仍被禁用；定价 repair 后数量和关键价格正确；图标数量及 checksum 正确；重复运行 `--check` 无差异。
+审查至少确认：SHA 和 blob SHA 正确；10 类来源都存在；255 个低层变体、82 个逻辑服务商、9 次语义合并和逻辑候选/旧 slug 覆盖均符合基线；数量变化有上游证据；覆盖账本闭合；canonical slug 无重复；OAuth-only 项在订阅目录中完整呈现且未实现项保持禁用；非 OAuth 不支持项仍被禁用；定价 repair 后数量和关键价格正确；图标数量及 checksum 正确；重复运行 `--check` 无差异。
 
 当前基线数量：Claude 77、Claude Desktop 74、Codex 72、Gemini 23、Grok Build 38（含独立 Official）、OpenCode 65、OpenClaw 65、Hermes 66、Pi 58、Universal 2。上游数量变化不是自动错误，但必须先审查结构与语义，再更新脚本断言和本文基线。
 

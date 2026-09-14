@@ -5,7 +5,7 @@
 ## 使用
 
 1. 启动现有 Model Center，进入侧栏 **订阅账号**。沿用当前 `MASTER_KEY` 和数据库目录。Gemini 登录另外需要在服务端配置 `GEMINI_OAUTH_CLIENT_ID` 和 `GEMINI_OAUTH_CLIENT_SECRET`，使用与官方 Code Assist 授权码流程兼容的客户端配置；配置值不随 Git 分发，缺失时显示明确错误。Claude/Codex 不需要这两个变量。
-2. 选择 **登录 Claude Code / Codex / Gemini CLI**，生成链接后打开官方授权页。
+2. 授权登录厂商集中在订阅页，复用服务商目录中的图标。**GitHub Copilot、xAI (Grok)** 保留“尚未开放”占位，不发起未实现的登录；API Key 服务商选择器不再展示 OAuth-only 预设。选择 **登录 Claude Code / Codex / Gemini CLI**，生成链接后打开官方授权页。
 3. Claude/Codex 授权后，复制浏览器地址栏的完整本地回调 URL。页面显示 localhost 无法访问不影响复制；本应用使用手动粘贴回调，无需开启回调监听端口。Google 使用官方授权码页面，复制授权码。返回 Model Center，粘贴并完成登录。
 4. Gemini 个人账号可先留空项目；已有组织项目可填写 Google Cloud 项目 ID。项目必须已具备相应权限。登录与额度查询分别处理，额度查询失败不会删除有效登录。
 5. 点击 **刷新额度** 或 **刷新全部额度** 获取厂商数据。页面每 60 秒读取本地快照；官方额度仅在登录后或手动刷新时查询，避免打开多个页面重复请求上游。

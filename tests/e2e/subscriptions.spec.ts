@@ -8,6 +8,30 @@ test('subscription login has a real server session, secure cookie and cancellabl
     page.getByRole('heading', { name: '订阅账号', exact: true })
   ).toBeVisible();
   await expect(page.getByText('添加你的第一个订阅账号')).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'GitHub Copilot（尚未开放）' })
+  ).toBeDisabled();
+  await expect(
+    page.getByRole('button', { name: 'xAI (Grok)（尚未开放）' })
+  ).toBeDisabled();
+  const picker = page.getByRole('region', { name: '订阅登录服务商' });
+  for (const src of [
+    '/logos/anthropic.svg',
+    '/logos/openai.svg',
+    '/logos/gemini.svg',
+    '/logos/github.svg',
+    '/logos/xai.svg',
+  ]) {
+    const icon = picker.locator(`img[src="${src}"]`);
+    await expect(icon).toBeVisible();
+    await expect
+      .poll(() =>
+        icon.evaluate(
+          (img: HTMLImageElement) => img.complete && img.naturalWidth > 0
+        )
+      )
+      .toBe(true);
+  }
   await page.getByRole('button', { name: '登录 Codex', exact: true }).click();
   const created = page.waitForResponse(
     (r) =>
@@ -38,6 +62,25 @@ test('subscription login has a real server session, secure cookie and cancellabl
   await page.getByRole('button', { name: '关闭', exact: true }).click();
   expect((await cancelled).status()).toBe(200);
   await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.goto('/providers');
+  await page
+    .getByRole('button', { name: '新建服务商', exact: true })
+    .first()
+    .click();
+  const dialog = page.getByRole('dialog');
+  for (const name of ['Codex', 'GitHub Copilot', 'xAI (Grok)'])
+    await expect(
+      dialog.getByRole('button', {
+        name: new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+      })
+    ).toHaveCount(0);
+  await expect(
+    dialog.getByRole('button', { name: /Claude Official/ })
+  ).toBeVisible();
+  await dialog.getByRole('link', { name: '订阅账号', exact: true }).click();
+  await expect(
+    page.getByRole('region', { name: '订阅登录服务商' })
+  ).toBeVisible();
 });
 
 test('quota cards and gateway form remain usable on mobile and desktop', async ({
@@ -156,6 +199,17 @@ test('quota cards and gateway form remain usable on mobile and desktop', async (
     path: info.outputPath('subscriptions.png'),
     fullPage: true,
   });
+  await page.evaluate(() =>
+    document.documentElement.setAttribute('data-theme', 'dark')
+  );
+  await expect(page.getByRole('button', { name: '登录 Codex', exact: true })).toHaveCSS('background-color', 'rgb(23, 26, 32)');
+  await page.screenshot({
+    path: info.outputPath('subscriptions-dark.png'),
+    fullPage: true,
+  });
+  await page.evaluate(() =>
+    document.documentElement.setAttribute('data-theme', 'light')
+  );
   await page
     .getByRole('button', { name: '接入网关', exact: true })
     .first()

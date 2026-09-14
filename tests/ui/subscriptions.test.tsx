@@ -1,3 +1,5 @@
+import { PROVIDER_PRESETS } from '@/lib/presets';
+import { buildSubscriptionCatalog } from '@/lib/subscriptions/catalog';
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { render, screen, waitFor, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -52,7 +54,11 @@ describe('subscription accounts UI', () => {
       'fetch',
       vi.fn().mockResolvedValue(Response.json({ accounts: [account] }))
     );
-    render(<SubscriptionsClient />);
+    render(
+      <SubscriptionsClient
+        catalog={buildSubscriptionCatalog(PROVIDER_PRESETS)}
+      />
+    );
     expect(await screen.findByText('demo@example.com')).toBeInTheDocument();
     expect(screen.getByText('剩余 0%')).toBeInTheDocument();
     expect(screen.getByText('剩余额度未知')).toBeInTheDocument();
@@ -73,8 +79,21 @@ describe('subscription accounts UI', () => {
       return Response.json({ accounts: [] });
     });
     vi.stubGlobal('fetch', fetcher);
-    render(<SubscriptionsClient />);
+    render(
+      <SubscriptionsClient
+        catalog={buildSubscriptionCatalog(PROVIDER_PRESETS)}
+      />
+    );
     const user = userEvent.setup();
+    expect(
+      screen.getByRole('button', { name: 'GitHub Copilot（尚未开放）' })
+    ).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: 'xAI (Grok)（尚未开放）' })
+    ).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: '登录 Codex' }).querySelector('img')
+    ).toHaveAttribute('src', '/logos/openai.svg');
     await user.click(await screen.findByRole('button', { name: '登录 Codex' }));
     await user.click(screen.getByRole('button', { name: '生成授权链接' }));
     expect(
@@ -103,7 +122,11 @@ describe('subscription accounts UI', () => {
       })
     );
     vi.stubGlobal('fetch', fetcher);
-    render(<SubscriptionsClient />);
+    render(
+      <SubscriptionsClient
+        catalog={buildSubscriptionCatalog(PROVIDER_PRESETS)}
+      />
+    );
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: '接入网关' }));
     expect(screen.getByRole('button', { name: '保存接入' })).toBeDisabled();

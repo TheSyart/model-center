@@ -18,6 +18,10 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
+import SubscriptionProviderPicker, {
+  SubscriptionLogo,
+} from './subscription-provider-picker';
+import type { SubscriptionCatalogItem } from '@/lib/subscriptions/catalog';
 import { useConfirm } from '@/components/confirm-dialog';
 import type {
   AccountView,
@@ -64,7 +68,11 @@ async function api(
   return data;
 }
 
-export default function SubscriptionsClient() {
+export default function SubscriptionsClient({
+  catalog,
+}: {
+  catalog: SubscriptionCatalogItem[];
+}) {
   const [accounts, setAccounts] = useState<AccountView[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -248,18 +256,11 @@ export default function SubscriptionsClient() {
           </Button>
         }
       />
-      <div className="mb-6 flex flex-wrap items-center gap-2">
-        {(Object.keys(names) as SubscriptionVendor[]).map((v) => (
-          <Button
-            key={v}
-            variant="outline"
-            disabled={!!busy}
-            onClick={() => openLogin({ vendor: v })}
-          >
-            登录 {names[v]}
-          </Button>
-        ))}
-      </div>
+      <SubscriptionProviderPicker
+        catalog={catalog}
+        busy={!!busy}
+        onLogin={(vendor) => openLogin({ vendor })}
+      />
       {error && (
         <div
           role="alert"
@@ -293,6 +294,12 @@ export default function SubscriptionsClient() {
               <div className="flex items-start justify-between gap-3 border-b p-5">
                 <div className="min-w-0">
                   <div className="mb-1 flex flex-wrap items-center gap-2">
+                    <SubscriptionLogo
+                      name={names[a.vendor]}
+                      logo={
+                        catalog.find((item) => item.vendor === a.vendor)?.logo
+                      }
+                    />
                     <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                       {names[a.vendor]}
                     </span>

@@ -1,6 +1,8 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import Link from 'next/link';
+import { isOAuthOnlyPreset } from '@/lib/subscriptions/catalog';
 import { getPreset, PROVIDER_PRESETS } from '@/lib/presets';
 import { filterProviderPresets, protocolDisplayName } from '@/lib/services/provider-form';
 import { cardCls, inputCls } from '@/components/ui/styles';
@@ -20,13 +22,13 @@ function PresetLogo({ slug, name, logo }: { slug: string; name: string; logo?: s
 
 export default function PresetCardGrid({ selectedPresetKey, onSelectPreset }: PresetCardGridProps) {
   const [query, setQuery] = useState('');
-  const presets = useMemo(() => filterProviderPresets(PROVIDER_PRESETS, query), [query]);
+  const presets = useMemo(() => filterProviderPresets(PROVIDER_PRESETS.filter(preset => !isOAuthOnlyPreset(preset)), query), [query]);
   const selected = selectedPresetKey ? getPreset(selectedPresetKey) : undefined;
 
   return (
     <fieldset className="min-w-0">
       <legend className="text-sm font-medium text-foreground">选择服务商预设</legend>
-      <p className="mt-1 text-sm text-muted-foreground">选择预设后只需填写 API Key；多种上游格式会自动配置。</p>
+      <p className="mt-1 text-sm text-muted-foreground">选择预设后只需填写 API Key；授权登录请前往<Link href="/subscriptions" className="text-primary underline underline-offset-2">订阅账号</Link>。</p>
       <label className="mt-3 block">
         <span className="sr-only">搜索服务商预设</span>
         <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称、slug 或旧版 slug" className={`w-full ${inputCls}`} />
