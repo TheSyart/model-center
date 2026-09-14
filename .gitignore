@@ -30,3 +30,7 @@ next-env.d.ts
 
 # database files
 /data/
+
+# security deck source artwork stays local; public/security-risk-deck.html embeds the final images
+/docs/security-risk-deck-assets/
+/docs/security-risk-video-covers/
