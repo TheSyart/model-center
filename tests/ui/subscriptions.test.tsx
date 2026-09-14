@@ -86,8 +86,8 @@ describe('subscription accounts UI', () => {
     );
     const user = userEvent.setup();
     expect(
-      screen.getByRole('button', { name: 'GitHub Copilot（尚未开放）' })
-    ).toBeDisabled();
+      screen.getByRole('button', { name: '登录 GitHub Copilot' })
+    ).toBeEnabled();
     expect(
       screen.getByRole('button', { name: 'xAI (Grok)（尚未开放）' })
     ).toBeDisabled();
@@ -115,6 +115,81 @@ describe('subscription accounts UI', () => {
         )
       ).toBe(true)
     );
+  });
+  it('shows the Copilot device code and completes login by polling', async () => {
+    let polls = 0;
+    const copilotAccount = {
+      ...account,
+      id: 'c',
+      vendor: 'copilot',
+      displayName: 'octo',
+      quota: null,
+      quotaError: null,
+      providerId: 'p',
+      providerSlug: 'oauth-copilot-c',
+      modelCount: 2,
+      modelsSyncedAt: Date.now(),
+      modelsError: null,
+    };
+    const fetcher = vi.fn(async (url: string) => {
+      if (url.endsWith('/oauth/poll')) {
+        polls++;
+        return Response.json(
+          polls === 1 ? { status: 'pending', retryAfterMs: 1000 } : { account: copilotAccount }
+        );
+      }
+      if (url.endsWith('/oauth'))
+        return Response.json({
+          session: {
+            id: 'device-session',
+            kind: 'device',
+            url: 'https://github.com/login/device',
+            userCode: 'WDJB-MJHT',
+            intervalMs: 1000,
+            expiresAt: Date.now() + 900000,
+          },
+        });
+      return Response.json({ accounts: [] });
+    });
+    vi.stubGlobal('fetch', fetcher);
+    render(<SubscriptionsClient catalog={buildSubscriptionCatalog(PROVIDER_PRESETS)} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: '登录 GitHub Copilot' }));
+    await user.click(screen.getByRole('button', { name: '获取设备码' }));
+    expect(await screen.findByText('WDJB-MJHT')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: '打开 GitHub 验证页' })).toHaveAttribute(
+      'href',
+      'https://github.com/login/device'
+    );
+    expect(screen.queryByLabelText('授权结果')).not.toBeInTheDocument();
+    expect(await screen.findByText('octo', {}, { timeout: 5000 })).toBeInTheDocument();
+    expect(polls).toBe(2);
+    expect(screen.getByText(/模型：2 个/)).toBeInTheDocument();
+  }, 10000);
+  it('re-syncs models and falls back to manual entry with the fetch error', async () => {
+    const failed = {
+      ...account,
+      modelsError: '模型列表拉取失败：上游拒绝请求',
+      modelsSyncedAt: null,
+      modelCount: 0,
+    };
+    const fetcher = vi.fn(async (url: string) => {
+      if (url.endsWith('/a/models'))
+        return Response.json(
+          { error: '模型列表拉取失败：上游拒绝请求', account: failed },
+          { status: 502 }
+        );
+      return Response.json({ accounts: [failed] });
+    });
+    vi.stubGlobal('fetch', fetcher);
+    render(<SubscriptionsClient catalog={buildSubscriptionCatalog(PROVIDER_PRESETS)} />);
+    const user = userEvent.setup();
+    expect(await screen.findByText(/手动填写模型 ID/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '同步模型' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('上游拒绝请求');
+    await user.click(screen.getByRole('button', { name: '接入网关' }));
+    expect(screen.getByLabelText('模型 ID')).toBeInTheDocument();
+    expect(screen.getAllByText(/模型列表拉取失败：上游拒绝请求/).length).toBeGreaterThan(2);
   });
   it('requires explicit model ids to connect gateway', async () => {
     const fetcher = vi.fn(async () =>

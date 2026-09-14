@@ -51,6 +51,8 @@ docker compose --env-file /absolute/path/compose.env -f compose.production.yml u
 | `MODEL_CENTER_PUBLIC_ORIGIN` | 可选。HTTPS 反向代理后的公开 origin，例如 `https://models.example.com`，用于订阅登录同源校验和 Secure Cookie。 |
 | `ANTIGRAVITY_OAUTH_CLIENT_ID` / `ANTIGRAVITY_OAUTH_CLIENT_SECRET` | Antigravity CLI 登录所需的独立服务端 OAuth 客户端配置，详见订阅账号文档；不提交实际值。 |
 
+| `MODEL_CENTER_SUBSCRIPTION_PROXY_URL` | 可选。订阅 OAuth、令牌刷新、额度和订阅网关请求的 HTTP(S) 出站代理。容器必须能访问此地址；普通 API Key 服务商继续沿用原有网络路径。 |
+
 数据库为单文件 SQLite（`data/model-center.db`），备份即拷贝。
 
 ## 接入示例

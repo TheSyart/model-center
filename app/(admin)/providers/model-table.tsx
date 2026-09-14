@@ -165,7 +165,7 @@ export default function ModelTable({ providerId, models, onChanged, onToast, sub
             disabled={syncing || subscription}
             className={btn.ghost}
           >
-            {subscription ? '订阅模型需手动添加' : syncing ? '同步中…' : '同步模型'}
+            {subscription ? '订阅模型在订阅账号页同步' : syncing ? '同步中…' : '同步模型'}
           </button>
           <button
             type="button"

@@ -1,15 +1,17 @@
 import crypto from 'node:crypto';
 import type Database from 'better-sqlite3';
+import { replaceEndpointModelCatalogInTransaction } from '../services/provider-endpoint.ts';
 import type {
   AccountView,
   Authorization,
   Credential,
+  ModelDiscovery,
   QuotaSnapshot,
   SubscriptionVendor,
 } from './types.ts';
 
 const SUBSCRIPTION_ACCOUNTS_SCHEMA = `CREATE TABLE IF NOT EXISTS subscription_accounts (
-      id TEXT PRIMARY KEY, vendor TEXT NOT NULL CHECK(vendor IN ('claude','codex','gemini','antigravity')),
+      id TEXT PRIMARY KEY, vendor TEXT NOT NULL CHECK(vendor IN ('claude','codex','gemini','antigravity','copilot')),
       account_key TEXT NOT NULL, email TEXT, display_name TEXT NOT NULL,
       credential_enc TEXT NOT NULL, expires_at INTEGER NOT NULL, project_id TEXT,
       enabled INTEGER NOT NULL DEFAULT 1, auth_status TEXT NOT NULL DEFAULT 'ready',
@@ -25,7 +27,7 @@ export function migrateSubscriptionSchema(db: Database.Database) {
       "SELECT sql FROM sqlite_master WHERE type='table' AND name='subscription_accounts'"
     )
     .get() as { sql: string } | undefined;
-  if (existing && !existing.sql.includes("'antigravity'")) {
+  if (existing && !existing.sql.includes("'copilot'")) {
     if (db.inTransaction)
       throw new Error(
         'Subscription schema migration requires its own transaction'
@@ -55,13 +57,79 @@ export function migrateSubscriptionSchema(db: Database.Database) {
     CREATE TABLE IF NOT EXISTS subscription_oauth_sessions (
       id TEXT PRIMARY KEY, owner_hash TEXT NOT NULL, authorization_enc TEXT NOT NULL,
       project_id TEXT, reconnect_id TEXT, expires_at INTEGER NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending'
+      status TEXT NOT NULL DEFAULT 'pending',
+      next_poll_at INTEGER, poll_count INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS subscription_provider_links (
       account_id TEXT UNIQUE NOT NULL REFERENCES subscription_accounts(id) ON DELETE RESTRICT,
       provider_id TEXT PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE
     );
   `);
+  // The sessions table is ephemeral, so widening it needs no rebuild.
+  const sessionColumns = new Set(
+    (
+      db.pragma('table_info(subscription_oauth_sessions)') as { name: string }[]
+    ).map((column) => column.name)
+  );
+  for (const [column, ddl] of [
+    ['next_poll_at', 'INTEGER'],
+    ['poll_count', 'INTEGER NOT NULL DEFAULT 0'],
+  ] as const)
+    if (!sessionColumns.has(column))
+      db.exec(
+        `ALTER TABLE subscription_oauth_sessions ADD COLUMN ${column} ${ddl}`
+      );
+  // Model-sync bookkeeping is also widened in place. It stays out of
+  // SUBSCRIPTION_ACCOUNTS_SCHEMA because the vendor rebuild above copies rows with
+  // SELECT *, which needs the old and new column lists to match. A future rebuild
+  // must add these columns to its target table first.
+  const accountColumns = new Set(
+    (
+      db.pragma('table_info(subscription_accounts)') as { name: string }[]
+    ).map((column) => column.name)
+  );
+  for (const [column, ddl] of [
+    ['models_error', 'TEXT'],
+    ['models_synced_at', 'INTEGER'],
+    ['models_attempted_at', 'INTEGER'],
+  ] as const)
+    if (!accountColumns.has(column))
+      db.exec(`ALTER TABLE subscription_accounts ADD COLUMN ${column} ${ddl}`);
+}
+
+export const isValidModelId = (id: unknown): id is string =>
+  typeof id === 'string' &&
+  /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,199}$/.test(id) &&
+  !id.includes('..');
+
+/** A default endpoint with a complete catalog rejects models it does not list, so a
+ * model added by hand to a subscription provider has to join that catalog to stay
+ * routable. API-key providers keep their existing behaviour. */
+export function addManualModelsToCompleteCatalog(
+  db: Database.Database,
+  providerId: string,
+  modelIds: Iterable<string>,
+  observedAt: number
+) {
+  const insert = db.prepare(
+    `INSERT INTO provider_endpoint_models(endpoint_id,model_id,source,observed_at)
+    SELECT e.id,?,'manual',? FROM provider_endpoints e
+    WHERE e.provider_id=? AND e.is_default=1 AND e.model_catalog_complete=1
+      AND EXISTS(SELECT 1 FROM subscription_provider_links l WHERE l.provider_id=e.provider_id)
+    ON CONFLICT(endpoint_id,model_id) DO NOTHING`
+  );
+  for (const modelId of modelIds) insert.run(modelId, observedAt, providerId);
+}
+
+export interface ModelSyncResult {
+  account: AccountView;
+  added: number;
+  existing: number;
+  /** Previously synced models the vendor no longer lists; they are kept, not deleted. */
+  missing: number;
+  skipped: number;
+  total: number;
+  source: string;
 }
 
 type AccountRow = {
@@ -83,6 +151,9 @@ type AccountRow = {
   quota_json: string | null;
   quota_error: string | null;
   quota_attempted_at: number | null;
+  models_error: string | null;
+  models_synced_at: number | null;
+  models_attempted_at: number | null;
 };
 export interface RefreshLease {
   token: string;
@@ -108,6 +179,7 @@ export const SUBSCRIPTION_ENDPOINTS = {
     base: 'https://daily-cloudcode-pa.googleapis.com',
   },
   gemini: { protocol: 'gemini', base: 'https://cloudcode-pa.googleapis.com' },
+  copilot: { protocol: 'openai', base: 'https://api.githubcopilot.com' },
 } as const;
 
 export function createSubscriptionStore(
@@ -153,6 +225,16 @@ export function createSubscriptionStore(
       quotaAttemptedAt: a.quota_attempted_at,
       providerId: link?.id ?? null,
       providerSlug: link?.slug ?? null,
+      modelsError: a.models_error,
+      modelsSyncedAt: a.models_synced_at,
+      modelsAttemptedAt: a.models_attempted_at,
+      modelCount: link
+        ? (
+            db
+              .prepare('SELECT COUNT(*) n FROM models WHERE provider_id=?')
+              .get(link.id) as { n: number }
+          ).n
+        : 0,
     };
   }
   const scopedKey = (c: Credential) =>
@@ -211,57 +293,174 @@ export function createSubscriptionStore(
       .get(providerId) as { account_id: string } | undefined;
     return link ? get(link.account_id) : null;
   }
+  /** Caller owns the transaction. The first endpoint created becomes the default. */
+  function ensureEndpoint(
+    providerId: string,
+    protocol: string,
+    base: string,
+    timestamp: number
+  ): string {
+    const found = db
+      .prepare(
+        'SELECT id FROM provider_endpoints WHERE provider_id=? AND protocol=?'
+      )
+      .get(providerId, protocol) as { id: string } | undefined;
+    if (found) return found.id;
+    const hasDefault = db
+      .prepare(
+        'SELECT 1 FROM provider_endpoints WHERE provider_id=? AND is_default=1'
+      )
+      .get(providerId);
+    const endpointId = crypto.randomUUID();
+    db.prepare(
+      `INSERT INTO provider_endpoints(id,provider_id,protocol,base_url,enabled,is_default,created_at,updated_at) VALUES(?,?,?,?,1,?,?,?)`
+    ).run(
+      endpointId,
+      providerId,
+      protocol,
+      base,
+      hasDefault ? 0 : 1,
+      timestamp,
+      timestamp
+    );
+    return endpointId;
+  }
+  /** Caller owns the transaction. Creates the linked provider on first use. */
+  function ensureProvider(a: AccountRow, timestamp: number): string {
+    const linked = db
+      .prepare(
+        'SELECT provider_id FROM subscription_provider_links WHERE account_id=?'
+      )
+      .get(a.id) as { provider_id: string } | undefined;
+    if (linked) return linked.provider_id;
+    const endpoint = SUBSCRIPTION_ENDPOINTS[a.vendor];
+    const providerId = crypto.randomUUID();
+    db.prepare(
+      `INSERT INTO providers(id,slug,name,protocol,base_url,api_key_enc,enabled,priority,created_at,updated_at) VALUES(?,?,?,?,?,'',?,0,?,?)`
+    ).run(
+      providerId,
+      `oauth-${a.vendor}-${a.id.slice(0, 8)}`,
+      `${a.vendor} · ${a.display_name}`,
+      endpoint.protocol,
+      endpoint.base,
+      a.enabled,
+      timestamp,
+      timestamp
+    );
+    ensureEndpoint(providerId, endpoint.protocol, endpoint.base, timestamp);
+    db.prepare(
+      'INSERT INTO subscription_provider_links(account_id,provider_id) VALUES(?,?)'
+    ).run(a.id, providerId);
+    return providerId;
+  }
+  /** Manual fallback for when the vendor model list cannot be fetched. */
   function connectGateway(id: string, modelIds: string[]): AccountView {
     if (
       !Array.isArray(modelIds) ||
       !modelIds.length ||
       modelIds.length > 100 ||
-      modelIds.some(
-        (m) =>
-          typeof m !== 'string' ||
-          !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,199}$/.test(m) ||
-          m.includes('..')
-      )
+      !modelIds.every(isValidModelId)
     )
       throw new StoreError('请输入 1–100 个合法模型 ID');
     return db.transaction(() => {
-      const a = required(id);
-      const existing = get(id)!;
-      const providerId = existing.providerId ?? crypto.randomUUID();
-      if (!existing.providerId) {
-        const endpoint = SUBSCRIPTION_ENDPOINTS[a.vendor];
-        const timestamp = now();
-        db.prepare(
-          `INSERT INTO providers(id,slug,name,protocol,base_url,api_key_enc,enabled,priority,created_at,updated_at) VALUES(?,?,?,?,?,'',?,0,?,?)`
-        ).run(
-          providerId,
-          `oauth-${a.vendor}-${id.slice(0, 8)}`,
-          `${a.vendor} · ${a.display_name}`,
-          endpoint.protocol,
-          endpoint.base,
-          a.enabled,
-          timestamp,
-          timestamp
-        );
-        db.prepare(
-          `INSERT INTO provider_endpoints(id,provider_id,protocol,base_url,enabled,is_default,created_at,updated_at) VALUES(?,?,?,?,1,1,?,?)`
-        ).run(
-          crypto.randomUUID(),
-          providerId,
-          endpoint.protocol,
-          endpoint.base,
-          timestamp,
-          timestamp
-        );
-        db.prepare(
-          'INSERT INTO subscription_provider_links(account_id,provider_id) VALUES(?,?)'
-        ).run(id, providerId);
-      }
+      const timestamp = now();
+      const providerId = ensureProvider(required(id), timestamp);
       for (const modelId of new Set(modelIds))
         db.prepare(
           'INSERT INTO models(id,provider_id,model_id,enabled,pricing_source) VALUES(?,?,?,1,?) ON CONFLICT(provider_id,model_id) DO NOTHING'
         ).run(crypto.randomUUID(), providerId, modelId, 'subscription');
+      addManualModelsToCompleteCatalog(
+        db,
+        providerId,
+        new Set(modelIds),
+        timestamp
+      );
       return get(id)!;
+    })();
+  }
+  /** Merges a fetched vendor catalog into the gateway, creating the link if needed.
+   * Additive only: models are never deleted and existing enabled flags never change. */
+  function syncGatewayModels(
+    id: string,
+    discovery: ModelDiscovery
+  ): ModelSyncResult {
+    const models = discovery.models;
+    if (
+      !Array.isArray(models) ||
+      !models.length ||
+      models.length > 500 ||
+      !models.every((m) => isValidModelId(m?.id))
+    )
+      throw new StoreError('上游模型列表无效');
+    return db.transaction(() => {
+      const a = required(id);
+      const timestamp = now();
+      const providerId = ensureProvider(a, timestamp);
+      const existing = db
+        .prepare('SELECT model_id,synced FROM models WHERE provider_id=?')
+        .all(providerId) as { model_id: string; synced: number }[];
+      const known = new Set(existing.map((m) => m.model_id));
+      const insert = db.prepare(
+        "INSERT INTO models(id,provider_id,model_id,display_name,enabled,synced,pricing_source) VALUES(?,?,?,?,1,1,'subscription') ON CONFLICT(provider_id,model_id) DO NOTHING"
+      );
+      let added = 0;
+      for (const model of models) {
+        if (known.has(model.id)) continue;
+        insert.run(
+          crypto.randomUUID(),
+          providerId,
+          model.id,
+          model.displayName ?? null
+        );
+        known.add(model.id);
+        added++;
+      }
+      if (a.vendor === 'copilot') {
+        // Copilot serves some models only over /responses. One endpoint per protocol,
+        // each with a complete catalog, lets the endpoint selector route every entry
+        // protocol to an upstream path the model supports.
+        const base = SUBSCRIPTION_ENDPOINTS.copilot.base;
+        const chat = ensureEndpoint(providerId, 'openai', base, timestamp);
+        const responses = ensureEndpoint(
+          providerId,
+          'openai-responses',
+          base,
+          timestamp
+        );
+        const listed = new Map(models.map((m) => [m.id, m]));
+        // Manual and no-longer-listed models stay routable through chat completions.
+        replaceEndpointModelCatalogInTransaction(
+          db,
+          chat,
+          [...known].filter(
+            (modelId) => listed.get(modelId)?.endpoints.includes('openai') ?? true
+          ),
+          timestamp
+        );
+        replaceEndpointModelCatalogInTransaction(
+          db,
+          responses,
+          models
+            .filter((m) => m.endpoints.includes('openai-responses'))
+            .map((m) => m.id),
+          timestamp
+        );
+      }
+      db.prepare(
+        'UPDATE subscription_accounts SET models_error=NULL,models_synced_at=?,models_attempted_at=? WHERE id=?'
+      ).run(timestamp, timestamp, id);
+      const upstream = new Set(models.map((m) => m.id));
+      return {
+        account: get(id)!,
+        added,
+        existing: models.length - added,
+        missing: existing.filter(
+          (m) => m.synced === 1 && !upstream.has(m.model_id)
+        ).length,
+        skipped: discovery.skipped,
+        total: models.length,
+        source: discovery.source,
+      };
     })();
   }
   return {
@@ -269,6 +468,7 @@ export function createSubscriptionStore(
     saveAccount,
     accountForProvider,
     connectGateway,
+    syncGatewayModels,
     list: () =>
       (
         db
@@ -336,7 +536,8 @@ export function createSubscriptionStore(
       authorization: Authorization,
       owner: string,
       projectId?: string,
-      reconnectId?: string
+      reconnectId?: string,
+      ttlMs?: number
     ) {
       if (reconnectId && required(reconnectId).vendor !== authorization.vendor)
         throw new StoreError('重新登录的厂商不匹配');
@@ -344,7 +545,11 @@ export function createSubscriptionStore(
         'DELETE FROM subscription_oauth_sessions WHERE expires_at<?'
       ).run(now());
       const id = crypto.randomUUID();
-      const expiresAt = now() + 600000;
+      const ttl =
+        typeof ttlMs === 'number' && Number.isFinite(ttlMs)
+          ? Math.min(1_800_000, Math.max(60_000, Math.trunc(ttlMs)))
+          : 600000;
+      const expiresAt = now() + ttl;
       db.prepare(
         'INSERT INTO subscription_oauth_sessions(id,owner_hash,authorization_enc,project_id,reconnect_id,expires_at) VALUES(?,?,?,?,?,?)'
       ).run(
@@ -359,8 +564,66 @@ export function createSubscriptionStore(
         id,
         url: authorization.url,
         vendor: authorization.vendor,
+        kind: authorization.kind,
         expiresAt,
+        // device.handle stays server-side: holding it is enough to complete the login.
+        ...(authorization.device
+          ? {
+              userCode: authorization.device.userCode,
+              intervalMs: authorization.device.intervalMs,
+            }
+          : {}),
       };
+    },
+    /** Non-destructive read: lets a caller inspect a session without consuming it. */
+    readSession(id: string, owner: string) {
+      const row = db
+        .prepare(
+          "SELECT authorization_enc FROM subscription_oauth_sessions WHERE id=? AND owner_hash=? AND status='pending' AND expires_at>?"
+        )
+        .get(id, hash(owner), now()) as
+        | { authorization_enc: string }
+        | undefined;
+      if (!row)
+        throw new StoreError('登录会话已过期、已使用或不属于当前浏览器', 409);
+      return JSON.parse(deps.decrypt(row.authorization_enc)) as Authorization;
+    },
+    /** Paces device polling. Doubles as the concurrency guard: two overlapping polls
+     * must not both reach upstream, or the single-use device code gets spent twice. */
+    leasePoll(id: string, owner: string) {
+      return db.transaction(() => {
+        const row = db
+          .prepare(
+            "SELECT authorization_enc, next_poll_at, poll_count FROM subscription_oauth_sessions WHERE id=? AND owner_hash=? AND status='pending' AND expires_at>?"
+          )
+          .get(id, hash(owner), now()) as
+          | {
+              authorization_enc: string;
+              next_poll_at: number | null;
+              poll_count: number;
+            }
+          | undefined;
+        if (!row)
+          throw new StoreError('登录会话已过期、已使用或不属于当前浏览器', 409);
+        const at = now();
+        if (row.next_poll_at !== null && row.next_poll_at > at)
+          return { retryAfterMs: row.next_poll_at - at, authorization: null };
+        if (row.poll_count >= 600)
+          throw new StoreError('登录轮询次数过多，请重新发起登录', 429);
+        const authorization = JSON.parse(
+          deps.decrypt(row.authorization_enc)
+        ) as Authorization;
+        db.prepare(
+          'UPDATE subscription_oauth_sessions SET next_poll_at=?, poll_count=poll_count+1 WHERE id=?'
+        ).run(at + (authorization.device?.intervalMs ?? 5000), id);
+        return { retryAfterMs: 0, authorization };
+      })();
+    },
+    /** Backs the poll off further, for an upstream that asked us to slow down. */
+    deferPoll(id: string, owner: string, delayMs: number) {
+      db.prepare(
+        'UPDATE subscription_oauth_sessions SET next_poll_at=? WHERE id=? AND owner_hash=?'
+      ).run(now() + Math.min(60_000, Math.max(0, delayMs)), id, hash(owner));
     },
     takeSession(id: string, owner: string) {
       return db.transaction(() => {
@@ -452,6 +715,17 @@ export function createSubscriptionStore(
             'UPDATE subscription_accounts SET quota_json=?,quota_error=NULL,quota_attempted_at=? WHERE id=? AND version=?'
           )
           .run(JSON.stringify(snapshot), now(), id, version).changes === 1
+      );
+    },
+    saveModelsError(id: string, error: string, expectedVersion?: number) {
+      const version = expectedVersion ?? row(id)?.version;
+      if (version === undefined) return false;
+      return (
+        db
+          .prepare(
+            'UPDATE subscription_accounts SET models_error=?,models_attempted_at=? WHERE id=? AND version=?'
+          )
+          .run(error.slice(0, 300), now(), id, version).changes === 1
       );
     },
     saveQuotaError(id: string, error: string, expectedVersion?: number) {

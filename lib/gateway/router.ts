@@ -1,4 +1,4 @@
-import { and, desc, eq, or } from 'drizzle-orm';
+import { and, asc, desc, eq, or } from 'drizzle-orm';
 import { db, schema } from '@/lib/db';
 import type { ProviderRow } from '@/lib/services/provider';
 import { GatewayError } from './errors';
@@ -94,7 +94,8 @@ export function resolveModel(input: string): ResolvedRoute {
     return { targets: [{ provider, modelId }], alias: null, via: 'explicit' };
   }
 
-  // 3. 裸模型名：models.model_id 或 models.alias 全局匹配，取启用服务商中 priority 最高者
+  // 3. 裸模型名：models.model_id 或 models.alias 全局匹配，取启用服务商中 priority 最高者；
+  //    同优先级时先创建的服务商胜出，避免后接入的订阅服务商自动同步模型后抢占已有路由
   const rows = db
     .select({ model: schema.models, provider: schema.providers })
     .from(schema.models)
@@ -105,7 +106,7 @@ export function resolveModel(input: string): ResolvedRoute {
         or(eq(schema.models.modelId, input), eq(schema.models.alias, input)),
       ),
     )
-    .orderBy(desc(schema.providers.priority))
+    .orderBy(desc(schema.providers.priority), asc(schema.providers.createdAt))
     .all();
   const usable = rows.filter((r) => r.model.enabled === 1);
   if (usable.length === 0) {

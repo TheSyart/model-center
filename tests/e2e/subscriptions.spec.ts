@@ -9,8 +9,8 @@ test('subscription login has a real server session, secure cookie and cancellabl
   ).toBeVisible();
   await expect(page.getByText('添加你的第一个订阅账号')).toBeVisible();
   await expect(
-    page.getByRole('button', { name: 'GitHub Copilot（尚未开放）' })
-  ).toBeDisabled();
+    page.getByRole('button', { name: '登录 GitHub Copilot' })
+  ).toBeEnabled();
   await expect(
     page.getByRole('button', { name: 'xAI (Grok)（尚未开放）' })
   ).toBeDisabled();

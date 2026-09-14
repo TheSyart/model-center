@@ -22,6 +22,7 @@ const implemented: {
     vendor: 'antigravity',
     logo: '/subscriptions/antigravity.svg',
   },
+  { presetKey: 'github-copilot', name: 'GitHub Copilot', vendor: 'copilot' },
 ];
 
 /** Mixed API-key/OAuth providers retain their API-key entry. */

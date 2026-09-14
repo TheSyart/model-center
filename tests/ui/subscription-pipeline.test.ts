@@ -26,7 +26,7 @@ afterAll(() => {
   sqlite?.close();
   fs.rmSync(directory, { recursive: true, force: true });
 });
-for (const vendor of ['claude', 'codex', 'gemini', 'antigravity'] as SubscriptionVendor[])
+for (const vendor of ['claude', 'codex', 'gemini', 'antigravity', 'copilot'] as SubscriptionVendor[])
   for (const stream of [false, true])
     test(`${vendor} OAuth traverses actual router and protocol conversion (${stream ? 'SSE' : 'JSON'})`, async () => {
       const a = store.saveAccount(vendor, {
@@ -111,6 +111,27 @@ for (const vendor of ['claude', 'codex', 'gemini', 'antigravity'] as Subscriptio
             return stream
               ? new Response(`data: ${JSON.stringify(body)}\n\n`)
               : Response.json(body);
+          }
+          if (vendor === 'copilot') {
+            expect(url).toBe('https://api.githubcopilot.com/chat/completions');
+            expect(new Headers(init.headers).get('copilot-integration-id')).toBe('vscode-chat');
+            const chunk = {
+              id: 'c1',
+              object: 'chat.completion.chunk',
+              choices: [{ index: 0, delta: { content: 'hello' } }],
+            };
+            return stream
+              ? new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+                  headers: { 'Content-Type': 'text/event-stream' },
+                })
+              : Response.json({
+                  id: 'c1',
+                  object: 'chat.completion',
+                  choices: [
+                    { index: 0, message: { role: 'assistant', content: 'hello' }, finish_reason: 'stop' },
+                  ],
+                  usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 },
+                });
           }
           expect(url).toBe('https://api.anthropic.com/v1/messages');
           expect(new Headers(init.headers).has('x-api-key')).toBe(false);
@@ -495,4 +516,169 @@ test('native Responses observer records Codex data-only terminal usage', async (
     total_tokens: 10,
     cost: null,
   });
+});
+
+const adminPost = async (path: string[], body: unknown, cookie?: string) => {
+  const route = await import('../../app/api/admin/subscriptions/[[...path]]/route');
+  return route.POST(
+    new Request(`http://localhost:3000/api/admin/subscriptions/${path.join('/')}`, {
+      method: 'POST',
+      headers: {
+        Origin: 'http://localhost:3000',
+        'Content-Type': 'application/json',
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+      body: JSON.stringify(body),
+    }),
+    { params: Promise.resolve({ path }) }
+  );
+};
+test('Copilot synced catalogs send responses-only models to /responses and chat models to /chat/completions', async () => {
+  const a = store.saveAccount('copilot', {
+    accessToken: 'copilot-session',
+    refreshToken: 'ghu-refresh',
+    accountKey: 'copilot-split',
+    email: null,
+    expiresAt: Date.now() + 3600000,
+    apiBase: 'https://api.individual.githubcopilot.com',
+  });
+  const synced = store.syncGatewayModels(a.id, {
+    models: [
+      { id: 'gpt-5.1-codex', displayName: null, endpoints: ['openai-responses'] },
+      { id: 'gpt-5.1', displayName: null, endpoints: ['openai'] },
+    ],
+    skipped: 0,
+    source: 'fixture',
+    checkedAt: Date.now(),
+  });
+  const urls: string[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string, init: RequestInit) => {
+      urls.push(url);
+      expect(new Headers(init.headers).get('authorization')).toBe('Bearer copilot-session');
+      if (url.endsWith('/responses'))
+        return Response.json({
+          id: 'r1',
+          object: 'response',
+          status: 'completed',
+          model: 'gpt-5.1-codex',
+          output: [
+            {
+              type: 'message',
+              id: 'm1',
+              role: 'assistant',
+              content: [{ type: 'output_text', text: 'from responses' }],
+            },
+          ],
+          usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
+        });
+      return Response.json({
+        id: 'c1',
+        object: 'chat.completion',
+        choices: [
+          { index: 0, message: { role: 'assistant', content: 'from chat' }, finish_reason: 'stop' },
+        ],
+        usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+      });
+    })
+  );
+  const call = (entry: 'openai' | 'responses', model: string) =>
+    pipeline({
+      entry,
+      rawBody:
+        entry === 'responses'
+          ? { input: 'hi' }
+          : { messages: [{ role: 'user', content: 'hi' }] },
+      ir: { messages: [{ role: 'user', content: 'hi' }] },
+      requestedModel: `${synced.account.providerSlug}/${model}`,
+      stream: false,
+      includeUsage: true,
+      clientSignal: new AbortController().signal,
+    });
+  const viaChat = await call('openai', 'gpt-5.1-codex');
+  expect(viaChat.status).toBe(200);
+  expect(JSON.parse(await viaChat.text()).choices[0].message.content).toBe('from responses');
+  const viaResponses = await call('responses', 'gpt-5.1');
+  expect(viaResponses.status).toBe(200);
+  expect(await viaResponses.text()).toContain('from chat');
+  expect(urls).toEqual([
+    'https://api.individual.githubcopilot.com/responses',
+    'https://api.individual.githubcopilot.com/chat/completions',
+  ]);
+});
+test('Copilot device login completes through the poll route and connects every listed model', async () => {
+  const expiresAt = Math.floor(Date.now() / 1000) + 1800;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string) => {
+      switch (url) {
+        case 'https://github.com/login/device/code':
+          return Response.json({ device_code: 'device-secret', user_code: 'WDJB-MJHT', expires_in: 900, interval: 5 });
+        case 'https://github.com/login/oauth/access_token':
+          return Response.json({ access_token: 'ghu_device', token_type: 'bearer' });
+        case 'https://api.github.com/user':
+          return Response.json({ id: 90210, login: 'octo' });
+        case 'https://api.github.com/copilot_internal/v2/token':
+          return Response.json({
+            token: 'copilot-session',
+            expires_at: expiresAt,
+            endpoints: { api: 'https://api.individual.githubcopilot.com' },
+          });
+        case 'https://api.github.com/copilot_internal/user':
+          return Response.json({
+            copilot_plan: 'individual',
+            quota_reset_date: '2026-10-01',
+            quota_snapshots: { premium_interactions: { percent_remaining: 80, unlimited: false } },
+          });
+        case 'https://api.individual.githubcopilot.com/models':
+          return Response.json({
+            data: [
+              { id: 'gpt-5.1', model_picker_enabled: true, capabilities: { type: 'chat' }, supported_endpoints: ['/chat/completions', '/responses'] },
+              { id: 'gpt-5.1-codex', model_picker_enabled: true, capabilities: { type: 'chat' }, supported_endpoints: ['/responses'] },
+            ],
+          });
+      }
+      throw new Error(`unexpected upstream ${url}`);
+    })
+  );
+  const start = await adminPost(['oauth'], { vendor: 'copilot' });
+  expect(start.status).toBe(201);
+  const { session } = await start.json();
+  expect(session.kind).toBe('device');
+  expect(session.userCode).toBe('WDJB-MJHT');
+  expect(JSON.stringify(session)).not.toContain('device-secret');
+  const cookie = start.headers.get('set-cookie')!.split(';')[0];
+  const done = await adminPost(['oauth', 'poll'], { sessionId: session.id }, cookie);
+  expect(done.status).toBe(200);
+  const { account } = await done.json();
+  expect(account.vendor).toBe('copilot');
+  expect(account.providerSlug).toMatch(/^oauth-copilot-/);
+  expect(account.modelCount).toBe(2);
+  expect(account.modelsError).toBeNull();
+  expect(JSON.stringify(account)).not.toMatch(/ghu_device|copilot-session/);
+});
+test('a failed model fetch keeps the login and leaves the manual gateway path available', async () => {
+  const a = store.saveAccount('claude', {
+    accessToken: 'claude-token',
+    refreshToken: 'refresh',
+    accountKey: 'claude-no-models',
+    email: null,
+    expiresAt: Date.now() + 3600000,
+  });
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () =>
+      Response.json({ type: 'error', error: { type: 'permission_error' } }, { status: 403 })
+    )
+  );
+  const failed = await adminPost([a.id, 'models'], {});
+  expect(failed.status).toBe(502);
+  const body = await failed.json();
+  expect(body.error).toMatch(/模型列表拉取失败/);
+  expect(body.account.providerId).toBeNull();
+  expect(store.get(a.id)?.authStatus).toBe('ready');
+  const manual = await adminPost([a.id, 'gateway'], { models: ['claude-sonnet-4-6'] });
+  expect(manual.status).toBe(200);
+  expect((await manual.json()).account.modelCount).toBe(1);
 });

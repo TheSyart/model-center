@@ -4,6 +4,7 @@ import { createSubscriptionStore } from './store';
 import { createSubscriptionLifecycle } from './lifecycle';
 import { refreshCredential } from './oauth';
 import { fetchQuota } from './quota';
+import { fetchSubscriptionModels } from './models';
 
 export const subscriptionStore = createSubscriptionStore(sqlite, {
   encrypt,
@@ -14,5 +15,6 @@ export const subscriptionLifecycle = createSubscriptionLifecycle(
   {
     refresh: refreshCredential,
     quota: fetchQuota,
+    models: fetchSubscriptionModels,
   }
 );

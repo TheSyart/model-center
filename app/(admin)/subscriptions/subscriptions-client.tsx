@@ -33,6 +33,7 @@ const names: Record<SubscriptionVendor, string> = {
   codex: 'Codex',
   gemini: 'Gemini CLI（旧）',
   antigravity: 'Antigravity CLI',
+  copilot: 'GitHub Copilot',
 };
 const endpoint = '/api/admin/subscriptions';
 const date = (value: number | null) =>
@@ -44,7 +45,14 @@ const date = (value: number | null) =>
         minute: '2-digit',
       })
     : '未知';
-type Session = { id: string; url: string; expiresAt: number };
+type Session = {
+  id: string;
+  url: string;
+  expiresAt: number;
+  kind: 'paste' | 'device';
+  userCode?: string;
+  intervalMs?: number;
+};
 type Login = { vendor: SubscriptionVendor; reconnectId?: string };
 async function api(
   path = '',
@@ -80,6 +88,11 @@ export default function SubscriptionsClient({
   const [busy, setBusy] = useState<string | null>(null);
   const [login, setLogin] = useState<Login | null>(null);
   const [session, setSession] = useState<Session | null>(null);
+  const deviceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stopPolling = () => {
+    if (deviceTimer.current) clearTimeout(deviceTimer.current);
+    deviceTimer.current = null;
+  };
   const [project, setProject] = useState('');
   const [input, setInput] = useState('');
   const [dialogError, setDialogError] = useState('');
@@ -104,6 +117,7 @@ export default function SubscriptionsClient({
     }, 60000);
     return () => {
       clearInterval(timer);
+      stopPolling();
       active.current?.abort();
     };
   }, [load]);
@@ -145,6 +159,7 @@ export default function SubscriptionsClient({
     setDialogError('');
   }
   function closeLogin() {
+    stopPolling();
     active.current?.abort();
     active.current = null;
     if (session) void api(`/oauth/${session.id}`, 'DELETE').catch(() => {});
@@ -166,7 +181,11 @@ export default function SubscriptionsClient({
         { ...login, ...(project.trim() ? { projectId: project.trim() } : {}) },
         controller.signal
       );
-      if (!controller.signal.aborted) setSession(result.session);
+      if (!controller.signal.aborted) {
+        setSession(result.session);
+        if (result.session.kind === 'device')
+          schedulePoll(result.session, result.session.intervalMs ?? 5000);
+      }
     } catch (e) {
       if (!controller.signal.aborted) setDialogError((e as Error).message);
     } finally {
@@ -200,6 +219,54 @@ export default function SubscriptionsClient({
       }
     } finally {
       if (!controller.signal.aborted) setBusy(null);
+    }
+  }
+  function schedulePoll(current: Session, delayMs: number) {
+    stopPolling();
+    deviceTimer.current = setTimeout(
+      () => void pollDevice(current),
+      Math.min(60000, Math.max(1000, delayMs))
+    );
+  }
+  /** One poll per timer tick; the server paces upstream calls and finishes the login
+   * (quota and model sync included) on the tick that sees approval. */
+  async function pollDevice(current: Session) {
+    deviceTimer.current = null;
+    const controller = new AbortController();
+    active.current = controller;
+    try {
+      const result = await api(
+        '/oauth/poll',
+        'POST',
+        { sessionId: current.id },
+        controller.signal
+      );
+      if (controller.signal.aborted) return;
+      if (result.account) {
+        update(result.account);
+        setLogin(null);
+        setSession(null);
+        return;
+      }
+      schedulePoll(current, result.retryAfterMs ?? current.intervalMs ?? 5000);
+    } catch (e) {
+      if (controller.signal.aborted) return;
+      setDialogError(`${(e as Error).message}。请重新获取设备码。`);
+      setSession(null);
+    }
+  }
+  async function syncModels(id: string) {
+    setBusy(id);
+    setError('');
+    try {
+      update((await api(`/${id}/models`, 'POST', {})).account);
+    } catch (e) {
+      const message = (e as Error).message;
+      // Reload first: a successful list refresh clears the page-level error.
+      await load();
+      setError(message);
+    } finally {
+      setBusy(null);
     }
   }
   async function refreshAll() {
@@ -245,7 +312,7 @@ export default function SubscriptionsClient({
     <div>
       <PageHeader
         heading="订阅账号"
-        description="登录 Claude Code、Codex 和 Antigravity CLI（反重力），集中查看套餐额度，并通过 Model Center 网关调用。"
+        description="登录 Claude Code、Codex、Antigravity CLI（反重力）和 GitHub Copilot，集中查看套餐额度；登录后自动拉取账号可用模型并接入 Model Center 网关。"
         actions={
           <Button
             variant="outline"
@@ -282,7 +349,7 @@ export default function SubscriptionsClient({
           <Users className="mx-auto mb-4 size-8 text-muted-foreground" />
           <h2 className="font-semibold">添加你的第一个订阅账号</h2>
           <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-muted-foreground">
-            选择上方服务，前往官方页面授权。登录后可以查看额度，再选择模型接入网关。
+            选择上方服务，前往官方页面授权。登录后可以查看额度，账号可用的模型会自动接入网关。
           </p>
         </div>
       ) : (
@@ -397,22 +464,39 @@ export default function SubscriptionsClient({
                     ? ' · 快照超过 5 分钟，建议刷新'
                     : ''}
                 </p>
-                {a.providerSlug && (
-                  <div className="rounded-md bg-muted p-3 text-xs leading-5">
-                    <div className="mb-1 flex items-center gap-1 font-medium">
-                      <Link2 className="size-3.5" />
-                      已接入网关
-                    </div>
-                    <code className="break-all">{a.providerSlug}/模型ID</code>
-                    <p className="mt-1 text-muted-foreground">
-                      使用现有网关令牌调用，可在
-                      <Link href="/aliases" className="underline">
-                        别名
-                      </Link>
-                      中配置路由。
-                    </p>
+                <div className="rounded-md bg-muted p-3 text-xs leading-5">
+                  <div className="mb-1 flex items-center gap-1 font-medium">
+                    <Link2 className="size-3.5" />
+                    {a.providerSlug ? '已接入网关' : '未接入网关'}
                   </div>
-                )}
+                  {a.providerSlug && (
+                    <>
+                      <code className="break-all">{a.providerSlug}/模型ID</code>
+                      <p className="mt-1 text-muted-foreground">
+                        使用现有网关令牌调用，可在
+                        <Link href="/aliases" className="underline">
+                          别名
+                        </Link>
+                        中配置路由。
+                      </p>
+                    </>
+                  )}
+                  <p className="mt-1 text-muted-foreground">
+                    {a.modelsSyncedAt
+                      ? `模型：${a.modelCount ?? 0} 个 · 官方模型接口同步于 ${date(a.modelsSyncedAt)}`
+                      : a.providerSlug
+                        ? `模型：${a.modelCount ?? 0} 个 · 手动添加`
+                        : '模型：尚未同步'}
+                  </p>
+                  {a.modelsError && (
+                    <p className="mt-1 text-destructive" role="status">
+                      {a.modelsError}
+                      {a.providerId
+                        ? '；已接入的模型保持不变。'
+                        : '；可点击“接入网关”手动填写模型 ID。'}
+                    </p>
+                  )}
+                </div>
               </div>
               <div className="flex flex-wrap gap-2 border-t px-5 py-3">
                 <Button
@@ -422,6 +506,24 @@ export default function SubscriptionsClient({
                   onClick={() => void action(a.id, `/${a.id}/quota`)}
                 >
                   刷新额度
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={
+                    !!busy ||
+                    !a.enabled ||
+                    a.authStatus !== 'ready' ||
+                    a.vendor === 'gemini'
+                  }
+                  title={
+                    a.vendor === 'gemini'
+                      ? '旧 Gemini CLI 账号不支持自动同步模型'
+                      : undefined
+                  }
+                  onClick={() => void syncModels(a.id)}
+                >
+                  同步模型
                 </Button>
                 <Button
                   size="sm"
@@ -504,7 +606,9 @@ export default function SubscriptionsClient({
           <DialogHeader>
             <DialogTitle>登录 {login ? names[login.vendor] : ''}</DialogTitle>
             <DialogDescription>
-              在官方页面完成授权，将授权结果粘贴回此处。凭据仅在服务端加密保存。
+              {login?.vendor === 'copilot'
+                ? '使用 GitHub 设备码登录：在 GitHub 页面输入设备码并授权，本页会自动完成登录。凭据仅在服务端加密保存。'
+                : '在官方页面完成授权，将授权结果粘贴回此处。凭据仅在服务端加密保存。'}
             </DialogDescription>
           </DialogHeader>
           {dialogError && (
@@ -535,11 +639,52 @@ export default function SubscriptionsClient({
                   </p>
                 </div>
               )}
+              <p className="text-xs leading-5 text-muted-foreground">
+                登录成功后会自动拉取该账号可用的模型并接入网关；拉取失败时可手动填写模型。
+              </p>
               <DialogFooter>
                 <Button onClick={startLogin} disabled={!!busy}>
-                  {busy === 'login' ? '正在准备…' : '生成授权链接'}
+                  {busy === 'login'
+                    ? '正在准备…'
+                    : login?.vendor === 'copilot'
+                      ? '获取设备码'
+                      : '生成授权链接'}
                 </Button>
               </DialogFooter>
+            </>
+          ) : session.kind === 'device' ? (
+            <>
+              <div className="rounded-md border px-4 py-5 text-center">
+                <p className="text-xs text-muted-foreground">设备码</p>
+                <p className="mt-1 break-all font-mono text-2xl font-semibold tracking-widest">
+                  {session.userCode}
+                </p>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <Button
+                  variant="outline"
+                  onClick={() =>
+                    void navigator.clipboard
+                      ?.writeText(session.userCode ?? '')
+                      .catch(() => {})
+                  }
+                >
+                  复制设备码
+                </Button>
+                <a
+                  href={session.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center justify-center gap-2 rounded-md border px-4 py-2 text-sm font-medium hover:bg-muted"
+                >
+                  打开 GitHub 验证页
+                  <ExternalLink className="size-4" />
+                </a>
+              </div>
+              <p role="status" className="text-xs leading-5 text-muted-foreground">
+                正在等待 GitHub 授权，完成后本页会自动登录并同步模型。设备码有效至{' '}
+                {date(session.expiresAt)}。
+              </p>
             </>
           ) : (
             <>
@@ -602,10 +747,15 @@ export default function SubscriptionsClient({
                 : '接入 Model Center 网关'}
             </DialogTitle>
             <DialogDescription>
-              填写此账号有权限使用的模型 ID，每行一个。保存后可用“服务商
-              slug/模型 ID”调用，也可配置别名。
+              自动拉取失败或需要补充时，填写此账号有权限使用的模型
+              ID，每行一个。保存后可用“服务商 slug/模型 ID”调用，也可配置别名。
             </DialogDescription>
           </DialogHeader>
+          {gateway?.modelsError && (
+            <p className="rounded-md bg-muted p-3 text-xs leading-5" role="status">
+              {gateway.modelsError}
+            </p>
+          )}
           {dialogError && (
             <p role="alert" className="text-sm text-destructive">
               {dialogError}

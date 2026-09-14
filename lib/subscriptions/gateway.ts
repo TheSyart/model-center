@@ -1,5 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { ANTIGRAVITY_USER_AGENT } from './oauth.ts';
+import {
+  ANTIGRAVITY_USER_AGENT,
+  CLAUDE_USER_AGENT,
+  CODEX_CLIENT_VERSION,
+  copilotApiBase,
+  copilotClientHeaders,
+} from './oauth.ts';
 /** Subscription wire contracts: CLIProxyAPI 7fa443dc and Gemini CLI 9c1b0a61.
  * OAuth and API-key endpoints are different even when their payload protocol is the same. */
 import type { Credential, SubscriptionVendor } from './types.ts';
@@ -9,6 +15,8 @@ interface WireRequest {
   url: string;
   headers: Record<string, string>;
   body: unknown;
+  /** The gateway endpoint selected for this attempt; Copilot routes by its protocol. */
+  endpoint?: { protocol: string };
 }
 // Known capability flags from the pinned Claude executor. Unknown caller flags do not
 // become arbitrary upstream headers. Adding a future capability requires review.
@@ -98,7 +106,7 @@ export function subscriptionWireRequest(
         )?.[1]
     );
     headers['x-app'] = 'cli';
-    headers['User-Agent'] = 'claude-cli/2.1.220 (external, cli)';
+    headers['User-Agent'] = CLAUDE_USER_AGENT;
     const identity =
       "You are Claude Code, Anthropic's official CLI for Claude.";
     if (!JSON.stringify(body.system ?? '').includes(identity)) {
@@ -121,7 +129,8 @@ export function subscriptionWireRequest(
     headers['OpenAI-Beta'] = 'responses=experimental';
     headers.originator = 'codex_cli_rs';
     headers.Accept = 'text/event-stream';
-    headers['User-Agent'] = 'codex_cli_rs/0.149.1';
+    headers.version = CODEX_CLIENT_VERSION;
+    headers['User-Agent'] = `codex_cli_rs/${CODEX_CLIENT_VERSION}`;
     for (const key of [
       'max_output_tokens',
       'max_completion_tokens',
@@ -148,6 +157,25 @@ export function subscriptionWireRequest(
         store: false,
         instructions: body.instructions ?? '',
       },
+    };
+  }
+  if (vendor === 'copilot') {
+    // Pin the host like the other vendors rather than trusting request.url. The path
+    // follows the selected endpoint: some Copilot models only speak /responses.
+    Object.assign(headers, copilotClientHeaders(), {
+      'OpenAI-Intent': 'conversation-agent',
+      'X-Initiator': copilotInitiator(body),
+      'X-Interaction-Type': 'conversation-agent',
+      'X-Request-Id': randomUUID(),
+    });
+    const path =
+      request.endpoint?.protocol === 'openai-responses'
+        ? '/responses'
+        : '/chat/completions';
+    return {
+      url: `${copilotApiBase(credential)}${path}`,
+      headers,
+      body: { ...body, model, stream },
     };
   }
   if (vendor === 'antigravity') {
@@ -184,6 +212,23 @@ export function subscriptionWireRequest(
     headers,
     body: { project: credential.projectId, model, request: body },
   };
+}
+
+/** cc-switch marks follow-up turns that only carry tool results as agent-initiated,
+ * the way the editor extension does; everything else is a user turn. */
+function copilotInitiator(body: Json): 'user' | 'agent' {
+  const turns = Array.isArray(body.messages)
+    ? body.messages
+    : Array.isArray(body.input)
+      ? body.input
+      : [];
+  const last = turns[turns.length - 1];
+  return object(last) &&
+    (last.role === 'tool' ||
+      last.type === 'function_call_output' ||
+      last.type === 'custom_tool_call_output')
+    ? 'agent'
+    : 'user';
 }
 
 const encoder = new TextEncoder();
@@ -277,6 +322,7 @@ export async function normalizeSubscriptionResponse(
   if (
     !response.ok ||
     vendor === 'claude' ||
+    vendor === 'copilot' ||
     (vendor === 'codex' && clientStream)
   )
     return response;

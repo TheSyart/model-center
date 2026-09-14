@@ -5,6 +5,7 @@ import type { models } from '@/lib/db/schema';
 import { withDefaultProviderEndpoint, type ProviderRow } from './provider';
 import { CC_SWITCH_PRICING_SOURCE_REF, lookupBundledPricing } from './model-pricing';
 import { syncProviderModels, type SyncResult } from './model-sync';
+import { addManualModelsToCompleteCatalog } from '@/lib/subscriptions/store';
 
 export type { SyncResult } from './model-sync';
 
@@ -100,6 +101,7 @@ export function createModel(input: ModelInput): ModelRow | 'conflict' | 'alias_c
     if (e instanceof Error && e.message.includes('UNIQUE')) return 'conflict';
     throw e;
   }
+  addManualModelsToCompleteCatalog(sqlite, row.providerId, [row.modelId], Date.now());
   return row;
 }
 

@@ -1,5 +1,14 @@
-import { StoreError, type createSubscriptionStore } from './store.ts';
-import type { Credential, QuotaSnapshot, SubscriptionVendor } from './types.ts';
+import {
+  StoreError,
+  type createSubscriptionStore,
+  type ModelSyncResult,
+} from './store.ts';
+import type {
+  Credential,
+  ModelDiscovery,
+  QuotaSnapshot,
+  SubscriptionVendor,
+} from './types.ts';
 
 export function createSubscriptionLifecycle(
   store: ReturnType<typeof createSubscriptionStore>,
@@ -12,12 +21,17 @@ export function createSubscriptionLifecycle(
       vendor: SubscriptionVendor,
       credential: Credential
     ): Promise<QuotaSnapshot>;
+    models?(
+      vendor: SubscriptionVendor,
+      credential: Credential
+    ): Promise<ModelDiscovery>;
     now?: () => number;
   }
 ) {
   const now = deps.now ?? Date.now;
   const inflight = new Map<string, Promise<Credential>>();
   const quotaInflight = new Map<string, Promise<void>>();
+  const modelsInflight = new Map<string, Promise<ModelSyncResult | null>>();
   function assertReady(id: string) {
     const account = store.get(id);
     if (!account) throw new StoreError('订阅账号不存在', 404);
@@ -139,5 +153,59 @@ export function createSubscriptionLifecycle(
       quotaInflight.delete(id);
     }
   }
-  return { credential, quota };
+  /** Fetches the vendor's model list and merges it into the gateway. Like quota, it
+   * never throws: a failure is recorded on the account and null is returned. */
+  async function models(id: string): Promise<ModelSyncResult | null> {
+    if (modelsInflight.has(id)) return modelsInflight.get(id)!;
+    const work = (async () => {
+      let version: number | undefined;
+      try {
+        version = store.getVersion(id);
+        if (!deps.models)
+          throw new StoreError('当前运行环境未启用模型拉取', 503);
+        const account = assertReady(id);
+        await credential(id);
+        let state = store.getCredentialState(id);
+        version = state.version;
+        let discovery: ModelDiscovery;
+        try {
+          discovery = await deps.models(account.vendor, state.credential);
+        } catch (error) {
+          if (
+            !error ||
+            typeof error !== 'object' ||
+            !('status' in error) ||
+            error.status !== 401
+          )
+            throw error;
+          await credential(id, state.credential.accessToken);
+          state = store.getCredentialState(id);
+          version = state.version;
+          discovery = await deps.models(account.vendor, state.credential);
+        }
+        return store.syncGatewayModels(id, discovery);
+      } catch (error) {
+        // Store and upstream errors carry fixed, credential-free messages.
+        const known =
+          error instanceof StoreError ||
+          (error instanceof Error && 'code' in error && 'status' in error);
+        if (version !== undefined)
+          store.saveModelsError(
+            id,
+            known
+              ? `模型列表拉取失败：${(error as Error).message}`
+              : '模型列表拉取失败，请稍后重试或手动填写模型',
+            version
+          );
+        return null;
+      }
+    })();
+    modelsInflight.set(id, work);
+    try {
+      return await work;
+    } finally {
+      modelsInflight.delete(id);
+    }
+  }
+  return { credential, quota, models };
 }

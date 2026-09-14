@@ -1,4 +1,12 @@
-import { object, requestJson, safeString, SubscriptionError } from './oauth.ts';
+import {
+  COPILOT_USAGE_URL,
+  COPILOT_USER_AGENT,
+  object,
+  requestJson,
+  safeString,
+  SubscriptionError,
+} from './oauth.ts';
+import { subscriptionFetch } from './transport.ts';
 import type {
   Credential,
   QuotaSnapshot,
@@ -49,6 +57,19 @@ function window(
     windowSeconds: number(seconds),
   };
 }
+/** Copilot reports a date-only billing reset; reset() deliberately demands a full
+ * timestamp, so give this one its own parser rather than loosening that. */
+function resetDay(value: unknown): number | null {
+  const day = safeString(value, 32);
+  if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
+  const ms = Date.parse(`${day}T00:00:00Z`);
+  return Number.isFinite(ms) && ms >= 0 ? ms : null;
+}
+const copilotKeys: Record<string, string> = {
+  premium_interactions: '高级请求',
+  chat: 'Chat',
+  completions: '代码补全',
+};
 const claudeKeys: Record<string, [string, number, string | null]> = {
   five_hour: ['5 小时', 18000, null],
   seven_day: ['7 天', 604800, null],
@@ -61,17 +82,24 @@ const claudeKeys: Record<string, [string, number, string | null]> = {
 export async function fetchQuota(
   vendor: SubscriptionVendor,
   credential: Credential,
-  fetcher: typeof fetch = fetch,
+  fetcher: typeof fetch = subscriptionFetch,
   signal?: AbortSignal
 ): Promise<QuotaSnapshot> {
-  if (
-    !safeString(credential.accessToken, 32_768) ||
-    /\s/.test(credential.accessToken)
-  )
+  // Copilot's usage endpoint is a GitHub API, authenticated by the long-lived user
+  // token we keep in refreshToken; the short-lived session token is not accepted there.
+  const bearer =
+    vendor === 'copilot' ? credential.refreshToken : credential.accessToken;
+  if (!safeString(bearer, 32_768) || /\s/.test(bearer))
     throw new SubscriptionError('needs_reauth', 401, '登录已失效，请重新登录');
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${credential.accessToken}`,
-  };
+  const headers: Record<string, string> =
+    vendor === 'copilot'
+      ? {
+          Authorization: `token ${bearer}`,
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+          'User-Agent': COPILOT_USER_AGENT,
+        }
+      : { Authorization: `Bearer ${bearer}` };
   let body: Record<string, unknown>;
   const windows: QuotaWindow[] = [];
   let plan = credential.plan ?? null;
@@ -290,6 +318,32 @@ export async function fetchQuota(
       w.remainingPercent = fraction === null ? null : fraction * 100;
       windows.push(w);
     });
+  } else if (vendor === 'copilot') {
+    body = await requestJson(COPILOT_USAGE_URL, { headers }, fetcher, signal);
+    plan = safeString(body.copilot_plan) ?? plan;
+    const resetAt = resetDay(body.quota_reset_date);
+    const snapshots = object(body.quota_snapshots);
+    for (const [key, label] of Object.entries(copilotKeys)) {
+      const raw = snapshots[key];
+      if (raw === undefined || raw === null) continue;
+      const detail = object(raw);
+      // A monthly billing cycle is not a rolling window; inventing a length for it
+      // would be fabrication, so windowSeconds stays null.
+      if (detail.unlimited === true) {
+        windows.push(window(key, `${label} · 不限量`, 0, resetAt, null));
+        continue;
+      }
+      const remaining = number(detail.percent_remaining, 100);
+      windows.push(
+        window(
+          key,
+          label,
+          remaining === null ? null : 100 - remaining,
+          resetAt,
+          null
+        )
+      );
+    }
   } else throw new SubscriptionError('invalid_vendor');
   if (windows.length === 0)
     throw new SubscriptionError('invalid_response', 502, '上游未返回额度窗口');

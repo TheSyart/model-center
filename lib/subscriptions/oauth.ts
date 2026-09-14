@@ -3,6 +3,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Authorization, Credential, SubscriptionVendor } from './types.ts';
+import { subscriptionFetch } from './transport.ts';
 
 export class SubscriptionError extends Error {
   code: string;
@@ -27,7 +28,24 @@ export const safeString = (value: unknown, max = 256): string | null =>
     : null;
 export const ANTIGRAVITY_VERSION = '2.9.1';
 export const ANTIGRAVITY_USER_AGENT = `antigravity/hub/${ANTIGRAVITY_VERSION} darwin/arm64`;
-const config = {
+interface DeviceConfig {
+  /** The page the operator opens and types the user code into. Pinned, never taken
+   * from the upstream response: that would hand browser navigation to the upstream. */
+  verification: string;
+  start: string;
+  poll: string;
+}
+interface VendorConfig {
+  /** Absent for device-only vendors. */
+  authorize?: string;
+  token: string;
+  /** Present when the client id is a public constant rather than deployment config. */
+  client?: string;
+  redirect: string;
+  scope: string;
+  device?: DeviceConfig;
+}
+const config: Record<SubscriptionVendor, VendorConfig> = {
   claude: {
     authorize: 'https://claude.ai/oauth/authorize',
     token: 'https://platform.claude.com/v1/oauth/token',
@@ -57,14 +75,61 @@ const config = {
     scope:
       'https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile',
   },
+  copilot: {
+    // Device flow only: the public client id the editor Copilot extensions use.
+    // Not a secret, and GitHub registers no browser redirect for it.
+    token: 'https://github.com/login/oauth/access_token',
+    client: 'Iv1.b507a08c87ecfe98',
+    redirect: '',
+    scope: 'read:user',
+    device: {
+      verification: 'https://github.com/login/device',
+      start: 'https://github.com/login/device/code',
+      poll: 'https://github.com/login/oauth/access_token',
+    },
+  },
 };
+/** Copilot client identity and per-seat inference hosts follow cc-switch 42ac174d (MIT). */
+export const COPILOT_API = 'https://api.githubcopilot.com';
+export const COPILOT_PLUGIN_VERSION = 'copilot-chat/0.38.2';
+export const COPILOT_EDITOR_VERSION = 'vscode/1.110.1';
+export const COPILOT_USER_AGENT = 'GitHubCopilotChat/0.38.2';
+export const COPILOT_API_VERSION = '2025-10-01';
+/** Individual, business and enterprise seats each have their own inference host.
+ * GitHub Enterprise Server hosts are deliberately not admitted. */
+const COPILOT_API_HOST =
+  /^https:\/\/api(?:\.(?:individual|business|enterprise))?\.githubcopilot\.com$/;
+const copilotSessionUrl = 'https://api.github.com/copilot_internal/v2/token';
+const githubUserUrl = 'https://api.github.com/user';
+export const COPILOT_USAGE_URL = 'https://api.github.com/copilot_internal/user';
+/** Re-checked on every use: the pinned pattern, not the stored credential, decides
+ * where a Copilot session token may be sent. */
+export function copilotApiBase(credential: Pick<Credential, 'apiBase'>): string {
+  return credential.apiBase && COPILOT_API_HOST.test(credential.apiBase)
+    ? credential.apiBase
+    : COPILOT_API;
+}
+export const copilotClientHeaders = (): Record<string, string> => ({
+  'Copilot-Integration-Id': 'vscode-chat',
+  'Editor-Version': COPILOT_EDITOR_VERSION,
+  'Editor-Plugin-Version': COPILOT_PLUGIN_VERSION,
+  'User-Agent': COPILOT_USER_AGENT,
+  'X-GitHub-Api-Version': COPILOT_API_VERSION,
+});
+export const CLAUDE_USER_AGENT = 'claude-cli/2.1.220 (external, cli)';
+/** Shared by model listing and inference: ChatGPT decides model visibility by it. */
+export const CODEX_CLIENT_VERSION = '0.154.0';
+export const CLAUDE_MODELS_URL = 'https://api.anthropic.com/v1/models';
+export const CODEX_MODELS_URL = `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_CLIENT_VERSION}`;
+export const ANTIGRAVITY_MODELS_URL =
+  'https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels';
 // Deployment configuration is deliberately excluded from source control.
 function clientConfig(vendor: SubscriptionVendor): {
   id: string;
   secret?: string;
 } {
-  if (vendor === 'claude' || vendor === 'codex')
-    return { id: config[vendor].client };
+  const fixed = config[vendor].client;
+  if (fixed) return { id: fixed };
   const prefix = vendor === 'antigravity' ? 'ANTIGRAVITY' : 'GEMINI';
   const id = process.env[`${prefix}_OAUTH_CLIENT_ID`]?.trim();
   const secret = process.env[`${prefix}_OAUTH_CLIENT_SECRET`]?.trim();
@@ -96,24 +161,38 @@ const allowedUrls = new Set([
   `${caBase}:retrieveUserQuota`,
   'https://daily-cloudcode-pa.googleapis.com/v1internal:onboardUser',
   'https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary',
+  config.copilot.device!.start,
+  githubUserUrl,
+  copilotSessionUrl,
+  COPILOT_USAGE_URL,
+  CODEX_MODELS_URL,
+  ANTIGRAVITY_MODELS_URL,
 ]);
+/** Targets that carry a value in the path or query; each pattern admits one fixed shape. */
+const allowedPatterns = [
+  /^https:\/\/cloudcode-pa\.googleapis\.com\/v1internal\/operations\/[A-Za-z0-9_-]+$/,
+  /^https:\/\/api\.anthropic\.com\/v1\/models\?limit=1000(?:&after_id=[A-Za-z0-9._-]{1,128})?$/,
+  /^https:\/\/api(?:\.(?:individual|business|enterprise))?\.githubcopilot\.com\/models$/,
+];
+const isAllowedTarget = (url: string) =>
+  allowedUrls.has(url) || allowedPatterns.some((pattern) => pattern.test(url));
 const failure = () =>
   new SubscriptionError('invalid_response', 502, '上游响应格式无效');
 
-/** Fixed targets, no redirects, a 20-second deadline including body reads, 1 MiB cap. */
-export async function requestJson(
+/** Fixed targets, no redirects, a 20-second deadline including body reads, and a body
+ * cap of 1 MiB unless the caller raises it (model catalogs can be larger).
+ * Statuses listed in `tolerated` are handed back to the caller instead of being mapped
+ * to an error: device-code polling signals "still pending" with an HTTP status, which
+ * requestJson cannot tell apart from a genuine refusal. */
+async function sendJson(
   url: string,
-  init: RequestInit = {},
-  fetcher: typeof fetch = fetch,
-  signal?: AbortSignal
-): Promise<Record<string, unknown>> {
-  if (
-    !allowedUrls.has(url) &&
-    !/^https:\/\/cloudcode-pa\.googleapis\.com\/v1internal\/operations\/[A-Za-z0-9_-]+$/.test(
-      url
-    )
-  )
-    throw new SubscriptionError('invalid_target');
+  init: RequestInit,
+  fetcher: typeof fetch,
+  signal: AbortSignal | undefined,
+  tolerated: readonly number[],
+  maxBytes = 1024 * 1024
+): Promise<{ status: number; ok: boolean; body: Record<string, unknown> | null }> {
+  if (!isAllowedTarget(url)) throw new SubscriptionError('invalid_target');
   if (signal?.aborted)
     throw new SubscriptionError('cancelled', 499, '操作已取消');
   const controller = new AbortController();
@@ -148,23 +227,25 @@ export async function requestJson(
           signal: controller.signal,
           cache: 'no-store',
         });
-        if (response.status === 401) {
-          void response.body?.cancel().catch(() => {});
-          throw new SubscriptionError(
-            'needs_reauth',
-            401,
-            '登录已失效，请重新登录'
-          );
+        if (!tolerated.includes(response.status)) {
+          if (response.status === 401) {
+            void response.body?.cancel().catch(() => {});
+            throw new SubscriptionError(
+              'needs_reauth',
+              401,
+              '登录已失效，请重新登录'
+            );
+          }
+          if (response.status === 429 || response.status >= 500) {
+            void response.body?.cancel().catch(() => {});
+            throw new SubscriptionError(
+              'retryable',
+              response.status,
+              '上游暂时不可用，请稍后重试'
+            );
+          }
         }
-        if (response.status === 429 || response.status >= 500) {
-          void response.body?.cancel().catch(() => {});
-          throw new SubscriptionError(
-            'retryable',
-            response.status,
-            '上游暂时不可用，请稍后重试'
-          );
-        }
-        if (Number(response.headers.get('content-length')) > 1024 * 1024) {
+        if (Number(response.headers.get('content-length')) > maxBytes) {
           void response.body?.cancel().catch(() => {});
           throw failure();
         }
@@ -184,7 +265,7 @@ export async function requestJson(
             const chunk = await reader.read();
             if (chunk.done) break;
             size += chunk.value.byteLength;
-            if (size > 1024 * 1024) {
+            if (size > maxBytes) {
               void reader.cancel().catch(() => {});
               throw failure();
             }
@@ -194,41 +275,21 @@ export async function requestJson(
           controller.signal.removeEventListener('abort', cancelReader);
           reader.releaseLock();
         }
-        let body: Record<string, unknown>;
+        let body: Record<string, unknown> | null = null;
         try {
           const parsed: unknown = JSON.parse(
             Buffer.concat(chunks).toString('utf8')
           );
           if (
-            parsed === null ||
-            typeof parsed !== 'object' ||
-            Array.isArray(parsed)
+            parsed !== null &&
+            typeof parsed === 'object' &&
+            !Array.isArray(parsed)
           )
-            throw failure();
-          body = object(parsed);
+            body = object(parsed);
         } catch {
-          if (!response.ok)
-            throw new SubscriptionError(
-              'upstream_rejected',
-              response.status,
-              '上游拒绝请求'
-            );
-          throw failure();
+          body = null;
         }
-        if (!response.ok || body.error) {
-          if (body.error === 'invalid_grant')
-            throw new SubscriptionError(
-              'needs_reauth',
-              401,
-              '登录已失效，请重新登录'
-            );
-          throw new SubscriptionError(
-            'upstream_rejected',
-            response.ok ? 502 : response.status,
-            '上游拒绝请求'
-          );
-        }
-        return body;
+        return { status: response.status, ok: response.ok, body };
       })(),
     ]);
   } catch (error) {
@@ -244,9 +305,54 @@ export async function requestJson(
   }
 }
 
+export async function requestJson(
+  url: string,
+  init: RequestInit = {},
+  fetcher: typeof fetch = subscriptionFetch,
+  signal?: AbortSignal,
+  maxBytes?: number
+): Promise<Record<string, unknown>> {
+  const { status, ok, body } = await sendJson(
+    url,
+    init,
+    fetcher,
+    signal,
+    [],
+    maxBytes
+  );
+  if (!body)
+    throw ok
+      ? failure()
+      : new SubscriptionError('upstream_rejected', status, '上游拒绝请求');
+  if (!ok || body.error) {
+    if (body.error === 'invalid_grant')
+      throw new SubscriptionError('needs_reauth', 401, '登录已失效，请重新登录');
+    throw new SubscriptionError(
+      'upstream_rejected',
+      ok ? 502 : status,
+      '上游拒绝请求'
+    );
+  }
+  return body;
+}
+
+/** Device-code polling only: the listed statuses come back unmapped so the caller can
+ * tell "the user has not approved yet" apart from "the upstream refused". */
+export async function requestJsonStatus(
+  url: string,
+  init: RequestInit,
+  tolerated: readonly number[],
+  fetcher: typeof fetch = subscriptionFetch,
+  signal?: AbortSignal
+): Promise<{ status: number; body: Record<string, unknown> | null }> {
+  const { status, body } = await sendJson(url, init, fetcher, signal, tolerated);
+  return { status, body };
+}
+
 export function createAuthorization(vendor: SubscriptionVendor): Authorization {
   const c = config[vendor];
-  if (!c) throw new SubscriptionError('invalid_vendor');
+  // Device-only vendors have no authorize URL; they must use createDeviceAuthorization.
+  if (!c?.authorize) throw new SubscriptionError('invalid_vendor');
   const verifier = randomBytes(48).toString('base64url');
   const state = randomBytes(32).toString('base64url');
   const url = new URL(c.authorize);
@@ -276,6 +382,7 @@ export function createAuthorization(vendor: SubscriptionVendor): Authorization {
   for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
   return {
     vendor,
+    kind: 'paste',
     url: url.toString(),
     state,
     verifier,
@@ -283,6 +390,10 @@ export function createAuthorization(vendor: SubscriptionVendor): Authorization {
   };
 }
 function validateAuth(auth: Authorization) {
+  // A device authorization carries no redirect or browser-bound state to check, and
+  // must never reach the paste path.
+  if (auth.kind === 'device')
+    throw new SubscriptionError('invalid_authorization');
   if (
     !config[auth.vendor] ||
     auth.redirectUri !== config[auth.vendor].redirect ||
@@ -673,7 +784,7 @@ export async function exchangeAuthorization(
   auth: Authorization,
   code: string,
   projectId?: string,
-  fetcher: typeof fetch = fetch,
+  fetcher: typeof fetch = subscriptionFetch,
   signal?: AbortSignal
 ): Promise<Credential> {
   validateAuth(auth);
@@ -777,7 +888,7 @@ export async function exchangeAuthorization(
 export async function refreshCredential(
   vendor: SubscriptionVendor,
   credential: Credential,
-  fetcher: typeof fetch = fetch,
+  fetcher: typeof fetch = subscriptionFetch,
   signal?: AbortSignal
 ): Promise<Credential> {
   if (
@@ -785,6 +896,13 @@ export async function refreshCredential(
     /\s/.test(credential.refreshToken)
   )
     throw new SubscriptionError('needs_reauth', 401, '登录已失效，请重新登录');
+  // Copilot's long-lived credential is the GitHub user token; "refreshing" means
+  // trading it for a new short-lived Copilot session token.
+  if (vendor === 'copilot')
+    return {
+      ...credential,
+      ...(await copilotSession(credential.refreshToken, fetcher, signal)),
+    };
   const body = await tokenRequest(
     vendor,
     {
@@ -800,4 +918,219 @@ export async function refreshCredential(
     signal
   );
   return { ...credential, ...tokenFields(body, credential) };
+}
+
+/* ---------------------------------------------------------------------------
+ * GitHub Copilot: device-code login and the two-token credential model.
+ *
+ * GitHub issues a long-lived user token (ghu_…); Copilot inference needs a
+ * short-lived session token traded for it. They map onto Credential as
+ * refreshToken = ghu_…, accessToken = session token, so the existing lifecycle
+ * (refresh 60s early, retry once on 401, DB lease, version CAS) works unchanged.
+ * ------------------------------------------------------------------------- */
+
+const clampInterval = (value: unknown, fallback = 5): number => {
+  const n = typeof value === 'number' ? value : Number.parseInt(String(value ?? ''), 10);
+  return Math.min(60, Math.max(3, Number.isFinite(n) && n > 0 ? n : fallback)) * 1000;
+};
+
+const githubHeaders = (ghuToken: string): Record<string, string> => ({
+  Authorization: `token ${ghuToken}`,
+  Accept: 'application/vnd.github+json',
+  'X-GitHub-Api-Version': '2022-11-28',
+  'User-Agent': COPILOT_USER_AGENT,
+});
+
+/** Trades the GitHub user token for a Copilot session token and records which
+ * inference host serves this seat. */
+async function copilotSession(
+  ghuToken: string,
+  fetcher: typeof fetch = subscriptionFetch,
+  signal?: AbortSignal
+): Promise<{
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number;
+  apiBase: string;
+}> {
+  // A 403 means the GitHub login is fine but the account has no Copilot seat, which
+  // deserves its own message rather than a generic refusal.
+  const { status, body } = await requestJsonStatus(
+    copilotSessionUrl,
+    {
+      headers: {
+        ...githubHeaders(ghuToken),
+        'Editor-Version': COPILOT_EDITOR_VERSION,
+        'Editor-Plugin-Version': COPILOT_PLUGIN_VERSION,
+      },
+    },
+    [403],
+    fetcher,
+    signal
+  );
+  if (status === 403)
+    throw new SubscriptionError(
+      'no_subscription',
+      403,
+      '该 GitHub 账号没有可用的 Copilot 订阅'
+    );
+  if (!body || status < 200 || status >= 300 || body.error)
+    throw new SubscriptionError(
+      'upstream_rejected',
+      status >= 400 ? status : 502,
+      '上游拒绝请求'
+    );
+  const accessToken = safeString(body.token, 32_768);
+  const seconds = body.expires_at;
+  const expiresAt = typeof seconds === 'number' ? seconds * 1000 : NaN;
+  if (
+    !accessToken ||
+    /\s/.test(accessToken) ||
+    !Number.isFinite(expiresAt) ||
+    expiresAt <= Date.now() ||
+    expiresAt > Date.now() + 86_400_000
+  )
+    throw failure();
+  // Individual, business and enterprise seats are served from different hosts. Only
+  // the pinned githubcopilot.com shapes are followed; anything else is refused.
+  const api =
+    safeString(object(body.endpoints).api, 512)?.replace(/\/+$/, '') ?? null;
+  if (api && !COPILOT_API_HOST.test(api))
+    throw new SubscriptionError(
+      'unsupported_account',
+      400,
+      'GitHub Copilot 返回了未支持的推理端点（如 GitHub Enterprise Server），当前仅支持 github.com 账号'
+    );
+  return {
+    accessToken,
+    refreshToken: ghuToken,
+    expiresAt,
+    apiBase: api ?? COPILOT_API,
+  };
+}
+
+async function copilotCredential(
+  ghuToken: string,
+  fetcher: typeof fetch = subscriptionFetch,
+  signal?: AbortSignal
+): Promise<Credential> {
+  const user = await requestJson(
+    githubUserUrl,
+    { headers: githubHeaders(ghuToken) },
+    fetcher,
+    signal
+  );
+  const accountKey =
+    typeof user.id === 'number' && Number.isSafeInteger(user.id)
+      ? String(user.id)
+      : safeString(user.id);
+  if (!accountKey)
+    throw new SubscriptionError(
+      'invalid_identity',
+      502,
+      '上游未返回可验证的账号身份'
+    );
+  return {
+    ...(await copilotSession(ghuToken, fetcher, signal)),
+    accountKey,
+    email: safeString(user.email) ?? safeString(user.login),
+  };
+}
+
+/** Starts a device-code login. Unlike createAuthorization this needs the network. */
+export async function createDeviceAuthorization(
+  vendor: SubscriptionVendor,
+  fetcher: typeof fetch = subscriptionFetch,
+  signal?: AbortSignal
+): Promise<Authorization> {
+  const device = config[vendor]?.device;
+  if (!device) throw new SubscriptionError('invalid_vendor');
+  const body = await requestJson(
+    device.start,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        client_id: clientConfig(vendor).id,
+        scope: config[vendor].scope,
+      }),
+    },
+    fetcher,
+    signal
+  );
+  const handle = safeString(body.device_code, 4096);
+  const userCode = safeString(body.user_code, 64);
+  if (!handle || !userCode || /\s/.test(handle)) throw failure();
+  const expires = typeof body.expires_in === 'number' ? body.expires_in : 900;
+  return {
+    vendor,
+    kind: 'device',
+    // Deliberately the pinned constant: never navigate the operator's browser to a
+    // URL chosen by the upstream response.
+    url: device.verification,
+    state: randomBytes(32).toString('base64url'),
+    verifier: randomBytes(48).toString('base64url'),
+    redirectUri: config[vendor].redirect,
+    device: {
+      handle,
+      userCode,
+      intervalMs: clampInterval(body.interval),
+      expiresAt: Date.now() + Math.min(Math.max(expires, 60), 900) * 1000,
+    },
+  };
+}
+
+export type DevicePoll =
+  | { status: 'pending'; retryAfterMs: number }
+  | { status: 'complete'; credential: Credential };
+
+/** One upstream poll. The 15-minute wait belongs to the browser, not this request. */
+export async function pollDeviceAuthorization(
+  auth: Authorization,
+  fetcher: typeof fetch = subscriptionFetch,
+  signal?: AbortSignal
+): Promise<DevicePoll> {
+  const device = config[auth.vendor]?.device;
+  if (auth.kind !== 'device' || !auth.device || !device)
+    throw new SubscriptionError('invalid_authorization');
+  if (Date.now() >= auth.device.expiresAt)
+    throw new SubscriptionError('device_expired', 410, '设备码已过期，请重新发起登录');
+  // GitHub reports "not approved yet" as HTTP 200 with an error field, so the status
+  // must come back unmapped for the pending case to be distinguishable.
+  const { body } = await requestJsonStatus(
+    device.poll,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        client_id: clientConfig(auth.vendor).id,
+        device_code: auth.device.handle,
+        grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+      }),
+    },
+    [200],
+    fetcher,
+    signal
+  );
+  if (!body) throw failure();
+  const error = safeString(body.error, 128);
+  if (error === 'authorization_pending')
+    return { status: 'pending', retryAfterMs: auth.device.intervalMs };
+  if (error === 'slow_down')
+    return {
+      status: 'pending',
+      retryAfterMs: Math.min(auth.device.intervalMs + 5000, 60_000),
+    };
+  if (error === 'expired_token')
+    throw new SubscriptionError('device_expired', 410, '设备码已过期，请重新发起登录');
+  if (error === 'access_denied')
+    throw new SubscriptionError('authorization_denied', 400, '授权已被拒绝');
+  if (error)
+    throw new SubscriptionError('upstream_rejected', 502, '上游拒绝请求');
+  const ghuToken = safeString(body.access_token, 32_768);
+  if (!ghuToken || /\s/.test(ghuToken)) throw failure();
+  return {
+    status: 'complete',
+    credential: await copilotCredential(ghuToken, fetcher, signal),
+  };
 }

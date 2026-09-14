@@ -4,6 +4,7 @@ import { decrypt } from '@/lib/crypto';
 import { subscriptionStore, subscriptionLifecycle } from '@/lib/subscriptions/runtime';
 import { subscriptionWireRequest, normalizeSubscriptionResponse } from '@/lib/subscriptions/gateway';
 import type { Credential } from '@/lib/subscriptions/types';
+import { subscriptionFetch } from '@/lib/subscriptions/transport';
 import { GatewayError, protocolNotImplemented } from './errors';
 import { fetchUpstream } from './forward';
 import type { FetchFailure } from './forward';
@@ -295,7 +296,7 @@ export async function runGatewayPipeline(input: PipelineInput): Promise<Response
           const wire = subscription && credential
             ? subscriptionWireRequest(subscription.vendor,credential,attempt,target.modelId,stream,input.anthropicBeta)
             : attempt;
-          return fetchUpstream({url:wire.url,headers:wire.headers,body:wire.body,clientSignal,redirect:subscription?'error':undefined,discardErrorBody:!!subscription});
+          return fetchUpstream({url:wire.url,headers:wire.headers,body:wire.body,clientSignal,redirect:subscription?'error':undefined,discardErrorBody:!!subscription,fetcher:subscription?subscriptionFetch:undefined});
         };
         let fetched = await send();
         if (subscription && credential && !fetched.ok && fetched.status===401) {

@@ -65,3 +65,23 @@ test('uses deterministic protocol order after native and default candidates are 
 
   assert.equal(chosen?.id, 'responses');
 });
+
+test('split complete catalogs route every entry protocol to an endpoint the model supports', () => {
+  const endpoints = [
+    endpoint({ id: 'chat', protocol: 'openai', isDefault: true, modelCatalogComplete: true }),
+    endpoint({ id: 'responses', protocol: 'openai-responses', modelCatalogComplete: true }),
+  ];
+  const observations = [
+    { endpointId: 'chat', modelId: 'chat-only' },
+    { endpointId: 'chat', modelId: 'both' },
+    { endpointId: 'responses', modelId: 'both' },
+    { endpointId: 'responses', modelId: 'responses-only' },
+    { endpointId: 'chat', modelId: 'manual' },
+  ];
+  assert.equal(selectProviderEndpoint(endpoints, 'openai', 'responses-only', observations)?.id, 'responses');
+  assert.equal(selectProviderEndpoint(endpoints, 'responses', 'chat-only', observations)?.id, 'chat');
+  assert.equal(selectProviderEndpoint(endpoints, 'responses', 'both', observations)?.id, 'responses');
+  assert.equal(selectProviderEndpoint(endpoints, 'anthropic', 'responses-only', observations)?.id, 'responses');
+  assert.equal(selectProviderEndpoint(endpoints, 'anthropic', 'manual', observations)?.id, 'chat');
+  assert.equal(selectProviderEndpoint(endpoints, 'openai', 'unlisted', observations), undefined);
+});

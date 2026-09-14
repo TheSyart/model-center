@@ -6,7 +6,12 @@ import {
   createSubscriptionStore,
   migrateSubscriptionSchema,
 } from '../lib/subscriptions/store.ts';
-import type { Credential, Authorization } from '../lib/subscriptions/types.ts';
+import type {
+  Credential,
+  Authorization,
+  DiscoveredModel,
+  ModelDiscovery,
+} from '../lib/subscriptions/types.ts';
 import { createSubscriptionLifecycle } from '../lib/subscriptions/lifecycle.ts';
 
 process.env.MASTER_KEY = 'subscription-store-test-only';
@@ -21,8 +26,9 @@ function setup() {
   const db = new Database(':memory:');
   db.pragma('foreign_keys=ON');
   db.exec(`CREATE TABLE providers(id TEXT PRIMARY KEY,slug TEXT UNIQUE,name TEXT,protocol TEXT,base_url TEXT,api_key_enc TEXT,enabled INTEGER,priority INTEGER,created_at INTEGER,updated_at INTEGER);
-  CREATE TABLE provider_endpoints(id TEXT PRIMARY KEY,provider_id TEXT REFERENCES providers(id) ON DELETE CASCADE,protocol TEXT,base_url TEXT,enabled INTEGER,is_default INTEGER,created_at INTEGER,updated_at INTEGER);
-  CREATE TABLE models(id TEXT PRIMARY KEY,provider_id TEXT REFERENCES providers(id) ON DELETE CASCADE,model_id TEXT,enabled INTEGER,pricing_source TEXT,UNIQUE(provider_id,model_id));
+  CREATE TABLE provider_endpoints(id TEXT PRIMARY KEY,provider_id TEXT REFERENCES providers(id) ON DELETE CASCADE,protocol TEXT,base_url TEXT,enabled INTEGER,is_default INTEGER,model_catalog_complete INTEGER NOT NULL DEFAULT 0,models_observed_at INTEGER,created_at INTEGER,updated_at INTEGER,UNIQUE(provider_id,protocol));
+  CREATE TABLE provider_endpoint_models(endpoint_id TEXT NOT NULL REFERENCES provider_endpoints(id) ON DELETE CASCADE,model_id TEXT NOT NULL,source TEXT NOT NULL,observed_at INTEGER,PRIMARY KEY(endpoint_id,model_id));
+  CREATE TABLE models(id TEXT PRIMARY KEY,provider_id TEXT REFERENCES providers(id) ON DELETE CASCADE,model_id TEXT,display_name TEXT,enabled INTEGER,synced INTEGER NOT NULL DEFAULT 0,pricing_source TEXT,UNIQUE(provider_id,model_id));
   CREATE TABLE route_aliases(id TEXT PRIMARY KEY,targets TEXT);`);
   migrateSubscriptionSchema(db);
   let now = 1000;
@@ -78,6 +84,7 @@ test('same scoped identity reconnects while different accounts remain distinct',
 });
 const auth: Authorization = {
   vendor: 'codex',
+  kind: 'paste',
   url: 'https://auth.openai.com/authorize',
   state: 'secret-state',
   verifier: 'secret-verifier',
@@ -394,5 +401,192 @@ CREATE TABLE subscription_accounts (
   );
   assert.deepEqual(db.pragma('foreign_key_check'), []);
   assert.equal(db.pragma('foreign_keys', { simple: true }), 1);
+  db.close();
+});
+
+const discovery = (models: DiscoveredModel[]): ModelDiscovery => ({
+  models,
+  skipped: 0,
+  source: 'fixture',
+  checkedAt: 1000,
+});
+const catalog = (db: Database.Database, providerId: string, protocol: string) =>
+  (
+    db
+      .prepare(
+        'SELECT m.model_id id FROM provider_endpoint_models m JOIN provider_endpoints e ON e.id=m.endpoint_id WHERE e.provider_id=? AND e.protocol=? ORDER BY m.model_id'
+      )
+      .all(providerId, protocol) as { id: string }[]
+  ).map((row) => row.id);
+
+test('migration adds model sync columns idempotently', () => {
+  const { db } = setup();
+  migrateSubscriptionSchema(db);
+  const columns = (
+    db.pragma('table_info(subscription_accounts)') as { name: string }[]
+  ).map((column) => column.name);
+  for (const column of ['models_error', 'models_synced_at', 'models_attempted_at'])
+    assert.equal(columns.filter((name) => name === column).length, 1);
+  db.close();
+});
+
+test('model sync links the gateway on first run and only adds on later runs', () => {
+  const { store, db } = setup();
+  const a = store.saveAccount('codex', credential);
+  const first = store.syncGatewayModels(
+    a.id,
+    discovery([
+      { id: 'gpt-5.5', displayName: 'GPT-5.5', endpoints: ['openai-responses'] },
+      { id: 'gpt-5.4', displayName: null, endpoints: ['openai-responses'] },
+    ])
+  );
+  assert.ok(first.account.providerId);
+  assert.equal(first.added, 2);
+  assert.equal(first.account.modelCount, 2);
+  assert.equal(first.account.modelsSyncedAt, 1000);
+  db.prepare("UPDATE models SET enabled=0 WHERE model_id='gpt-5.4'").run();
+  store.connectGateway(a.id, ['my-manual-model']);
+  const second = store.syncGatewayModels(
+    a.id,
+    discovery([
+      { id: 'gpt-5.5', displayName: 'GPT-5.5', endpoints: ['openai-responses'] },
+      { id: 'gpt-6', displayName: null, endpoints: ['openai-responses'] },
+    ])
+  );
+  assert.equal(second.account.providerId, first.account.providerId);
+  assert.deepEqual(
+    { added: second.added, existing: second.existing, missing: second.missing },
+    { added: 1, existing: 1, missing: 1 }
+  );
+  assert.deepEqual(
+    db
+      .prepare('SELECT model_id,display_name,enabled,synced FROM models ORDER BY model_id')
+      .all(),
+    [
+      { model_id: 'gpt-5.4', display_name: null, enabled: 0, synced: 1 },
+      { model_id: 'gpt-5.5', display_name: 'GPT-5.5', enabled: 1, synced: 1 },
+      { model_id: 'gpt-6', display_name: null, enabled: 1, synced: 1 },
+      { model_id: 'my-manual-model', display_name: null, enabled: 1, synced: 0 },
+    ]
+  );
+  assert.deepEqual(
+    db.prepare('SELECT protocol,is_default,model_catalog_complete FROM provider_endpoints').all(),
+    [{ protocol: 'openai-responses', is_default: 1, model_catalog_complete: 0 }]
+  );
+  db.close();
+});
+
+test('Copilot sync splits catalogs across chat and responses endpoints and keeps manual models routable', () => {
+  const { store, db } = setup();
+  const a = store.saveAccount('copilot', credential);
+  const legacy = store.connectGateway(a.id, ['manual-model']);
+  const result = store.syncGatewayModels(
+    a.id,
+    discovery([
+      { id: 'gpt-5.1', displayName: null, endpoints: ['openai', 'openai-responses'] },
+      { id: 'gpt-5.1-codex', displayName: null, endpoints: ['openai-responses'] },
+      { id: 'claude-sonnet-4.5', displayName: null, endpoints: ['openai'] },
+    ])
+  );
+  const providerId = result.account.providerId!;
+  assert.equal(providerId, legacy.providerId);
+  assert.deepEqual(
+    db
+      .prepare(
+        'SELECT protocol,is_default,model_catalog_complete FROM provider_endpoints WHERE provider_id=? ORDER BY protocol'
+      )
+      .all(providerId),
+    [
+      { protocol: 'openai', is_default: 1, model_catalog_complete: 1 },
+      { protocol: 'openai-responses', is_default: 0, model_catalog_complete: 1 },
+    ]
+  );
+  assert.deepEqual(catalog(db, providerId, 'openai'), [
+    'claude-sonnet-4.5',
+    'gpt-5.1',
+    'manual-model',
+  ]);
+  assert.deepEqual(catalog(db, providerId, 'openai-responses'), [
+    'gpt-5.1',
+    'gpt-5.1-codex',
+  ]);
+  store.connectGateway(a.id, ['added-later']);
+  assert.ok(catalog(db, providerId, 'openai').includes('added-later'));
+  assert.ok(!catalog(db, providerId, 'openai-responses').includes('added-later'));
+  store.syncGatewayModels(
+    a.id,
+    discovery([
+      { id: 'gpt-5.1-codex', displayName: null, endpoints: ['openai-responses'] },
+    ])
+  );
+  assert.deepEqual(catalog(db, providerId, 'openai'), [
+    'added-later',
+    'claude-sonnet-4.5',
+    'gpt-5.1',
+    'manual-model',
+  ]);
+  assert.deepEqual(catalog(db, providerId, 'openai-responses'), ['gpt-5.1-codex']);
+  db.close();
+});
+
+test('model sync errors are version-guarded, cleared by the next success and invalid lists write nothing', () => {
+  const { store, db } = setup();
+  const a = store.saveAccount('claude', credential);
+  const version = store.getVersion(a.id);
+  store.saveAccount('claude', { ...credential, accessToken: 'relogin' });
+  assert.equal(store.saveModelsError(a.id, 'stale', version), false);
+  assert.equal(store.saveModelsError(a.id, '模型列表拉取失败：上游拒绝请求'), true);
+  assert.equal(store.get(a.id)?.modelsError, '模型列表拉取失败：上游拒绝请求');
+  assert.throws(
+    () =>
+      store.syncGatewayModels(
+        a.id,
+        discovery([{ id: '../escape', displayName: null, endpoints: ['anthropic'] }])
+      ),
+    /无效/
+  );
+  assert.equal(store.get(a.id)?.providerId, null);
+  store.syncGatewayModels(
+    a.id,
+    discovery([{ id: 'claude-sonnet-4-6', displayName: null, endpoints: ['anthropic'] }])
+  );
+  assert.equal(store.get(a.id)?.modelsError, null);
+  db.close();
+});
+
+test('model sync retries one 401 after refresh and records sanitized failures without undoing the account', async () => {
+  const { store, db } = setup();
+  const a = store.saveAccount('codex', credential);
+  const seen: string[] = [];
+  const base = {
+    now: () => 2000,
+    refresh: async (_: unknown, c: Credential) => ({ ...c, accessToken: 'rotated' }),
+    quota: async () => ({ checkedAt: 0, plan: null, windows: [] }),
+  };
+  const lifecycle = createSubscriptionLifecycle(store, {
+    ...base,
+    models: async (_, c) => {
+      seen.push(c.accessToken);
+      if (seen.length === 1)
+        throw Object.assign(new Error('expired'), { status: 401 });
+      return discovery([
+        { id: 'gpt-5.5', displayName: null, endpoints: ['openai-responses'] },
+      ]);
+    },
+  });
+  const result = await lifecycle.models(a.id);
+  assert.deepEqual(seen, ['sensitive-access', 'rotated']);
+  assert.equal(result?.added, 1);
+  const failing = createSubscriptionLifecycle(store, {
+    ...base,
+    models: async () => {
+      throw new Error('secret-token leaked');
+    },
+  });
+  assert.equal(await failing.models(a.id), null);
+  assert.match(store.get(a.id)!.modelsError!, /模型列表拉取失败/);
+  assert.ok(!JSON.stringify(store.list()).includes('secret-token'));
+  assert.equal(store.get(a.id)?.authStatus, 'ready');
+  assert.equal(store.get(a.id)?.modelCount, 1);
   db.close();
 });

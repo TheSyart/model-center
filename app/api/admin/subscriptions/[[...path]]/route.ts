@@ -5,8 +5,10 @@ import {
 } from '@/lib/subscriptions/runtime';
 import {
   createAuthorization,
+  createDeviceAuthorization,
   parseAuthorizationCode,
   exchangeAuthorization,
+  pollDeviceAuthorization,
   SubscriptionError,
 } from '@/lib/subscriptions/oauth';
 import { StoreError } from '@/lib/subscriptions/store';
@@ -16,7 +18,10 @@ import {
   readSubscriptionBody,
   subscriptionResponse as json,
 } from '@/lib/subscriptions/http';
-import type { SubscriptionVendor } from '@/lib/subscriptions/types';
+import type {
+  Credential,
+  SubscriptionVendor,
+} from '@/lib/subscriptions/types';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -29,6 +34,20 @@ function ownerCookie(req: Request) {
     .find((v) => v.startsWith(`${COOKIE}=`))
     ?.slice(COOKIE.length + 1);
   return value && /^[a-f0-9]{64}$/.test(value) ? value : null;
+}
+
+/** Shared by the paste and device paths. Login, quota and model sync are independent:
+ * a quota or model-list failure is recorded on the account and never undoes the login.
+ * A successful model sync connects the gateway with every listed model. */
+async function finishLogin(
+  vendor: SubscriptionVendor,
+  credential: Credential,
+  reconnectId: string | undefined
+) {
+  const account = store.saveAccount(vendor, credential, reconnectId);
+  await lifecycle.quota(account.id);
+  await lifecycle.models(account.id);
+  return json({ account: store.get(account.id) });
 }
 
 async function handle(
@@ -44,7 +63,11 @@ async function handle(
     if (parts[0] === 'oauth' && parts.length === 1 && req.method === 'POST') {
       if (body.vendor === 'gemini')
         throw new StoreError('Gemini CLI 登录已停用，请使用 Antigravity CLI 重新授权；两者凭据不能混用。', 410);
-      if (!['claude', 'codex', 'antigravity'].includes(String(body.vendor)))
+      if (
+        !['claude', 'codex', 'antigravity', 'copilot'].includes(
+          String(body.vendor)
+        )
+      )
         throw new StoreError('请选择支持的账号厂商');
       if (
         body.projectId !== undefined &&
@@ -58,11 +81,20 @@ async function handle(
       )
         throw new StoreError('账号 ID 无效');
       const owner = ownerCookie(req) ?? crypto.randomBytes(32).toString('hex');
+      const vendor = body.vendor as SubscriptionVendor;
+      // Copilot has no browser redirect; GitHub only issues device codes for it.
+      const authorization =
+        vendor === 'copilot'
+          ? await createDeviceAuthorization(vendor, undefined, req.signal)
+          : createAuthorization(vendor);
       const session = store.createSession(
-        createAuthorization(body.vendor as SubscriptionVendor),
+        authorization,
         owner,
         body.projectId as string | undefined,
-        body.reconnectId as string | undefined
+        body.reconnectId as string | undefined,
+        authorization.device
+          ? authorization.device.expiresAt - Date.now() + 60_000
+          : undefined
       );
       return json({ session }, 201, {
         'Set-Cookie': `${COOKIE}=${owner}; HttpOnly; SameSite=Strict; Path=/api/admin/subscriptions; Max-Age=86400${subscriptionPublicOrigin(req).startsWith('https://') ? '; Secure' : ''}`,
@@ -82,6 +114,10 @@ async function handle(
         !body.input.trim()
       )
         throw new StoreError('请粘贴授权结果');
+      // Check the kind without consuming the session, so a misrouted request
+      // does not burn a still-valid login.
+      if (store.readSession(body.sessionId, owner).kind === 'device')
+        throw new StoreError('该登录使用设备码，请在页面上等待自动完成');
       const session = store.takeSession(body.sessionId, owner);
       const code = parseAuthorizationCode(session.authorization, body.input);
       const credential = await exchangeAuthorization(
@@ -93,14 +129,56 @@ async function handle(
       );
       if (req.signal.aborted)
         throw new SubscriptionError('cancelled', 499, '操作已取消');
-      const account = store.saveAccount(
+      return await finishLogin(
         session.authorization.vendor,
         credential,
         session.reconnectId
       );
-      // Login and quota availability are independent: a quota failure must not undo login.
-      await lifecycle.quota(account.id);
-      return json({ account: store.get(account.id) });
+    }
+    if (
+      parts[0] === 'oauth' &&
+      parts[1] === 'poll' &&
+      parts.length === 2 &&
+      req.method === 'POST'
+    ) {
+      const owner = ownerCookie(req);
+      if (!owner) throw new StoreError('请在发起登录的浏览器中完成授权', 403);
+      if (typeof body.sessionId !== 'string')
+        throw new StoreError('登录会话无效');
+      const lease = store.leasePoll(body.sessionId, owner);
+      // Another poll is already in flight or the interval has not elapsed.
+      if (!lease.authorization)
+        return json({ status: 'pending', retryAfterMs: lease.retryAfterMs });
+      if (lease.authorization.kind !== 'device')
+        throw new StoreError('该登录不使用设备码');
+      let result;
+      try {
+        result = await pollDeviceAuthorization(
+          lease.authorization,
+          undefined,
+          req.signal
+        );
+      } catch (error) {
+        // A refusal is terminal: drop the session so the UI starts a fresh login.
+        if (
+          error instanceof SubscriptionError &&
+          ['device_expired', 'authorization_denied'].includes(error.code)
+        )
+          store.cancelSession(body.sessionId, owner);
+        throw error;
+      }
+      if (result.status === 'pending') {
+        store.deferPoll(body.sessionId, owner, result.retryAfterMs);
+        return json({ status: 'pending', retryAfterMs: result.retryAfterMs });
+      }
+      if (req.signal.aborted)
+        throw new SubscriptionError('cancelled', 499, '操作已取消');
+      const session = store.takeSession(body.sessionId, owner);
+      return await finishLogin(
+        session.authorization.vendor,
+        result.credential,
+        session.reconnectId
+      );
     }
     if (parts[0] === 'oauth' && parts.length === 2 && req.method === 'DELETE') {
       const owner = ownerCookie(req);
@@ -121,6 +199,17 @@ async function handle(
     if (parts.length === 2 && parts[1] === 'quota' && req.method === 'POST') {
       await lifecycle.quota(id);
       return json({ account: store.get(id) });
+    }
+    if (parts.length === 2 && parts[1] === 'models' && req.method === 'POST') {
+      const result = await lifecycle.models(id);
+      const account = store.get(id);
+      if (!result)
+        return json(
+          { error: account?.modelsError ?? '模型列表拉取失败', account },
+          502
+        );
+      const { account: _synced, ...summary } = result;
+      return json({ account, result: summary });
     }
     if (parts.length === 2 && parts[1] === 'gateway' && req.method === 'POST')
       return json({

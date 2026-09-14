@@ -36,6 +36,7 @@ export async function fetchUpstream(args: {
   timeoutMs?: number;
   redirect?: RequestRedirect;
   discardErrorBody?: boolean;
+  fetcher?: typeof fetch;
 }): Promise<FetchUpstreamResult> {
   const { url, headers, body, clientSignal } = args;
   const controller = new AbortController();
@@ -48,7 +49,7 @@ export async function fetchUpstream(args: {
 
   let upstream: Response;
   try {
-    upstream = await fetch(url, {
+    upstream = await (args.fetcher ?? fetch)(url, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),

@@ -258,3 +258,57 @@ test('Claude body capabilities enable matching supported betas, and thinking dis
     assert.ok(betas.includes(beta));
   assert.ok(!betas.includes('redact-thinking-2026-02-12'));
 });
+test('Copilot follows the selected endpoint protocol and seat host with editor identity headers', () => {
+  const seat = { ...credential, apiBase: 'https://api.business.githubcopilot.com' };
+  const chat = subscriptionWireRequest(
+    'copilot',
+    seat,
+    { ...request, endpoint: { protocol: 'openai' } },
+    'gpt-5.1',
+    true
+  );
+  assert.equal(chat.url, 'https://api.business.githubcopilot.com/chat/completions');
+  assert.equal(chat.headers.Authorization, 'Bearer oauth-token');
+  assert.equal(chat.headers['Copilot-Integration-Id'], 'vscode-chat');
+  assert.equal(chat.headers['X-GitHub-Api-Version'], '2025-10-01');
+  assert.equal(chat.headers['X-Initiator'], 'user');
+  assert.equal(chat.headers['x-api-key'], undefined);
+  assert.equal((chat.body as any).stream, true);
+  const responses = subscriptionWireRequest(
+    'copilot',
+    seat,
+    {
+      url: 'https://wrong.example',
+      headers: {},
+      body: { input: [{ type: 'function_call_output', call_id: 'c', output: 'ok' }] },
+      endpoint: { protocol: 'openai-responses' },
+    },
+    'gpt-5.1-codex',
+    false
+  );
+  assert.equal(responses.url, 'https://api.business.githubcopilot.com/responses');
+  assert.equal(responses.headers['X-Initiator'], 'agent');
+  assert.equal((responses.body as any).model, 'gpt-5.1-codex');
+  const tool = subscriptionWireRequest(
+    'copilot',
+    { ...credential, apiBase: 'https://evil.example' },
+    {
+      ...request,
+      body: {
+        messages: [
+          { role: 'user', content: 'x' },
+          { role: 'tool', tool_call_id: 't', content: 'result' },
+        ],
+      },
+    },
+    'gpt-5.1',
+    false
+  );
+  assert.equal(tool.url, 'https://api.githubcopilot.com/chat/completions');
+  assert.equal(tool.headers['X-Initiator'], 'agent');
+});
+test('Codex listing and inference share one client version', () => {
+  const wire = subscriptionWireRequest('codex', credential, { ...request, body: { input: [] } }, 'gpt-5.5', true);
+  assert.equal(wire.headers.version, '0.154.0');
+  assert.equal(wire.headers['User-Agent'], 'codex_cli_rs/0.154.0');
+});
