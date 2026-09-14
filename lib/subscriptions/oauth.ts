@@ -385,6 +385,33 @@ function validProject(value: unknown): string | null {
   const s = safeString(value);
   return s && /^[a-z][a-z0-9-]{4,62}[a-z0-9]$/.test(s) ? s : null;
 }
+function googleProjectUnavailable(load: Record<string, unknown>): SubscriptionError {
+  const reasons = Array.isArray(load.ineligibleTiers) ? load.ineligibleTiers : [];
+  if (reasons.length) {
+    const descriptions: Record<string, string> = {
+      DASHER_USER: 'Google 将该账号识别为组织账号',
+      INELIGIBLE_ACCOUNT: '账号不符合个人版使用条件',
+      NON_USER_ACCOUNT: '该账号不是个人用户账号',
+      RESTRICTED_AGE: '账号年龄不符合使用条件',
+      RESTRICTED_NETWORK: '当前网络受到限制',
+      UNKNOWN_LOCATION: 'Google 无法确定当前地区',
+      UNSUPPORTED_LOCATION: '当前地区不受支持',
+      VALIDATION_REQUIRED: '账号需要额外验证',
+    };
+    const details = reasons.slice(0, 5).map((item) => {
+      const reason = object(item);
+      const code = safeString(reason.reasonCode, 64);
+      const label = code && /^[A-Z_]+$/.test(code) ? code : 'UNKNOWN';
+      const message = descriptions[label] ?? safeString(reason.reasonMessage, 512) ?? 'Google 未说明具体原因';
+      return `${message}（${label}）`;
+    });
+    return new SubscriptionError('ineligible_account', 403, `Google 未提供可用的 Gemini 项目：${details.join('；')}`);
+  }
+  return new SubscriptionError(
+    'project_required', 400,
+    'Google 未返回可用的项目 ID。若账号使用组织或 Code Assist 许可证，请填写对应 Google Cloud 项目 ID 后重新授权；个人账号请先确认已开通 Gemini Code Assist'
+  );
+}
 async function googleProject(
   accessToken: string,
   supplied: string | undefined,
@@ -449,12 +476,7 @@ async function googleProject(
       );
     }
   }
-  const projectRequired = () =>
-    new SubscriptionError(
-      'project_required',
-      400,
-      '该账号需要 Google Cloud 项目 ID，请填写后重新授权'
-    );
+  const projectRequired = () => googleProjectUnavailable(load);
   if (load.currentTier) {
     const projectId = validProject(load.cloudaicompanionProject) ?? supplied;
     if (!projectId) throw projectRequired();
@@ -473,7 +495,8 @@ async function googleProject(
   const tier = tiers.find((t) => t.isDefault === true) ?? { id: 'legacy-tier' };
   const tierId = safeString(tier.id);
   if (!tierId) throw failure();
-  if (tierId !== 'free-tier' && !supplied) throw projectRequired();
+  // Match Gemini CLI: allow the selected tier's onboarding to resolve a project
+  // before deciding that a manually supplied project is required.
   let operation = await requestJson(
     `${caBase}:onboardUser`,
     {

@@ -7,6 +7,7 @@ import {
   exchangeAuthorization,
   refreshCredential,
   requestJson,
+  SubscriptionError,
 } from '../lib/subscriptions/oauth.ts';
 import type { Credential } from '../lib/subscriptions/types.ts';
 const priorClientId = process.env.GEMINI_OAUTH_CLIENT_ID;
@@ -220,6 +221,41 @@ test('Gemini rejects missing project for standard tier and unsafe operation name
     ),
     { code: 'invalid_response' }
   );
+});
+test('Gemini reports upstream eligibility reasons instead of asking personal users for a project', async () => {
+  for (const currentTier of [undefined, { id: 'standard-tier' }]) {
+    await assert.rejects(
+      exchangeAuthorization(createAuthorization('gemini'), 'code', undefined, async (url) => {
+        if (String(url).includes('/token')) return json(token);
+        if (String(url).includes('/userinfo')) return json({ id: 'google-id' });
+        if (String(url).endsWith(':loadCodeAssist')) return json({
+          currentTier,
+          ineligibleTiers: [{ reasonCode: 'UNSUPPORTED_LOCATION', reasonMessage: 'Location is not supported.' }],
+        });
+        return json({ done: true, response: {} });
+      }),
+      (error: unknown) => error instanceof SubscriptionError &&
+        error.code === 'ineligible_account' && error.status === 403 &&
+        error.message.includes('UNSUPPORTED_LOCATION') && !error.message.includes('项目 ID')
+    );
+  }
+});
+
+test('Gemini allows Google to onboard a default non-free tier without a supplied project', async () => {
+  let onboarded = false;
+  const result = await exchangeAuthorization(createAuthorization('gemini'), 'code', undefined, async (url, init) => {
+    if (String(url).includes('/token')) return json(token);
+    if (String(url).includes('/userinfo')) return json({ id: 'google-id' });
+    if (String(url).endsWith(':loadCodeAssist')) return json({
+      allowedTiers: [{ id: 'legacy-tier', isDefault: true }],
+    });
+    assert.ok(String(url).endsWith(':onboardUser'));
+    assert.equal(JSON.parse(String(init?.body)).cloudaicompanionProject, undefined);
+    onboarded = true;
+    return json({ done: true, response: { cloudaicompanionProject: { id: 'managed-project' } } });
+  });
+  assert.equal(onboarded, true);
+  assert.equal(result.projectId, 'managed-project');
 });
 test('Gemini cancellation interrupts outstanding onboarding poll', async () => {
   const controller = new AbortController();
