@@ -26,7 +26,7 @@ afterAll(() => {
   sqlite?.close();
   fs.rmSync(directory, { recursive: true, force: true });
 });
-for (const vendor of ['claude', 'codex', 'gemini'] as SubscriptionVendor[])
+for (const vendor of ['claude', 'codex', 'gemini', 'antigravity'] as SubscriptionVendor[])
   for (const stream of [false, true])
     test(`${vendor} OAuth traverses actual router and protocol conversion (${stream ? 'SSE' : 'JSON'})`, async () => {
       const a = store.saveAccount(vendor, {
@@ -35,7 +35,7 @@ for (const vendor of ['claude', 'codex', 'gemini'] as SubscriptionVendor[])
         accountKey: `${vendor}-${stream}`,
         email: null,
         expiresAt: Date.now() + 3600000,
-        projectId: vendor === 'gemini' ? 'test-project' : null,
+        projectId: ['gemini', 'antigravity'].includes(vendor) ? 'test-project' : null,
       });
       const linked = store.connectGateway(a.id, ['test-model']);
       vi.stubGlobal(
@@ -88,7 +88,13 @@ for (const vendor of ['claude', 'codex', 'gemini'] as SubscriptionVendor[])
               { headers: { 'Content-Type': 'text/event-stream' } }
             );
           }
-          if (vendor === 'gemini') {
+          if (vendor === 'gemini' || vendor === 'antigravity') {
+            if (vendor === 'antigravity') {
+              expect(url).toBe(`https://daily-cloudcode-pa.googleapis.com/v1internal:${stream ? 'streamGenerateContent?alt=sse' : 'generateContent'}`);
+              expect(request.userAgent).toBe('antigravity');
+              expect(request.requestType).toBe('agent');
+              expect(request.request.sessionId).toMatch(/^-\d+$/);
+            }
             expect(request.project).toBe('test-project');
             expect(request.request.contents).toBeDefined();
             const body = {
@@ -227,6 +233,7 @@ test('subscription management route binds OAuth session to browser and rejects c
   expect(
     (await call(['oauth'], { vendor: 'codex' }, 'https://evil.example')).status
   ).toBe(403);
+  expect((await call(['oauth'], { vendor: 'gemini' })).status).toBe(410);
   const start = await call(['oauth'], { vendor: 'codex' });
   expect(start.status).toBe(201);
   expect(start.headers.get('cache-control')).toContain('no-store');

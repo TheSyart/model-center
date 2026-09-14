@@ -1,4 +1,4 @@
-export type SubscriptionVendor = 'claude' | 'codex' | 'gemini';
+export type SubscriptionVendor = 'claude' | 'codex' | 'gemini' | 'antigravity';
 
 export interface Credential {
   accessToken: string;

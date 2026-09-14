@@ -31,7 +31,8 @@ import type {
 const names: Record<SubscriptionVendor, string> = {
   claude: 'Claude Code',
   codex: 'Codex',
-  gemini: 'Gemini CLI',
+  gemini: 'Gemini CLI（旧）',
+  antigravity: 'Antigravity CLI',
 };
 const endpoint = '/api/admin/subscriptions';
 const date = (value: number | null) =>
@@ -244,7 +245,7 @@ export default function SubscriptionsClient({
     <div>
       <PageHeader
         heading="订阅账号"
-        description="登录 Claude Code、Codex 和 Gemini CLI，集中查看套餐额度，并通过 Model Center 网关调用。"
+        description="登录 Claude Code、Codex 和 Antigravity CLI（反重力），集中查看套餐额度，并通过 Model Center 网关调用。"
         actions={
           <Button
             variant="outline"
@@ -425,7 +426,8 @@ export default function SubscriptionsClient({
                 <Button
                   size="sm"
                   variant="outline"
-                  disabled={!!busy}
+                  disabled={!!busy || a.vendor === 'gemini'}
+                  title={a.vendor === 'gemini' ? '请从上方 Antigravity CLI 新增授权，旧凭据不能迁移' : undefined}
                   onClick={() =>
                     openLogin({ vendor: a.vendor, reconnectId: a.id })
                   }

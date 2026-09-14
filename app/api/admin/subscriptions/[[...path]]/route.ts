@@ -42,7 +42,9 @@ async function handle(
     assertSubscriptionMutation(req);
     const body = req.method === 'DELETE' ? {} : await readSubscriptionBody(req);
     if (parts[0] === 'oauth' && parts.length === 1 && req.method === 'POST') {
-      if (!['claude', 'codex', 'gemini'].includes(String(body.vendor)))
+      if (body.vendor === 'gemini')
+        throw new StoreError('Gemini CLI 登录已停用，请使用 Antigravity CLI 重新授权；两者凭据不能混用。', 410);
+      if (!['claude', 'codex', 'antigravity'].includes(String(body.vendor)))
         throw new StoreError('请选择支持的账号厂商');
       if (
         body.projectId !== undefined &&

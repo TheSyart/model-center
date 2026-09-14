@@ -8,10 +8,8 @@ import type {
   SubscriptionVendor,
 } from './types.ts';
 
-export function migrateSubscriptionSchema(db: Database.Database) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS subscription_accounts (
-      id TEXT PRIMARY KEY, vendor TEXT NOT NULL CHECK(vendor IN ('claude','codex','gemini')),
+const SUBSCRIPTION_ACCOUNTS_SCHEMA = `CREATE TABLE IF NOT EXISTS subscription_accounts (
+      id TEXT PRIMARY KEY, vendor TEXT NOT NULL CHECK(vendor IN ('claude','codex','gemini','antigravity')),
       account_key TEXT NOT NULL, email TEXT, display_name TEXT NOT NULL,
       credential_enc TEXT NOT NULL, expires_at INTEGER NOT NULL, project_id TEXT,
       enabled INTEGER NOT NULL DEFAULT 1, auth_status TEXT NOT NULL DEFAULT 'ready',
@@ -19,7 +17,41 @@ export function migrateSubscriptionSchema(db: Database.Database) {
       refresh_lease TEXT, refresh_until INTEGER, retry_after INTEGER,
       quota_json TEXT, quota_error TEXT, quota_attempted_at INTEGER,
       created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(vendor,account_key)
-    );
+    );`;
+
+export function migrateSubscriptionSchema(db: Database.Database) {
+  const existing = db
+    .prepare(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='subscription_accounts'"
+    )
+    .get() as { sql: string } | undefined;
+  if (existing && !existing.sql.includes("'antigravity'")) {
+    if (db.inTransaction)
+      throw new Error(
+        'Subscription schema migration requires its own transaction'
+      );
+    const foreignKeys = db.pragma('foreign_keys', { simple: true });
+    db.pragma('foreign_keys = OFF');
+    try {
+      db.transaction(() => {
+        db.exec(
+          SUBSCRIPTION_ACCOUNTS_SCHEMA.replace(
+            'IF NOT EXISTS subscription_accounts',
+            'subscription_accounts_next'
+          )
+        );
+        db.exec(`INSERT INTO subscription_accounts_next SELECT * FROM subscription_accounts;
+          DROP TABLE subscription_accounts;
+          ALTER TABLE subscription_accounts_next RENAME TO subscription_accounts;`);
+        if ((db.pragma('foreign_key_check') as unknown[]).length)
+          throw new Error('Subscription migration violates foreign keys');
+      })();
+    } finally {
+      db.pragma(`foreign_keys = ${foreignKeys ? 'ON' : 'OFF'}`);
+    }
+  }
+  db.exec(`
+    ${SUBSCRIPTION_ACCOUNTS_SCHEMA}
     CREATE TABLE IF NOT EXISTS subscription_oauth_sessions (
       id TEXT PRIMARY KEY, owner_hash TEXT NOT NULL, authorization_enc TEXT NOT NULL,
       project_id TEXT, reconnect_id TEXT, expires_at INTEGER NOT NULL,
@@ -70,6 +102,10 @@ export const SUBSCRIPTION_ENDPOINTS = {
   codex: {
     protocol: 'openai-responses',
     base: 'https://chatgpt.com/backend-api/codex',
+  },
+  antigravity: {
+    protocol: 'gemini',
+    base: 'https://daily-cloudcode-pa.googleapis.com',
   },
   gemini: { protocol: 'gemini', base: 'https://cloudcode-pa.googleapis.com' },
 } as const;

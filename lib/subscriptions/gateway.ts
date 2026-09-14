@@ -1,3 +1,5 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { ANTIGRAVITY_USER_AGENT } from './oauth.ts';
 /** Subscription wire contracts: CLIProxyAPI 7fa443dc and Gemini CLI 9c1b0a61.
  * OAuth and API-key endpoints are different even when their payload protocol is the same. */
 import type { Credential, SubscriptionVendor } from './types.ts';
@@ -148,6 +150,33 @@ export function subscriptionWireRequest(
       },
     };
   }
+  if (vendor === 'antigravity') {
+    if (!credential.projectId)
+      throw new Error('Antigravity 账号缺少托管项目，请重新授权');
+    const text = Array.isArray(body.contents)
+      ? body.contents.find((c: Json) => c.role === 'user')?.parts?.[0]?.text
+      : '';
+    const seed = typeof text === 'string' && text ? text : randomUUID();
+    const sessionId =
+      '-' +
+      (
+        createHash('sha256').update(seed).digest().readBigUInt64BE() &
+        0x7fffffffffffffffn
+      ).toString();
+    delete body.safetySettings;
+    return {
+      url: `https://daily-cloudcode-pa.googleapis.com/v1internal:${stream ? 'streamGenerateContent?alt=sse' : 'generateContent'}`,
+      headers: { ...headers, 'User-Agent': ANTIGRAVITY_USER_AGENT },
+      body: {
+        project: credential.projectId,
+        model,
+        userAgent: 'antigravity',
+        requestType: 'agent',
+        requestId: `agent-${randomUUID()}`,
+        request: { ...body, sessionId },
+      },
+    };
+  }
   if (!credential.projectId)
     throw new Error('Gemini 账号缺少项目 ID，请重新登录');
   return {
@@ -252,7 +281,7 @@ export async function normalizeSubscriptionResponse(
   )
     return response;
   if (!response.body) throw new Error('订阅响应缺少内容');
-  if (vendor === 'gemini' && clientStream) {
+  if ((vendor === 'gemini' || vendor === 'antigravity') && clientStream) {
     const stream = mapSSE(response.body, (json) => {
       if (!object(json.response)) throw new Error('Gemini 响应缺少内容');
       return json.response;
@@ -304,7 +333,8 @@ export async function normalizeSubscriptionResponse(
       if (next.done) break;
       size += next.value.length;
       if (size > 16 * 1024 * 1024) throw new Error('订阅响应过大');
-      if (vendor === 'gemini') chunks.push(next.value);
+      if (vendor === 'gemini' || vendor === 'antigravity')
+        chunks.push(next.value);
       if (terminal) break;
     }
     if (deadline.aborted) throw new Error('订阅请求已取消或超时');

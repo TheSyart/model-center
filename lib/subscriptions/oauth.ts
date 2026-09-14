@@ -25,6 +25,8 @@ export const safeString = (value: unknown, max = 256): string | null =>
   !/[\x00-\x1f\x7f]/.test(value)
     ? value
     : null;
+export const ANTIGRAVITY_VERSION = '2.9.1';
+export const ANTIGRAVITY_USER_AGENT = `antigravity/hub/${ANTIGRAVITY_VERSION} darwin/arm64`;
 const config = {
   claude: {
     authorize: 'https://claude.ai/oauth/authorize',
@@ -41,6 +43,13 @@ const config = {
     redirect: 'http://localhost:1455/auth/callback',
     scope: 'openid email profile offline_access',
   },
+  antigravity: {
+    authorize: 'https://accounts.google.com/o/oauth2/v2/auth',
+    token: 'https://oauth2.googleapis.com/token',
+    redirect: 'http://localhost:51121/oauth-callback',
+    scope:
+      'https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/cclog https://www.googleapis.com/auth/experimentsandconfigs',
+  },
   gemini: {
     authorize: 'https://accounts.google.com/o/oauth2/v2/auth',
     token: 'https://oauth2.googleapis.com/token',
@@ -54,9 +63,11 @@ function clientConfig(vendor: SubscriptionVendor): {
   id: string;
   secret?: string;
 } {
-  if (vendor !== 'gemini') return { id: config[vendor].client };
-  const id = process.env.GEMINI_OAUTH_CLIENT_ID?.trim();
-  const secret = process.env.GEMINI_OAUTH_CLIENT_SECRET?.trim();
+  if (vendor === 'claude' || vendor === 'codex')
+    return { id: config[vendor].client };
+  const prefix = vendor === 'antigravity' ? 'ANTIGRAVITY' : 'GEMINI';
+  const id = process.env[`${prefix}_OAUTH_CLIENT_ID`]?.trim();
+  const secret = process.env[`${prefix}_OAUTH_CLIENT_SECRET`]?.trim();
   if (
     !id ||
     !secret ||
@@ -68,7 +79,7 @@ function clientConfig(vendor: SubscriptionVendor): {
     throw new SubscriptionError(
       'configuration_required',
       503,
-      '请在服务端配置 GEMINI_OAUTH_CLIENT_ID 和 GEMINI_OAUTH_CLIENT_SECRET 后重试'
+      `请在服务端配置 ${prefix}_OAUTH_CLIENT_ID 和 ${prefix}_OAUTH_CLIENT_SECRET 后重试`
     );
   }
   return { id, secret };
@@ -83,6 +94,8 @@ const allowedUrls = new Set([
   `${caBase}:loadCodeAssist`,
   `${caBase}:onboardUser`,
   `${caBase}:retrieveUserQuota`,
+  'https://daily-cloudcode-pa.googleapis.com/v1internal:onboardUser',
+  'https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary',
 ]);
 const failure = () =>
   new SubscriptionError('invalid_response', 502, '上游响应格式无效');
@@ -254,8 +267,12 @@ export function createAuthorization(vendor: SubscriptionVendor): Authorization {
       codex_cli_simplified_flow: 'true',
       originator: 'codex_cli_rs',
     });
-  if (vendor === 'gemini')
+  if (vendor === 'gemini' || vendor === 'antigravity')
     Object.assign(query, { access_type: 'offline', prompt: 'consent' });
+  if (vendor === 'antigravity') {
+    delete query.code_challenge;
+    delete query.code_challenge_method;
+  }
   for (const [k, v] of Object.entries(query)) url.searchParams.set(k, v);
   return {
     vendor,
@@ -385,8 +402,12 @@ function validProject(value: unknown): string | null {
   const s = safeString(value);
   return s && /^[a-z][a-z0-9-]{4,62}[a-z0-9]$/.test(s) ? s : null;
 }
-function googleProjectUnavailable(load: Record<string, unknown>): SubscriptionError {
-  const reasons = Array.isArray(load.ineligibleTiers) ? load.ineligibleTiers : [];
+function googleProjectUnavailable(
+  load: Record<string, unknown>
+): SubscriptionError {
+  const reasons = Array.isArray(load.ineligibleTiers)
+    ? load.ineligibleTiers
+    : [];
   if (reasons.length) {
     const descriptions: Record<string, string> = {
       DASHER_USER: 'Google 将该账号识别为组织账号',
@@ -402,13 +423,21 @@ function googleProjectUnavailable(load: Record<string, unknown>): SubscriptionEr
       const reason = object(item);
       const code = safeString(reason.reasonCode, 64);
       const label = code && /^[A-Z_]+$/.test(code) ? code : 'UNKNOWN';
-      const message = descriptions[label] ?? safeString(reason.reasonMessage, 512) ?? 'Google 未说明具体原因';
+      const message =
+        descriptions[label] ??
+        safeString(reason.reasonMessage, 512) ??
+        'Google 未说明具体原因';
       return `${message}（${label}）`;
     });
-    return new SubscriptionError('ineligible_account', 403, `Google 未提供可用的 Gemini 项目：${details.join('；')}`);
+    return new SubscriptionError(
+      'ineligible_account',
+      403,
+      `Google 未提供可用的 Gemini 项目：${details.join('；')}`
+    );
   }
   return new SubscriptionError(
-    'project_required', 400,
+    'project_required',
+    400,
     'Google 未返回可用的项目 ID。若账号使用组织或 Code Assist 许可证，请填写对应 Google Cloud 项目 ID 后重新授权；个人账号请先确认已开通 Gemini Code Assist'
   );
 }
@@ -545,6 +574,101 @@ async function googleProject(
   if (!projectId) throw projectRequired();
   return { projectId, plan: safeString(tier.name) ?? tierId };
 }
+
+/** Antigravity contract from CLIProxyAPI 7fa443dc, distinct from Gemini CLI. */
+async function antigravityProject(
+  accessToken: string,
+  fetcher: typeof fetch,
+  signal?: AbortSignal
+) {
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    'Content-Type': 'application/json',
+    'User-Agent': ANTIGRAVITY_USER_AGENT,
+    Accept: '*/*',
+  };
+  const project = (value: unknown): string | null => {
+    const data = object(value);
+    for (const key of ['cloudaicompanionProject', 'projectId', 'project']) {
+      const v =
+        typeof data[key] === 'string' ? data[key] : object(data[key]).id;
+      const id = safeString(v);
+      if (id && /^[a-zA-Z0-9._:-]+$/.test(id)) return id;
+    }
+    return null;
+  };
+  const load = await requestJson(
+    `${caBase}:loadCodeAssist`,
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ metadata: { ideType: 'ANTIGRAVITY' } }),
+    },
+    fetcher,
+    signal
+  );
+  const plan =
+    safeString(object(load.paidTier).name) ??
+    safeString(object(load.currentTier).name) ??
+    safeString(object(load.currentTier).id);
+  const found = project(load);
+  if (found) return { projectId: found, plan };
+  // ineligibleTiers describes individual tiers, not the whole account.
+  // Let Antigravity onboarding decide eligibility for the selected/default tier.
+  const tiers = Array.isArray(load.allowedTiers)
+    ? load.allowedTiers.map(object)
+    : [];
+  const tierId =
+    safeString(tiers.find((t) => t.isDefault === true)?.id) ??
+    safeString(object(load.currentTier).id) ??
+    'free-tier';
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (attempt) {
+      try {
+        await delay(1000, undefined, { signal });
+      } catch {
+        throw new SubscriptionError('cancelled', 499, '操作已取消');
+      }
+    }
+    const result = await requestJson(
+      'https://daily-cloudcode-pa.googleapis.com/v1internal:onboardUser',
+      {
+        method: 'POST',
+        headers: {
+          ...headers,
+          'User-Agent': `${ANTIGRAVITY_USER_AGENT} google-api-nodejs-client/10.3.0`,
+          'X-Goog-Api-Client': 'gl-node/22.21.1',
+        },
+        body: JSON.stringify({
+          tier_id: tierId,
+          metadata: {
+            ide_type: 'ANTIGRAVITY',
+            ide_version: ANTIGRAVITY_VERSION,
+            ide_name: 'antigravity',
+          },
+        }),
+      },
+      fetcher,
+      signal
+    );
+    if (result.done === true) {
+      const projectId = project(result.response);
+      if (!projectId)
+        throw new SubscriptionError(
+          'project_required',
+          502,
+          'Antigravity 未返回托管项目，请确认账号已开通反重力'
+        );
+      return { projectId, plan: plan ?? tierId };
+    }
+  }
+  throw new SubscriptionError(
+    'retryable',
+    504,
+    'Antigravity 项目初始化超时，请重新授权'
+  );
+}
+
 export async function exchangeAuthorization(
   auth: Authorization,
   code: string,
@@ -561,7 +685,9 @@ export async function exchangeAuthorization(
       grant_type: 'authorization_code',
       code,
       redirect_uri: auth.redirectUri,
-      code_verifier: auth.verifier,
+      ...(auth.vendor === 'antigravity'
+        ? {}
+        : { code_verifier: auth.verifier }),
       ...(auth.vendor === 'claude' ? { state: auth.state } : {}),
     },
     fetcher,
@@ -643,7 +769,9 @@ export async function exchangeAuthorization(
     ...fields,
     accountKey,
     email: safeString(user.email),
-    ...(await googleProject(fields.accessToken, projectId, fetcher, signal)),
+    ...(await (auth.vendor === 'antigravity'
+      ? antigravityProject(fields.accessToken, fetcher, signal)
+      : googleProject(fields.accessToken, projectId, fetcher, signal))),
   };
 }
 export async function refreshCredential(

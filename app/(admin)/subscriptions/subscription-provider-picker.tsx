@@ -16,7 +16,7 @@ export function SubscriptionLogo({
     <img
       src={logo}
       alt=""
-      className={`size-7 shrink-0 rounded-md object-contain ${['/logos/anthropic.svg', '/logos/openai.svg', '/logos/github.svg', '/logos/xai.svg'].includes(logo) ? 'dark:invert' : ''}`}
+      className={`size-7 shrink-0 rounded-md object-contain ${['/subscriptions/antigravity.svg', '/logos/anthropic.svg', '/logos/openai.svg', '/logos/github.svg', '/logos/xai.svg'].includes(logo) ? 'dark:invert' : ''}`}
       onError={() => setFailed(true)}
     />
   ) : (

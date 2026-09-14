@@ -12,10 +12,16 @@ const implemented: {
   presetKey: string;
   name: string;
   vendor: SubscriptionVendor;
+  logo?: string;
 }[] = [
   { presetKey: 'claude-official', name: 'Claude Code', vendor: 'claude' },
   { presetKey: 'codex', name: 'Codex', vendor: 'codex' },
-  { presetKey: 'gemini-native', name: 'Gemini CLI', vendor: 'gemini' },
+  {
+    presetKey: 'antigravity',
+    name: 'Antigravity CLI',
+    vendor: 'antigravity',
+    logo: '/subscriptions/antigravity.svg',
+  },
 ];
 
 /** Mixed API-key/OAuth providers retain their API-key entry. */
@@ -36,7 +42,9 @@ export function buildSubscriptionCatalog(
 ): SubscriptionCatalogItem[] {
   const supported = implemented.map((item) => ({
     ...item,
-    logo: presets.find((preset) => preset.presetKey === item.presetKey)?.logo,
+    logo:
+      item.logo ??
+      presets.find((preset) => preset.presetKey === item.presetKey)?.logo,
   }));
   const placeholders = presets
     .filter(

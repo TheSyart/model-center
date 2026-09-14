@@ -18,7 +18,7 @@ test('subscription login has a real server session, secure cookie and cancellabl
   for (const src of [
     '/logos/anthropic.svg',
     '/logos/openai.svg',
-    '/logos/gemini.svg',
+    '/subscriptions/antigravity.svg',
     '/logos/github.svg',
     '/logos/xai.svg',
   ]) {
@@ -167,10 +167,10 @@ test('quota cards and gateway form remain usable on mobile and desktop', async (
       },
     },
     {
-      id: 'gemini-demo',
-      vendor: 'gemini',
-      displayName: 'gemini-demo@example.com',
-      email: 'gemini-demo@example.com',
+      id: 'antigravity-demo',
+      vendor: 'antigravity',
+      displayName: 'antigravity-demo@example.com',
+      email: 'antigravity-demo@example.com',
       enabled: false,
       authStatus: 'needs_reauth',
       expiresAt: now - 60000,
@@ -223,4 +223,26 @@ test('quota cards and gateway form remain usable on mobile and desktop', async (
       .getByRole('dialog')
       .evaluate((el) => el.scrollWidth <= el.clientWidth)
   ).toBe(true);
+});
+
+
+test('Antigravity creates its own OAuth session without a Gemini project field', async ({ page }) => {
+  await page.goto('/subscriptions');
+  await page.getByRole('button', { name: '登录 Antigravity CLI', exact: true }).click();
+  await expect(page.getByLabel('Google 项目 ID')).toHaveCount(0);
+  const created = page.waitForResponse(r => r.url().endsWith('/api/admin/subscriptions/oauth') && r.request().method() === 'POST');
+  await page.getByRole('button', { name: '生成授权链接' }).click();
+  const response = await created;
+  expect(response.status()).toBe(201);
+  const { session } = await response.json();
+  const url = new URL(session.url);
+  expect(url.hostname).toBe('accounts.google.com');
+  expect(url.searchParams.get('client_id')).toBe('test-antigravity-e2e-client');
+  expect(url.searchParams.get('redirect_uri')).toBe('http://localhost:51121/oauth-callback');
+  expect(url.searchParams.get('scope')).toContain('/auth/experimentsandconfigs');
+  expect(url.searchParams.has('client_secret')).toBe(false);
+  await expect(page.getByLabel('授权结果')).toBeVisible();
+  const cancelled = page.waitForResponse(r => r.url().endsWith(`/oauth/${session.id}`) && r.request().method() === 'DELETE');
+  await page.getByRole('button', { name: '关闭', exact: true }).click();
+  expect((await cancelled).status()).toBe(200);
 });

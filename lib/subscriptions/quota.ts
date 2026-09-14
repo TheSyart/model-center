@@ -185,6 +185,71 @@ export async function fetchQuota(
           d.rate_limit
         );
       });
+  } else if (vendor === 'antigravity') {
+    if (!safeString(credential.projectId))
+      throw new SubscriptionError(
+        'project_required',
+        400,
+        'Antigravity 账号缺少托管项目，请重新授权'
+      );
+    body = await requestJson(
+      'https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary',
+      {
+        method: 'POST',
+        headers: {
+          ...headers,
+          'Content-Type': 'application/json',
+          'User-Agent':
+            'antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)',
+        },
+        body: JSON.stringify({ project: credential.projectId }),
+      },
+      fetcher,
+      signal
+    );
+    if (!Array.isArray(body.groups) || body.groups.length > 100)
+      throw new SubscriptionError(
+        'invalid_response',
+        502,
+        'Antigravity 未返回额度分组'
+      );
+    for (const [gi, rawGroup] of body.groups.entries()) {
+      const group = object(rawGroup);
+      if (!Array.isArray(group.buckets) || group.buckets.length > 100)
+        throw new SubscriptionError(
+          'invalid_response',
+          502,
+          'Antigravity 额度窗口格式无效'
+        );
+      const label =
+        safeString(group.displayName ?? group.display_name) ??
+        `额度组 ${gi + 1}`;
+      for (const [bi, raw] of group.buckets.entries()) {
+        const data = object(raw);
+        const value = data.remainingFraction ?? data.remaining_fraction;
+        const fraction = number(
+          typeof value === 'string' && /^\d+(?:\.\d+)?$/.test(value)
+            ? Number(value)
+            : value,
+          1
+        );
+        const period = safeString(data.window)?.toLowerCase();
+        const seconds = ['5h', 'five-hour', 'five_hour'].includes(period ?? '')
+          ? 18000
+          : ['week', 'weekly'].includes(period ?? '')
+            ? 604800
+            : null;
+        const w = window(
+          `antigravity:${gi}:${safeString(data.bucketId ?? data.bucket_id) ?? bi}`,
+          `${label} · ${safeString(data.displayName ?? data.display_name) ?? period ?? '额度'}`,
+          fraction === null ? null : (1 - fraction) * 100,
+          data.resetTime ?? data.reset_time,
+          seconds
+        );
+        w.remainingPercent = fraction === null ? null : fraction * 100;
+        windows.push(w);
+      }
+    }
   } else if (vendor === 'gemini') {
     if (!safeString(credential.projectId))
       throw new SubscriptionError(

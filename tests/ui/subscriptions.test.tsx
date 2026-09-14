@@ -94,6 +94,8 @@ describe('subscription accounts UI', () => {
     expect(
       screen.getByRole('button', { name: '登录 Codex' }).querySelector('img')
     ).toHaveAttribute('src', '/logos/openai.svg');
+    expect(screen.queryByRole('button', { name: '登录 Gemini CLI' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '登录 Antigravity CLI' }).querySelector('img')).toHaveAttribute('src', '/subscriptions/antigravity.svg');
     await user.click(await screen.findByRole('button', { name: '登录 Codex' }));
     await user.click(screen.getByRole('button', { name: '生成授权链接' }));
     expect(

@@ -357,3 +357,42 @@ test('an old quota error cannot mark a new login successful snapshot stale', asy
   assert.equal(store.get(a.id)?.quota?.plan, 'new');
   db.close();
 });
+
+test('Antigravity migration preserves legacy credentials and linked providers', () => {
+  const db = new Database(':memory:');
+  db.pragma('foreign_keys=ON');
+  db.exec(`CREATE TABLE providers(id TEXT PRIMARY KEY);
+CREATE TABLE subscription_accounts (
+    id TEXT PRIMARY KEY, vendor TEXT NOT NULL CHECK(vendor IN ('claude','codex','gemini')),
+    account_key TEXT NOT NULL, email TEXT, display_name TEXT NOT NULL,
+    credential_enc TEXT NOT NULL, expires_at INTEGER NOT NULL, project_id TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1, auth_status TEXT NOT NULL DEFAULT 'ready',
+    last_error TEXT, version INTEGER NOT NULL DEFAULT 1,
+    refresh_lease TEXT, refresh_until INTEGER, retry_after INTEGER,
+    quota_json TEXT, quota_error TEXT, quota_attempted_at INTEGER,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(vendor,account_key));
+    CREATE TABLE subscription_provider_links(account_id TEXT UNIQUE NOT NULL REFERENCES subscription_accounts(id) ON DELETE RESTRICT,provider_id TEXT PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE);
+    INSERT INTO providers VALUES('provider');
+    INSERT INTO subscription_accounts(id,vendor,account_key,display_name,credential_enc,expires_at,created_at,updated_at) VALUES('legacy','gemini','same-google','legacy','ciphertext',999,1,1);
+    INSERT INTO subscription_provider_links VALUES('legacy','provider');`);
+  migrateSubscriptionSchema(db);
+  migrateSubscriptionSchema(db);
+  db.exec(
+    `INSERT INTO subscription_accounts(id,vendor,account_key,display_name,credential_enc,expires_at,created_at,updated_at) VALUES('new','antigravity','same-google','new','different-ciphertext',999,1,1)`
+  );
+  assert.deepEqual(
+    db
+      .prepare(
+        "SELECT vendor,credential_enc FROM subscription_accounts WHERE id='legacy'"
+      )
+      .get(),
+    { vendor: 'gemini', credential_enc: 'ciphertext' }
+  );
+  assert.deepEqual(
+    db.prepare('SELECT * FROM subscription_provider_links').get(),
+    { account_id: 'legacy', provider_id: 'provider' }
+  );
+  assert.deepEqual(db.pragma('foreign_key_check'), []);
+  assert.equal(db.pragma('foreign_keys', { simple: true }), 1);
+  db.close();
+});
