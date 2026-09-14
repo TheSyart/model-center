@@ -47,6 +47,7 @@ async function handlePost(req: NextRequest): Promise<Response> {
       includeUsage: true, // Anthropic 流式总是带 usage
       clientSignal: req.signal,
       anthropicVersion: req.headers.get('anthropic-version'),
+      anthropicBeta: req.headers.get('anthropic-beta'),
       prompt,
       token: auth.token,
       source: normalizeRequestSource(req.headers.get('user-agent')),

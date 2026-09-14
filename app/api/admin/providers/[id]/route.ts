@@ -5,7 +5,7 @@ import { db, schema, sqlite } from '@/lib/db';
 import { getPreset } from '@/lib/presets';
 import { EndpointValidationError, listProviderEndpoints, replaceProviderEndpoints } from '@/lib/services/provider-endpoint';
 import { resolveEndpointSetForPatch } from '@/lib/services/provider-endpoint-request';
-import { getProvider, serializeProvider, validateBaseUrl } from '@/lib/services/provider';
+import { getProvider, serializeProvider, validateBaseUrl, providerAuthPolicy, ProviderAuthError, rejectSubscriptionProviderAction } from '@/lib/services/provider';
 
 interface PatchBody {
   name?: string;
@@ -36,6 +36,9 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   } catch {
     return NextResponse.json({ error: '请求体非法' }, { status: 400 });
   }
+
+  try { providerAuthPolicy.validatePatch(id, body as Record<string, unknown>); }
+  catch (error) { if (error instanceof ProviderAuthError) return NextResponse.json({ error: error.message }, { status: error.status }); throw error; }
 
   let endpoints;
   try {
@@ -71,6 +74,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
 
   sqlite.transaction(() => {
     db.update(schema.providers).set(updates).where(eq(schema.providers.id, id)).run();
+    if (body.enabled !== undefined) providerAuthPolicy.syncEnabled(id, body.enabled, Number(updates.updatedAt));
     if (endpoints) replaceProviderEndpoints(sqlite, id, endpoints, Date.now(), validateBaseUrl);
   })();
   return NextResponse.json({ provider: serializeProvider(getProvider(id)!) });
@@ -83,6 +87,7 @@ export async function DELETE(_req: NextRequest, ctx: { params: Promise<{ id: str
   if (!getProvider(id)) {
     return NextResponse.json({ error: '服务商不存在' }, { status: 404 });
   }
+  const blocked = rejectSubscriptionProviderAction(id); if (blocked) return blocked;
   db.delete(schema.providers).where(eq(schema.providers.id, id)).run();
   return NextResponse.json({ ok: true });
 }

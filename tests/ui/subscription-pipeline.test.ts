@@ -1,0 +1,491 @@
+import { beforeAll, afterAll, afterEach, expect, test, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import type { SubscriptionVendor } from '../../lib/subscriptions/types';
+vi.mock('next/server', () => ({ after: () => {} }));
+let pipeline: typeof import('../../lib/gateway/pipeline').runGatewayPipeline;
+let store: typeof import('../../lib/subscriptions/runtime').subscriptionStore;
+let sqlite: typeof import('../../lib/db').sqlite;
+const directory = fs.mkdtempSync(
+  path.join(os.tmpdir(), 'mc-subscription-pipeline-')
+);
+beforeAll(async () => {
+  process.env.MASTER_KEY = 'test-pipeline-only';
+  process.env.MODEL_CENTER_DB_DIR = directory;
+  ({ runGatewayPipeline: pipeline } = await import(
+    '../../lib/gateway/pipeline'
+  ));
+  ({ subscriptionStore: store } = await import(
+    '../../lib/subscriptions/runtime'
+  ));
+  ({ sqlite } = await import('../../lib/db'));
+});
+afterEach(() => vi.unstubAllGlobals());
+afterAll(() => {
+  sqlite?.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+for (const vendor of ['claude', 'codex', 'gemini'] as SubscriptionVendor[])
+  for (const stream of [false, true])
+    test(`${vendor} OAuth traverses actual router and protocol conversion (${stream ? 'SSE' : 'JSON'})`, async () => {
+      const a = store.saveAccount(vendor, {
+        accessToken: 'test-oauth',
+        refreshToken: 'test-refresh',
+        accountKey: `${vendor}-${stream}`,
+        email: null,
+        expiresAt: Date.now() + 3600000,
+        projectId: vendor === 'gemini' ? 'test-project' : null,
+      });
+      const linked = store.connectGateway(a.id, ['test-model']);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string, init: RequestInit) => {
+          expect(new Headers(init.headers).get('authorization')).toBe(
+            'Bearer test-oauth'
+          );
+          const request = JSON.parse(String(init.body));
+          if (vendor === 'codex') {
+            expect(url).toBe('https://chatgpt.com/backend-api/codex/responses');
+            expect(request.store).toBe(false);
+            const events = [
+              { type: 'response.created', response: { id: 'r1' } },
+              {
+                type: 'response.output_item.added',
+                output_index: 0,
+                item: {
+                  type: 'message',
+                  id: 'm1',
+                  role: 'assistant',
+                  content: [],
+                },
+              },
+              {
+                type: 'response.output_text.delta',
+                item_id: 'm1',
+                output_index: 0,
+                content_index: 0,
+                delta: 'hello',
+              },
+              {
+                type: 'response.completed',
+                response: {
+                  id: 'r1',
+                  status: 'completed',
+                  output: [
+                    {
+                      type: 'message',
+                      role: 'assistant',
+                      content: [{ type: 'output_text', text: 'hello' }],
+                    },
+                  ],
+                  usage: { input_tokens: 4, output_tokens: 2 },
+                },
+              },
+            ];
+            return new Response(
+              events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join(''),
+              { headers: { 'Content-Type': 'text/event-stream' } }
+            );
+          }
+          if (vendor === 'gemini') {
+            expect(request.project).toBe('test-project');
+            expect(request.request.contents).toBeDefined();
+            const body = {
+              response: {
+                candidates: [
+                  {
+                    content: { role: 'model', parts: [{ text: 'hello' }] },
+                    finishReason: 'STOP',
+                  },
+                ],
+                usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 2 },
+              },
+            };
+            return stream
+              ? new Response(`data: ${JSON.stringify(body)}\n\n`)
+              : Response.json(body);
+          }
+          expect(url).toBe('https://api.anthropic.com/v1/messages');
+          expect(new Headers(init.headers).has('x-api-key')).toBe(false);
+          const body = {
+            id: 'msg',
+            type: 'message',
+            role: 'assistant',
+            model: 'test-model',
+            content: [{ type: 'text', text: 'hello' }],
+            stop_reason: 'end_turn',
+            usage: { input_tokens: 4, output_tokens: 2 },
+          };
+          return stream
+            ? new Response(
+                `event: message_start\ndata: ${JSON.stringify({ type: 'message_start', message: { ...body, content: [] } })}\n\nevent: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n`
+              )
+            : Response.json(body);
+        })
+      );
+      const response = await pipeline({
+        entry: 'openai',
+        rawBody: { messages: [{ role: 'user', content: 'hello' }] },
+        ir: { messages: [{ role: 'user', content: 'hello' }] },
+        requestedModel: `${linked.providerSlug}/test-model`,
+        stream,
+        includeUsage: true,
+        clientSignal: new AbortController().signal,
+      });
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      expect(text).toContain('hello');
+      expect(text).not.toContain('test-oauth');
+      if (stream) expect(text).toContain('[DONE]');
+      else expect(JSON.parse(text).choices[0].message.content).toBe('hello');
+    });
+test('401 rotates credential once, retries and discards upstream error bodies', async () => {
+  const a = store.saveAccount('claude', {
+    accessToken: 'old-token',
+    refreshToken: 'test-refresh',
+    accountKey: 'retry-account',
+    email: null,
+    expiresAt: Date.now() + 3600000,
+  });
+  const linked = store.connectGateway(a.id, ['retry-model']);
+  let attempts = 0;
+  let cancelled = false;
+  const fetcher = vi.fn(async (url: string, init: RequestInit) => {
+    if (url === 'https://platform.claude.com/v1/oauth/token')
+      return Response.json({
+        access_token: 'new-token',
+        refresh_token: 'new-refresh',
+        expires_in: 3600,
+      });
+    attempts++;
+    if (attempts === 1)
+      return new Response(
+        new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode('private-error'));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { status: 401 }
+      );
+    expect(new Headers(init.headers).get('authorization')).toBe(
+      'Bearer new-token'
+    );
+    return Response.json({
+      id: 'msg',
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'retry worked' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 1, output_tokens: 2 },
+    });
+  });
+  vi.stubGlobal('fetch', fetcher);
+  const response = await pipeline({
+    entry: 'openai',
+    rawBody: { messages: [{ role: 'user', content: 'hi' }] },
+    ir: { messages: [{ role: 'user', content: 'hi' }] },
+    requestedModel: `${linked.providerSlug}/retry-model`,
+    stream: false,
+    includeUsage: false,
+    clientSignal: new AbortController().signal,
+  });
+  expect(response.status).toBe(200);
+  expect(await response.text()).toContain('retry worked');
+  expect(attempts).toBe(2);
+  expect(cancelled).toBe(true);
+  expect(store.getCredential(a.id).refreshToken).toBe('new-refresh');
+});
+test('subscription management route binds OAuth session to browser and rejects cross-origin mutations', async () => {
+  const route = await import(
+    '../../app/api/admin/subscriptions/[[...path]]/route'
+  );
+  const call = (
+    path: string[],
+    body: unknown,
+    origin = 'http://localhost:3000',
+    cookie?: string
+  ) =>
+    route.POST(
+      new Request(
+        `http://localhost:3000/api/admin/subscriptions/${path.join('/')}`,
+        {
+          method: 'POST',
+          headers: {
+            Origin: origin,
+            'Content-Type': 'application/json',
+            ...(cookie ? { Cookie: cookie } : {}),
+          },
+          body: JSON.stringify(body),
+        }
+      ),
+      { params: Promise.resolve({ path }) }
+    );
+  expect(
+    (await call(['oauth'], { vendor: 'codex' }, 'https://evil.example')).status
+  ).toBe(403);
+  const start = await call(['oauth'], { vendor: 'codex' });
+  expect(start.status).toBe(201);
+  expect(start.headers.get('cache-control')).toContain('no-store');
+  expect(start.headers.get('set-cookie')).toContain('HttpOnly');
+  const body = await start.json();
+  expect(JSON.stringify(body)).not.toMatch(/verifier|refreshToken|accessToken/);
+  const cookie = start.headers.get('set-cookie')!.split(';')[0];
+  expect(
+    (
+      await call(
+        ['oauth', 'complete'],
+        { sessionId: body.session.id, input: 'bad' },
+        'http://localhost:3000',
+        'mc_subscription_owner=' + 'b'.repeat(64)
+      )
+    ).status
+  ).toBe(409);
+  const cancelled = await route.DELETE(
+    new Request(
+      `http://localhost:3000/api/admin/subscriptions/oauth/${body.session.id}`,
+      {
+        method: 'DELETE',
+        headers: { Origin: 'http://localhost:3000', Cookie: cookie },
+      }
+    ),
+    { params: Promise.resolve({ path: ['oauth', body.session.id] }) }
+  );
+  expect(cancelled.status).toBe(200);
+  expect(
+    (
+      await call(
+        ['oauth', 'complete'],
+        { sessionId: body.session.id, input: 'bad' },
+        'http://localhost:3000',
+        cookie
+      )
+    ).status
+  ).toBe(409);
+});
+test('subscription usage retains token counts but never creates an API cost', async () => {
+  const a = store.saveAccount('codex', {
+    accessToken: 'cost-token',
+    refreshToken: 'refresh',
+    accountKey: 'cost-account',
+    email: null,
+    expiresAt: Date.now() + 3600000,
+  });
+  const linked = store.connectGateway(a.id, ['cost-model']);
+  sqlite
+    .prepare(
+      'UPDATE models SET input_price=100,output_price=200 WHERE provider_id=?'
+    )
+    .run(linked.providerId);
+  const { writeRequestLog } = await import('../../lib/gateway/logger');
+  writeRequestLog({
+    ts: Date.now(),
+    providerId: linked.providerId,
+    modelId: 'cost-model',
+    alias: null,
+    entryProtocol: 'openai',
+    status: 200,
+    latencyMs: 1,
+    usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 },
+    error: null,
+    stream: false,
+  });
+  const row = sqlite
+    .prepare('SELECT cost,prompt_tokens FROM request_logs WHERE provider_id=?')
+    .get(linked.providerId) as { cost: number | null; prompt_tokens: number };
+  expect(row.cost).toBeNull();
+  expect(row.prompt_tokens).toBe(100);
+});
+test('429 quota rejection fails over to the next explicitly configured account', async () => {
+  const link = (key: string) =>
+    store.connectGateway(
+      store.saveAccount('claude', {
+        accessToken: key,
+        refreshToken: 'refresh',
+        accountKey: key,
+        email: null,
+        expiresAt: Date.now() + 3600000,
+      }).id,
+      ['failover-model']
+    );
+  const first = link('exhausted-account'),
+    second = link('available-account');
+  sqlite
+    .prepare(
+      'INSERT INTO route_aliases(id,alias,targets,enabled) VALUES(?,?,?,1)'
+    )
+    .run(
+      'fallback-id',
+      'subscription-fallback',
+      JSON.stringify([
+        { provider_id: first.providerId, model_id: 'failover-model' },
+        { provider_id: second.providerId, model_id: 'failover-model' },
+      ])
+    );
+  const seen: string[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (_url: string, init: RequestInit) => {
+      const auth = new Headers(init.headers).get('authorization')!;
+      seen.push(auth);
+      return auth === 'Bearer exhausted-account'
+        ? Response.json({ error: 'limit reached' }, { status: 429 })
+        : Response.json({
+            id: 'msg',
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'text', text: 'backup account' }],
+            stop_reason: 'end_turn',
+            usage: { input_tokens: 1, output_tokens: 2 },
+          });
+    })
+  );
+  const response = await pipeline({
+    entry: 'openai',
+    rawBody: { messages: [{ role: 'user', content: 'hi' }] },
+    ir: { messages: [{ role: 'user', content: 'hi' }] },
+    requestedModel: 'subscription-fallback',
+    stream: false,
+    includeUsage: false,
+    clientSignal: new AbortController().signal,
+  });
+  expect(response.status).toBe(200);
+  expect(await response.text()).toContain('backup account');
+  expect(seen).toEqual([
+    'Bearer exhausted-account',
+    'Bearer available-account',
+  ]);
+});
+test('native Anthropic capability beta reaches the subscription upstream through actual pipeline', async () => {
+  const a = store.saveAccount('claude', {
+    accessToken: 'beta-token',
+    refreshToken: 'refresh',
+    accountKey: 'beta-account',
+    email: null,
+    expiresAt: Date.now() + 3600000,
+  });
+  const linked = store.connectGateway(a.id, ['beta-model']);
+  const tools = [{ type: 'tool_search_tool_regex_20251119', name: 'search' }];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (_url: string, init: RequestInit) => {
+      const betas = new Headers(init.headers).get('anthropic-beta')!.split(',');
+      expect(betas).toContain('context-1m-2025-08-07');
+      expect(betas).toContain('advanced-tool-use-2025-11-20');
+      expect(betas).toContain('oauth-2025-04-20');
+      expect(JSON.parse(String(init.body)).tools).toEqual(tools);
+      return Response.json({
+        id: 'beta-msg',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'ok' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    })
+  );
+  const raw = {
+    messages: [{ role: 'user', content: 'hello' }],
+    max_tokens: 32,
+    tools,
+  };
+  const response = await pipeline({
+    entry: 'anthropic',
+    rawBody: raw,
+    ir: { messages: [] },
+    requestedModel: `${linked.providerSlug}/beta-model`,
+    stream: false,
+    includeUsage: true,
+    anthropicBeta: 'context-1m-2025-08-07',
+    clientSignal: new AbortController().signal,
+  });
+  expect(response.status).toBe(200);
+  expect((await response.json()).content[0].text).toBe('ok');
+});
+test('explicit public HTTPS origin permits proxy login and sets Secure owner cookie', async () => {
+  const previous = process.env.MODEL_CENTER_PUBLIC_ORIGIN;
+  try {
+    process.env.MODEL_CENTER_PUBLIC_ORIGIN = 'https://models.example.com';
+    const route = await import(
+      '../../app/api/admin/subscriptions/[[...path]]/route'
+    );
+    const request = (origin: string) =>
+      new Request('http://localhost:3000/api/admin/subscriptions/oauth', {
+        method: 'POST',
+        headers: {
+          Host: 'models.example.com',
+          Origin: origin,
+          'Content-Type': 'application/json',
+          'X-Forwarded-Proto': 'http',
+        },
+        body: JSON.stringify({ vendor: 'codex' }),
+      });
+    const response = await route.POST(request('https://models.example.com'), {
+      params: Promise.resolve({ path: ['oauth'] }),
+    });
+    expect(response.status).toBe(201);
+    expect(response.headers.get('set-cookie')).toContain('; Secure');
+    expect(response.headers.get('set-cookie')).toContain('HttpOnly');
+    expect(
+      (
+        await route.POST(request('https://evil.example'), {
+          params: Promise.resolve({ path: ['oauth'] }),
+        })
+      ).status
+    ).toBe(403);
+  } finally {
+    if (previous === undefined) delete process.env.MODEL_CENTER_PUBLIC_ORIGIN;
+    else process.env.MODEL_CENTER_PUBLIC_ORIGIN = previous;
+  }
+});
+test('native Responses observer records Codex data-only terminal usage', async () => {
+  const { observeResponsesUsageFromSSE } = await import(
+    '../../lib/protocols/responses'
+  );
+  const bytes =
+    'data: {"type":"response.completed","response":{"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}\n\n';
+  const observed = observeResponsesUsageFromSSE(new Response(bytes).body!);
+  expect(await new Response(observed.stream).text()).toBe(bytes);
+  const usage = await observed.usage;
+  expect(usage).toMatchObject({
+    prompt_tokens: 7,
+    completion_tokens: 3,
+    total_tokens: 10,
+  });
+  const account = store.saveAccount('codex', {
+    accessToken: 'usage-token',
+    refreshToken: 'refresh',
+    accountKey: 'native-sse-usage',
+    email: null,
+    expiresAt: Date.now() + 3600000,
+  });
+  const linked = store.connectGateway(account.id, ['native-usage-model']);
+  const { writeRequestLog } = await import('../../lib/gateway/logger');
+  writeRequestLog({
+    ts: Date.now(),
+    providerId: linked.providerId,
+    modelId: 'native-usage-model',
+    alias: null,
+    entryProtocol: 'responses',
+    status: 200,
+    latencyMs: 1,
+    usage,
+    error: null,
+    stream: true,
+  });
+  expect(
+    sqlite
+      .prepare(
+        'SELECT prompt_tokens,completion_tokens,total_tokens,cost FROM request_logs WHERE provider_id=?'
+      )
+      .get(linked.providerId)
+  ).toEqual({
+    prompt_tokens: 7,
+    completion_tokens: 3,
+    total_tokens: 10,
+    cost: null,
+  });
+});

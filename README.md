@@ -1,12 +1,13 @@
 # Model Center
 
-个人模型聚合平台：把各家模型服务商的 API Key 统一收进来，对外暴露统一的 OpenAI / Anthropic / Responses / Gemini 四协议接口，通过 `model` 字段路由到不同服务商。单人自用定位。
+个人模型聚合平台：统一管理模型服务商 API Key 和订阅 OAuth 账号，对外提供 OpenAI Chat / Anthropic Messages / OpenAI Responses 接口，并支持 Gemini 上游转换，通过 `model` 字段路由到不同服务商。单人自用定位。
 
 ## 功能
 
 - **统一网关**：`POST /v1/chat/completions`（OpenAI）、`POST /v1/messages`（Anthropic，Claude Code 直连）、`POST /v1/responses`（OpenAI Responses，Codex）、`GET /v1/models`。入口协议与服务商原生协议一致时原生透传，否则经 IR（OpenAI Chat 中间格式）双向转换，支持流式 SSE、工具调用、图片输入。
 - **模型路由**：`model` 支持三种写法——路由别名（如 `best-coding`，支持按序 failover）、`provider-slug/model`（显式）、裸模型名（全局匹配，priority 决胜）。
 - **服务商管理**：固定 SHA 同步 CC Switch 的 10 类内置预设（当前 540 条源记录归一为 255 个端点变体）、192 条四档模型定价与 99 个图标；api_key AES-256-GCM 加密入库，支持连通性测速、模型列表同步、余额与 Coding Plan 查询。维护方式见 [`docs/cc-switch-sync.md`](docs/cc-switch-sync.md)。
+- **订阅账号**：Claude Code、Codex、Gemini CLI OAuth 登录，多账号额度窗口、凭据自动刷新、独立网关接入与别名回退。入口 `/subscriptions`；使用方法、部署配置和真实账号待验范围见 [订阅账号文档](docs/subscription-accounts.md)。
 - **预设提示词**：`{{变量}}` 占位，网关请求带 `prompt_id`/`prompt_name` + `prompt_vars` 注入为 system message。
 - **多令牌**：网关令牌管理（创建/启停/过期时间/花费限额与窗口），按令牌追踪用量。
 - **日志与统计**：按 Codex、Claude Code、Kimi Code 等请求客户端识别入口，保留清理后的真实 User-Agent 来源；提供四档 Token 用量、估算成本看板和日志保留策略。
@@ -47,6 +48,8 @@ docker compose --env-file /absolute/path/compose.env -f compose.production.yml u
 | 变量 | 说明 |
 |------|------|
 | `MASTER_KEY` | 必填。AES-256-GCM 主密钥（64 位 hex，或任意字符串 sha256 派生）。生成：`openssl rand -hex 32` |
+| `MODEL_CENTER_PUBLIC_ORIGIN` | 可选。HTTPS 反向代理后的公开 origin，例如 `https://models.example.com`，用于订阅登录同源校验和 Secure Cookie。 |
+| `GEMINI_OAUTH_CLIENT_ID` / `GEMINI_OAUTH_CLIENT_SECRET` | Gemini CLI 登录所需的服务端 OAuth 客户端配置，详见订阅账号文档；不提交实际值。 |
 
 数据库为单文件 SQLite（`data/model-center.db`），备份即拷贝。
 

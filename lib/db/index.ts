@@ -10,6 +10,7 @@ import { migrateModelPricingSchema } from './pricing-migration';
 import { migrateProviderEndpointSchema } from './provider-endpoint-migration';
 import { lookupBundledPricing } from '@/lib/services/model-pricing';
 import ccSwitchManifest from '@/lib/presets/cc-switch-manifest.json';
+import { migrateSubscriptionSchema } from '@/lib/subscriptions/store';
 
 // 数据目录：默认 <cwd>/data，可用 MODEL_CENTER_DB_DIR 覆盖（测试/多实例隔离用）
 const DB_DIR = process.env.MODEL_CENTER_DB_DIR || path.join(process.cwd(), 'data');
@@ -172,6 +173,7 @@ function migrate(sqlite: Database.Database) {
   migrateUsageSchema(sqlite);
   migrateModelPricingSchema(sqlite, lookupBundledPricing, ccSwitchManifest.commit);
   migrateProviderEndpointSchema(sqlite);
+  migrateSubscriptionSchema(sqlite);
 }
 
 function createClient() {

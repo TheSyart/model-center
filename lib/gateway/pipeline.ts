@@ -1,6 +1,9 @@
 import { after } from 'next/server';
 import { getAdapter } from '@/lib/adapters';
 import { decrypt } from '@/lib/crypto';
+import { subscriptionStore, subscriptionLifecycle } from '@/lib/subscriptions/runtime';
+import { subscriptionWireRequest, normalizeSubscriptionResponse } from '@/lib/subscriptions/gateway';
+import type { Credential } from '@/lib/subscriptions/types';
 import { GatewayError, protocolNotImplemented } from './errors';
 import { fetchUpstream } from './forward';
 import type { FetchFailure } from './forward';
@@ -53,6 +56,8 @@ export interface PipelineInput {
   clientSignal: AbortSignal;
   /** Anthropic 入口客户端的 anthropic-version 头（原生透传时带上） */
   anthropicVersion?: string | null;
+  /** Caller capability flags; only reviewed flags are used for Claude subscriptions. */
+  anthropicBeta?: string | null;
   /** 预设提示词注入（§7.1 扩展字段 prompt_id/prompt_name + prompt_vars） */
   prompt?: { id?: string; name?: string; vars?: Record<string, unknown> };
   /** 网关令牌（鉴权已通过）；用于限额检查与日志 token_id */
@@ -270,22 +275,45 @@ export async function runGatewayPipeline(input: PipelineInput): Promise<Response
           providerEndpointId: endpoint.id,
           upstreamProtocol: endpoint.protocol,
         };
+        const subscription = subscriptionStore.accountForProvider(target.provider.id);
+        const subscriptionFailure = (status: number, message: string) => {
+          const response = Response.json({error:{message,type:'upstream_error'}},{status});
+          const fetched: FetchFailure = {ok:false,status,response,error:message,latencyMs:Date.now()-startedAt};
+          return {ok:false as const,status,value:response,context:{attemptBase,fetched}};
+        };
+        let credential: Credential | undefined;
+        if (subscription) {
+          try { credential = await subscriptionLifecycle.credential(subscription.id); }
+          catch { return subscriptionFailure(503,'订阅账号暂不可用，请在订阅账号页检查登录状态'); }
+        }
         const attempt = buildAttemptForEndpoint(input, target, endpoint, {
-          decrypt,
+          decrypt: credential ? () => credential!.accessToken : decrypt,
           getAdapter,
           protocolNotImplemented,
         });
-        const fetched = await fetchUpstream({
-          url: attempt.url,
-          headers: attempt.headers,
-          body: attempt.body,
-          clientSignal,
-        });
+        const send = () => {
+          const wire = subscription && credential
+            ? subscriptionWireRequest(subscription.vendor,credential,attempt,target.modelId,stream,input.anthropicBeta)
+            : attempt;
+          return fetchUpstream({url:wire.url,headers:wire.headers,body:wire.body,clientSignal,redirect:subscription?'error':undefined,discardErrorBody:!!subscription});
+        };
+        let fetched = await send();
+        if (subscription && credential && !fetched.ok && fetched.status===401) {
+          try { credential=await subscriptionLifecycle.credential(subscription.id,credential.accessToken); }
+          catch { return subscriptionFailure(503,'订阅账号需要重新授权或凭据刷新暂不可用'); }
+          fetched=await send();
+        }
         if (!fetched.ok) {
+          if (subscription) return subscriptionFailure(fetched.status,`订阅服务返回 HTTP ${fetched.status}，请检查账号状态或稍后重试`);
           return { ok: false as const, status: fetched.status, value: fetched.response, context: { attemptBase, fetched } };
         }
 
-        const { upstream, latencyMs, cleanup } = fetched;
+        const { latencyMs, cleanup } = fetched;
+        let upstream=fetched.upstream;
+        if (subscription) {
+          try { upstream=await normalizeSubscriptionResponse(subscription.vendor,upstream,stream,clientSignal); }
+          catch(error) { cleanup();await cancelStreamBestEffort(upstream.body,error);return subscriptionFailure(502,'订阅服务未返回有效完整响应'); }
+        }
         const successError = failoverFrom ? `failed over from ${failoverFrom}` : null;
         if (!stream) {
           try {

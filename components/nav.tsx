@@ -1,7 +1,7 @@
 'use client';
 
 import type { LucideIcon } from 'lucide-react';
-import { Activity, DatabaseBackup, Gauge, KeyRound, Link2, MessageSquareText, Server, Settings, ShieldAlert } from 'lucide-react';
+import { Activity, DatabaseBackup, Gauge, KeyRound, Link2, MessageSquareText, Server, Settings, ShieldAlert, Users } from 'lucide-react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
@@ -17,6 +17,7 @@ const NAV_GROUPS: NavGroup[] = [
   { label: '概览', items: [{ href: '/', label: '仪表盘', icon: Gauge }] },
   { label: '网关管理', items: [
     { href: '/providers', label: '服务商', icon: Server },
+    { href: '/subscriptions', label: '订阅账号', icon: Users },
     { href: '/aliases', label: '别名', icon: Link2 },
     { href: '/prompts', label: '提示词', icon: MessageSquareText },
     { href: '/tokens', label: '令牌', icon: KeyRound },

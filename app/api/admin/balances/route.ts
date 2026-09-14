@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
-import { decrypt } from '@/lib/crypto';
 import { queryBalanceWithSnapshot } from '@/lib/services/balance';
-import { listProviders } from '@/lib/services/provider';
+import { listProviders, getProviderSubscriptionId, readProviderApiKey } from '@/lib/services/provider';
 
 // GET /api/admin/balances：并发查询所有启用服务商的余额（各自容错）
 export async function GET() {
@@ -12,7 +11,9 @@ export async function GET() {
       provider_id: p.id,
       slug: p.slug,
       name: p.name,
-      result: await queryBalanceWithSnapshot(p, decrypt(p.apiKeyEnc)),
+      result: getProviderSubscriptionId(p.id)
+        ? { supported: false, error: '订阅账号额度请在订阅账号页面查询' }
+        : await queryBalanceWithSnapshot(p, readProviderApiKey(p)),
     })),
   );
   return NextResponse.json({

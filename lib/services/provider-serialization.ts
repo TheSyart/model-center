@@ -17,10 +17,12 @@ export interface ProviderSerializationSource {
 }
 
 /** Public provider shape: endpoint data is included, while encrypted API keys remain internal. */
-export function serializeProviderRecord(provider: ProviderSerializationSource, endpoints: ProviderEndpoint[]) {
+export function serializeProviderRecord(provider: ProviderSerializationSource, endpoints: ProviderEndpoint[], subscriptionAccountId: string | null = null) {
   const defaultEndpoint = endpoints.find((endpoint) => endpoint.enabled && endpoint.isDefault);
   return {
     id: provider.id,
+    auth_kind: subscriptionAccountId ? 'subscription' as const : 'api_key' as const,
+    subscription_account_id: subscriptionAccountId,
     slug: provider.slug,
     name: provider.name,
     preset_key: provider.presetKey,
@@ -33,7 +35,7 @@ export function serializeProviderRecord(provider: ProviderSerializationSource, e
     priority: provider.priority,
     balance_config: provider.balanceConfig,
     remark: provider.remark,
-    has_key: !!provider.apiKeyEnc,
+    has_key: !subscriptionAccountId && !!provider.apiKeyEnc,
     created_at: provider.createdAt,
     updated_at: provider.updatedAt,
   };

@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { and, eq, sql } from 'drizzle-orm';
-import { db, schema } from '@/lib/db';
+import { db, schema, sqlite } from '@/lib/db';
 import { maybePurgeExpiredLogs } from '@/lib/services/log';
 import { detectRequestClient, effectiveTokenTotal, normalizeRequestSource, type UsageInfo } from '@/lib/services/usage-metrics';
 import { calculateRequestCost } from '@/lib/services/pricing';
@@ -36,6 +36,7 @@ export interface RequestLogFields {
 /** 按 models 表的自定义单价估算成本（每百万 token 单价 → 美元）。 */
 function estimateCost(providerId: string | null, modelId: string | null, usage: UsageInfo | null): number | null {
   if (!providerId || !modelId || !usage) return null;
+  if (sqlite.prepare('SELECT 1 FROM subscription_provider_links WHERE provider_id=?').get(providerId)) return null;
   const m = db
     .select()
     .from(schema.models)

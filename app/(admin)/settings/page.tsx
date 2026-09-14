@@ -140,7 +140,7 @@ export default function SettingsPage() {
         </Card>
 
         <Card>
-          <CardHeader><CardTitle>导入 / 导出</CardTitle><CardDescription>迁移服务商、端点、模型、别名和提示词配置；API Key 默认脱敏，旧版单端点文件仍可导入。</CardDescription></CardHeader>
+          <CardHeader><CardTitle>导入 / 导出</CardTitle><CardDescription>迁移服务商、端点、模型、别名和提示词配置；API Key 默认脱敏，旧版单端点文件仍可导入。订阅账号、关联模型及别名中的订阅目标不包含在导出中；迁移后需重新登录并接入。</CardDescription></CardHeader>
           <CardContent><ExportImport /></CardContent>
         </Card>
 

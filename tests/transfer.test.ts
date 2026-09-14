@@ -197,3 +197,22 @@ test('HTTP provider import follows the runtime allow_http_providers policy for v
   assert.equal((denied.prepare('SELECT COUNT(*) AS n FROM providers').get() as { n: number }).n, 0);
   denied.close();
 });
+
+test('OAuth configuration is excluded from portable exports, with valid API-key fallback aliases retained',()=>{
+ const sqlite=database();const transfer=service(sqlite);
+ transfer.importConfig({providers:[{slug:'key-provider',protocol:'openai',base_url:'https://key.example/v1',api_key:'secret'},{slug:'oauth-provider',protocol:'openai-responses',base_url:'https://chatgpt.com/backend-api/codex',api_key:'temporary'}],models:[{provider_slug:'key-provider',model_id:'key-model'},{provider_slug:'oauth-provider',model_id:'oauth-model'}],aliases:[{alias:'mixed',targets:[{provider_slug:'oauth-provider',model_id:'oauth-model'},{provider_slug:'key-provider',model_id:'key-model'}]},{alias:'only-oauth',targets:[{provider_slug:'oauth-provider',model_id:'oauth-model'}]}]});
+ sqlite.exec("CREATE TABLE subscription_provider_links(provider_id TEXT,account_id TEXT);INSERT INTO subscription_provider_links SELECT id,'account' FROM providers WHERE slug='oauth-provider';UPDATE providers SET api_key_enc='' WHERE slug='oauth-provider';INSERT INTO route_aliases VALUES('broken','broken','not-json',1)");
+ const exported=transfer.exportConfig(true);
+ assert.deepEqual(exported.providers.map(p=>p.slug),['key-provider']);assert.equal(exported.providers[0].api_key,'secret');
+ assert.deepEqual(exported.models.map(m=>m.model_id),['key-model']);assert.deepEqual(exported.aliases.map(a=>a.alias),['mixed']);
+ assert.deepEqual(exported.aliases[0].targets,[{provider_slug:'key-provider',model_id:'key-model'}]);
+ assert.ok(exported.export_warnings?.length);assert.ok(!JSON.stringify(exported.providers).includes('oauth-provider'));
+ const target=database();const imported=service(target).importConfig(exported);assert.equal(imported.providers.added,1);assert.equal(imported.aliases.added,1);target.close();sqlite.close();
+});
+test('import cannot attach new models or alias targets to an existing OAuth provider',()=>{
+ const sqlite=database();const transfer=service(sqlite);
+ transfer.importConfig({providers:[{slug:'oauth-provider',protocol:'openai',base_url:'https://example.com',api_key:'key'}]});
+ sqlite.exec("CREATE TABLE subscription_provider_links(provider_id TEXT,account_id TEXT);INSERT INTO subscription_provider_links SELECT id,'account' FROM providers;");
+ const report=transfer.importConfig({models:[{provider_slug:'oauth-provider',model_id:'injected'}],aliases:[{alias:'injected',targets:[{provider_slug:'oauth-provider',model_id:'injected'}]}]});
+ assert.equal(report.models.added,0);assert.equal(report.models.skipped,1);assert.equal(report.aliases.added,0);assert.equal(report.aliases.skipped.length,1);sqlite.close();
+});

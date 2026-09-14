@@ -19,6 +19,8 @@ export interface ProviderView {
   priority: number;
   remark: string | null;
   has_key: boolean;
+  auth_kind?: 'api_key' | 'subscription';
+  subscription_account_id?: string | null;
 }
 
 export interface ProviderFormState {

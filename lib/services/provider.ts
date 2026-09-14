@@ -4,13 +4,23 @@ import type { providers } from '@/lib/db/schema';
 import { getSetting } from '@/lib/settings';
 import { getEnabledDefaultEndpoint, listProviderEndpoints } from './provider-endpoint';
 import { serializeProviderRecord } from './provider-serialization';
+import { decrypt } from '@/lib/crypto';
+import { createProviderAuthPolicy, ProviderAuthError } from './provider-auth';
+export { ProviderAuthError } from './provider-auth';
 import { validateProviderBaseUrl } from './provider-url';
+
+export const providerAuthPolicy = createProviderAuthPolicy(sqlite);
+export const getProviderSubscriptionId = providerAuthPolicy.accountId;
+export function rejectSubscriptionProviderAction(id: string) {
+  return getProviderSubscriptionId(id) ? Response.json({ error: new ProviderAuthError().message }, { status: 409, headers: { 'Cache-Control': 'no-store' } }) : null;
+}
+export function readProviderApiKey(provider: ProviderRow) { return providerAuthPolicy.readApiKey(provider, decrypt); }
 
 export type ProviderRow = typeof providers.$inferSelect;
 
 /** 序列化给前端的形态：绝不返回 api_key 明文/密文，只返回 has_key。 */
 export function serializeProvider(p: ProviderRow, endpoints = listProviderEndpoints(sqlite, p.id)) {
-  return serializeProviderRecord(p, endpoints);
+  return serializeProviderRecord(p, endpoints, getProviderSubscriptionId(p.id));
 }
 
 export function listProviders() {

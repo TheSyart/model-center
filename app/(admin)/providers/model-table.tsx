@@ -25,6 +25,7 @@ export interface ModelItem {
 
 interface Props {
   providerId: string;
+  subscription?: boolean;
   models: ModelItem[];
   /** 数据变更后通知父组件重新拉取模型列表 */
   onChanged: () => Promise<void> | void;
@@ -32,7 +33,7 @@ interface Props {
 }
 
 /** 服务商卡片展开区内的模型管理表（同步/行内编辑/启停/删除/手动添加）。 */
-export default function ModelTable({ providerId, models, onChanged, onToast }: Props) {
+export default function ModelTable({ providerId, models, onChanged, onToast, subscription=false }: Props) {
   const [syncing, setSyncing] = useState(false);
   const [syncNotice, setSyncNotice] = useState('');
   const [showAdd, setShowAdd] = useState(false);
@@ -92,10 +93,10 @@ export default function ModelTable({ providerId, models, onChanged, onToast }: P
     const e = editOf(m);
     const ok = await patchModel(m.id, {
       alias: e.alias.trim() || null,
-      input_price: e.input_price.trim() === '' ? null : Number(e.input_price),
+      ...(!subscription ? {input_price: e.input_price.trim() === '' ? null : Number(e.input_price),
       output_price: e.output_price.trim() === '' ? null : Number(e.output_price),
       cache_read_price: e.cache_read_price.trim() === '' ? null : Number(e.cache_read_price),
-      cache_write_price: e.cache_write_price.trim() === '' ? null : Number(e.cache_write_price),
+      cache_write_price: e.cache_write_price.trim() === '' ? null : Number(e.cache_write_price)} : {}),
     });
     if (ok) {
       onToast('已保存');
@@ -161,10 +162,10 @@ export default function ModelTable({ providerId, models, onChanged, onToast }: P
           <button
             type="button"
             onClick={sync}
-            disabled={syncing}
+            disabled={syncing || subscription}
             className={btn.ghost}
           >
-            {syncing ? '同步中…' : '同步模型'}
+            {subscription ? '订阅模型需手动添加' : syncing ? '同步中…' : '同步模型'}
           </button>
           <button
             type="button"
@@ -176,6 +177,7 @@ export default function ModelTable({ providerId, models, onChanged, onToast }: P
           </button>
         </div>
       </div>
+      {subscription && <p className="mb-3 text-xs text-muted-foreground">订阅成本未知，不按 API 单价计费；此处仅管理模型和别名。</p>}
       {syncNotice && <div className="mb-3 text-xs text-success" role="status">{syncNotice}</div>}
 
       {showAdd && (
@@ -206,16 +208,16 @@ export default function ModelTable({ providerId, models, onChanged, onToast }: P
       )}
 
       {models.length === 0 ? (
-        <div className="py-6 text-center text-xs text-subtle-foreground">暂无模型，可从上游同步或手动添加</div>
+        <div className="py-6 text-center text-xs text-subtle-foreground">暂无模型，请添加账号可用的模型 ID</div>
       ) : (
         <div className="minimal-scrollbar -mx-4 overflow-x-auto px-4 sm:-mx-5 sm:px-5">
-        <table className="w-full min-w-[980px] text-sm">
+        <table className={`w-full ${subscription ? 'min-w-[480px]' : 'min-w-[980px]'} text-sm`}>
           <thead className={tableHeadCls}>
             <tr>
               <th className="px-3 py-2 font-medium">模型 ID</th>
               <th className="px-3 py-2 font-medium">别名</th>
-              <th className="px-3 py-2 font-medium">四档单价（$/M tokens）</th>
-              <th className="px-3 py-2 font-medium">定价来源</th>
+              {!subscription && <><th className="px-3 py-2 font-medium">四档单价（$/M tokens）</th>
+              <th className="px-3 py-2 font-medium">定价来源</th></>}
               <th className="px-3 py-2 font-medium">启用</th>
               <th className="px-3 py-2 font-medium">操作</th>
             </tr>
@@ -235,7 +237,7 @@ export default function ModelTable({ providerId, models, onChanged, onToast }: P
                       placeholder="—"
                     />
                   </td>
-                  <td className="px-3 py-2.5">
+                  {!subscription && <><td className="px-3 py-2.5">
                     <div className="grid grid-cols-4 gap-1.5">
                       {([
                         ['输入', 'input_price'],
@@ -259,7 +261,7 @@ export default function ModelTable({ providerId, models, onChanged, onToast }: P
                   <td className="px-3 py-2.5 text-xs text-subtle-foreground" title={m.pricing_source_ref ?? undefined}>
                     <div>{pricingSourceLabel(m.pricing_source)}</div>
                     <div className="mt-1 text-[10px]">模型：{m.synced ? '上游同步' : '手动添加'}</div>
-                  </td>
+                  </td></>}
                   <td className="px-3 py-2.5">
                     <Switch
                       checked={m.enabled}
@@ -277,9 +279,9 @@ export default function ModelTable({ providerId, models, onChanged, onToast }: P
                           保存
                         </button>
                       )}
-                      <button type="button" onClick={() => restorePricing(m)} className={btn.link}>
+                      {!subscription && <button type="button" onClick={() => restorePricing(m)} className={btn.link}>
                         恢复定价
-                      </button>
+                      </button>}
                       <button type="button" onClick={() => removeModel(m)} className={btn.linkDanger}>
                         删除
                       </button>

@@ -515,9 +515,10 @@ export async function extractResponsesUsageFromSSE(stream: ReadableStream<Uint8A
   let usage: UsageInfo | null = null;
   try {
     for await (const evt of parseSSE(stream)) {
-      if (evt.event !== 'response.completed' && evt.event !== 'response.incomplete') continue;
       try {
         const data = JSON.parse(evt.data);
+        const event = evt.event ?? data.type;
+        if (event !== 'response.completed' && event !== 'response.incomplete') continue;
         usage = normalizeResponsesUsage(data.response?.usage) ?? usage;
       } catch {
         // 忽略
@@ -535,9 +536,10 @@ export function observeResponsesUsageFromSSE(
 ): { stream: ReadableStream<Uint8Array>; usage: Promise<UsageInfo | null> } {
   let usage: UsageInfo | null = null;
   const observed = observeSSEStream(stream, (evt) => {
-    if (evt.event !== 'response.completed' && evt.event !== 'response.incomplete') return;
     try {
       const data = JSON.parse(evt.data);
+      const event = evt.event ?? data.type;
+      if (event !== 'response.completed' && event !== 'response.incomplete') return;
       usage = normalizeResponsesUsage(data.response?.usage) ?? usage;
     } catch {
       // 忽略非 JSON

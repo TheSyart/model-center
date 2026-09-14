@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import type { ProviderPreset } from '../presets/types.ts';
 import { listProviderEndpoints, replaceProviderEndpoints } from './provider-endpoint.ts';
+import { createProviderAuthPolicy } from './provider-auth.ts';
 import { resolveEndpointSetForCreate } from './provider-endpoint-request.ts';
 
 export const MASKED_TRANSFER_KEY = '***';
@@ -32,6 +33,7 @@ export interface TransferService {
 export interface ExportedConfig {
   version: 3;
   exported_at: string;
+  export_warnings?: string[];
   providers: Array<{
     slug: unknown;
     name: unknown;
@@ -76,14 +78,28 @@ export function createTransferService(deps: TransferDependencies): TransferServi
   const { sqlite } = deps;
 
   function exportConfig(includeKeys: boolean): ExportedConfig {
-    const providers = sqlite.prepare('SELECT * FROM providers ORDER BY created_at ASC, slug ASC').all() as Array<Record<string, unknown>>;
+    const linkedIds = createProviderAuthPolicy(sqlite).linkedProviderIds();
+    const warnings: string[] = [];
+    if (linkedIds.size) warnings.push(`已排除 ${linkedIds.size} 个订阅账号服务商及其模型；OAuth 授权不属于可移植 API Key 配置`);
+    const providers = (sqlite.prepare('SELECT * FROM providers ORDER BY created_at ASC, slug ASC').all() as Array<Record<string, unknown>>).filter(provider => !linkedIds.has(String(provider.id)));
     const models = sqlite.prepare('SELECT * FROM models ORDER BY model_id ASC').all() as Array<Record<string, unknown>>;
     const aliases = sqlite.prepare('SELECT * FROM route_aliases ORDER BY alias ASC').all() as Array<Record<string, unknown>>;
     const prompts = sqlite.prepare('SELECT * FROM prompts ORDER BY name ASC').all() as Array<Record<string, unknown>>;
     const slugById = new Map(providers.map((provider) => [String(provider.id), String(provider.slug)]));
 
+    const portableAliases: Array<Record<string, unknown>> = [];
+    for (const alias of aliases) {
+      let raw: unknown;
+      try { raw = JSON.parse(String(alias.targets)); } catch { warnings.push(`路由别名 ${String(alias.alias)} 的目标格式无效，未导出`); continue; }
+      if (!Array.isArray(raw) || !raw.every(t => t && typeof t === 'object' && typeof t.provider_id === 'string' && typeof t.model_id === 'string' && t.model_id.length > 0)) { warnings.push(`路由别名 ${String(alias.alias)} 的目标格式无效，未导出`); continue; }
+      const targets = raw.filter(t => slugById.has(t.provider_id)).map(t => ({ provider_slug: slugById.get(t.provider_id), model_id: t.model_id }));
+      if (targets.length !== raw.length) warnings.push(`路由别名 ${String(alias.alias)} 已移除订阅账号或不存在的服务商目标`);
+      if (!targets.length) { warnings.push(`路由别名 ${String(alias.alias)} 无可移植目标，未导出`); continue; }
+      portableAliases.push({ alias: alias.alias, targets, enabled: alias.enabled === 1 });
+    }
     return {
       version: 3,
+      ...(warnings.length ? { export_warnings: warnings } : {}),
       exported_at: new Date().toISOString(),
       providers: providers.map((provider) => {
         const endpoints = listProviderEndpoints(sqlite, String(provider.id));
@@ -103,24 +119,14 @@ export function createTransferService(deps: TransferDependencies): TransferServi
           remark: provider.remark ?? null,
         };
       }),
-      models: models.map((model) => ({
+      models: models.filter(model => slugById.has(String(model.provider_id))).map((model) => ({
         provider_slug: slugById.get(String(model.provider_id)), model_id: model.model_id, alias: model.alias,
         display_name: model.display_name, enabled: model.enabled === 1, input_price: model.input_price,
         output_price: model.output_price, cache_read_price: model.cache_read_price, cache_write_price: model.cache_write_price,
         pricing_source: model.pricing_source, pricing_source_ref: model.pricing_source_ref,
         pricing_synced_at: model.pricing_synced_at, context_window: model.context_window, synced: model.synced === 1,
       })),
-      aliases: aliases.map((alias) => {
-        let targets: Array<{ provider_slug: string | undefined; model_id: string }> = [];
-        try {
-          targets = (JSON.parse(String(alias.targets)) as Array<{ provider_id: string; model_id: string }>).map((target) => ({
-            provider_slug: slugById.get(target.provider_id), model_id: target.model_id,
-          }));
-        } catch {
-          // Historical malformed target values remain omitted from portable exports.
-        }
-        return { alias: alias.alias, targets, enabled: alias.enabled === 1 };
-      }),
+      aliases: portableAliases,
       prompts: prompts.map((prompt) => ({ name: prompt.name, content: prompt.content, description: prompt.description ?? null })),
       settings: { log_retention_days: deps.getLogRetentionDays() },
     };
@@ -164,12 +170,13 @@ export function createTransferService(deps: TransferDependencies): TransferServi
       }
     }
 
-    const providerIdBySlug = new Map((sqlite.prepare('SELECT id, slug FROM providers').all() as Array<{ id: string; slug: string }>).map((provider) => [provider.slug, provider.id]));
+    const linkedIds = createProviderAuthPolicy(sqlite).linkedProviderIds();
+    const providerIdBySlug = new Map((sqlite.prepare('SELECT id, slug FROM providers').all() as Array<{ id: string; slug: string }>).filter(provider => !linkedIds.has(provider.id)).map((provider) => [provider.slug, provider.id]));
     for (const model of asRows(data.models)) {
       const providerId = providerIdBySlug.get(text(model.provider_slug) ?? '');
       const modelId = text(model.model_id);
       const alias = text(model.alias);
-      const aliasTaken = alias && sqlite.prepare('SELECT 1 FROM models WHERE alias = ? UNION SELECT 1 FROM route_aliases WHERE alias = ?').get(alias);
+      const aliasTaken = alias && sqlite.prepare('SELECT 1 FROM models WHERE alias = ? UNION SELECT 1 FROM route_aliases WHERE alias = ?').get(alias, alias);
       if (!providerId || !modelId || aliasTaken || sqlite.prepare('SELECT 1 FROM models WHERE provider_id = ? AND model_id = ?').get(providerId, modelId)) {
         report.models.skipped++; continue;
       }
@@ -185,7 +192,7 @@ export function createTransferService(deps: TransferDependencies): TransferServi
 
     for (const alias of asRows(data.aliases)) {
       const aliasName = text(alias.alias);
-      const existing = aliasName && sqlite.prepare('SELECT 1 FROM route_aliases WHERE alias = ? UNION SELECT 1 FROM models WHERE alias = ?').get(aliasName);
+      const existing = aliasName && sqlite.prepare('SELECT 1 FROM route_aliases WHERE alias = ? UNION SELECT 1 FROM models WHERE alias = ?').get(aliasName, aliasName);
       if (!aliasName || existing) { report.aliases.skipped.push({ alias: aliasName ?? '?', reason: '已存在或非法' }); continue; }
       const targets: Array<{ provider_id: string; model_id: string }> = [];
       let invalid = false;
@@ -219,5 +226,6 @@ export function createTransferService(deps: TransferDependencies): TransferServi
     return report;
   }
 
-  return { exportConfig, importConfig };
+  // Keep ownership and all portable references in one consistent SQLite read snapshot.
+  return { exportConfig: (includeKeys) => sqlite.transaction(() => exportConfig(includeKeys))(), importConfig };
 }

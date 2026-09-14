@@ -34,11 +34,14 @@ export async function fetchUpstream(args: {
   body: unknown;
   clientSignal: AbortSignal;
   timeoutMs?: number;
+  redirect?: RequestRedirect;
+  discardErrorBody?: boolean;
 }): Promise<FetchUpstreamResult> {
   const { url, headers, body, clientSignal } = args;
   const controller = new AbortController();
   const onClientAbort = () => controller.abort();
   clientSignal.addEventListener('abort', onClientAbort);
+  if (clientSignal.aborted) controller.abort();
   const cleanup = () => clientSignal.removeEventListener('abort', onClientAbort);
   const timeout = setTimeout(() => controller.abort(), args.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   const startedAt = Date.now();
@@ -50,6 +53,7 @@ export async function fetchUpstream(args: {
       headers,
       body: JSON.stringify(body),
       signal: controller.signal,
+      redirect: args.redirect,
     });
   } catch (e) {
     clearTimeout(timeout);
@@ -74,6 +78,10 @@ export async function fetchUpstream(args: {
 
   if (!upstream.ok) {
     cleanup();
+    if(args.discardErrorBody) {
+      await upstream.body?.cancel().catch(()=>{});
+      return {ok:false,status,latencyMs,error:`上游返回 ${status}`,response:Response.json({error:{message:`上游返回 ${status}`}},{status})};
+    }
     const text = await upstream.text();
     const truncated = text.length > ERROR_BODY_MAX ? text.slice(0, ERROR_BODY_MAX) : text;
     const contentType = upstream.headers.get('content-type') ?? 'application/json';
