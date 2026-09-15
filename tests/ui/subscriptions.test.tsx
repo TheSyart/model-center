@@ -274,6 +274,7 @@ it('manages linked subscription models in a lazily loaded sheet', async () => {
       )
     ).toBe(true)
   );
+  await user.click(screen.getByRole('button', { name: '编辑 gemini-3.1-pro 别名' }));
   await user.type(screen.getByLabelText('gemini-3.1-pro 的别名'), 'pro');
   await user.click(screen.getByRole('button', { name: '保存别名' }));
   await waitFor(() =>

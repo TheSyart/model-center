@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { ExternalLink, RefreshCw, Link2, Users } from 'lucide-react';
+import { ExternalLink, RefreshCw, Link2, Pencil, Trash2, Users } from 'lucide-react';
 import { PageHeader } from '@/components/page-header';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -492,43 +492,39 @@ export default function SubscriptionsClient({
                   </p>
                 )}
                 {!a.quota?.windows.length ? (
-                  <p className="py-4 text-sm text-muted-foreground">
+                  <p className="text-sm text-muted-foreground">
                     暂无额度窗口，请刷新额度查看。
                   </p>
                 ) : (
-                  a.quota.windows.map((w) => (
-                    <div key={w.id}>
-                      <div className="mb-2 flex flex-wrap justify-between gap-2 text-sm">
-                        <span>
-                          {w.label}
-                          {w.modelId && w.modelId !== w.label && (
-                            <span className="ml-1 text-xs text-muted-foreground">
-                              {w.modelId}
+                  <div className="space-y-2.5">
+                    {a.quota.windows.map((w) => (
+                      <div key={w.id} className="text-sm">
+                        <div className="flex items-baseline justify-between gap-3">
+                          <span className="min-w-0 truncate" title={w.modelId ?? w.label}>
+                            {w.label}
+                          </span>
+                          <span className="shrink-0 text-xs text-muted-foreground">
+                            <span className="font-medium tabular-nums text-foreground">
+                              {w.remainingPercent === null
+                                ? '剩余额度未知'
+                                : `剩余 ${Math.round(w.remainingPercent * 10) / 10}%`}
                             </span>
-                          )}
-                        </span>
-                        <span className="font-medium tabular-nums">
-                          {w.remainingPercent === null
-                            ? '剩余额度未知'
-                            : `剩余 ${Math.round(w.remainingPercent * 10) / 10}%`}
-                        </span>
+                            {w.resetAt && <span className="ml-2">{date(w.resetAt)} 重置</span>}
+                          </span>
+                        </div>
+                        {w.remainingPercent !== null && (
+                          <Progress
+                            className="mt-1 h-1.5"
+                            aria-label={`${w.label}剩余额度`}
+                            value={w.remainingPercent}
+                            indicatorClassName={
+                              w.remainingPercent < 15 ? 'bg-destructive' : undefined
+                            }
+                          />
+                        )}
                       </div>
-                      {w.remainingPercent !== null && (
-                        <Progress
-                          aria-label={`${w.label}剩余额度`}
-                          value={w.remainingPercent}
-                          indicatorClassName={
-                            w.remainingPercent < 15
-                              ? 'bg-destructive'
-                              : undefined
-                          }
-                        />
-                      )}
-                      <p className="mt-1.5 text-xs text-muted-foreground">
-                        重置时间：{date(w.resetAt)}
-                      </p>
-                    </div>
-                  ))
+                    ))}
+                  </div>
                 )}
                 <p className="text-xs text-muted-foreground">
                   上次更新：{date(a.quota?.checkedAt ?? null)}
@@ -536,30 +532,24 @@ export default function SubscriptionsClient({
                     ? ' · 快照超过 5 分钟，建议刷新'
                     : ''}
                 </p>
-                <div className="rounded-md bg-muted p-3 text-xs leading-5">
-                  <div className="mb-1 flex items-center gap-1 font-medium">
-                    <Link2 className="size-3.5" />
-                    {a.providerSlug ? '已接入网关' : '未接入网关'}
+                <div className="rounded-md bg-muted px-3 py-2 text-xs leading-5">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                    <Link2 className="size-3.5 shrink-0" aria-hidden />
+                    {a.providerSlug ? (
+                      <code className="break-all" title="网关调用：服务商 slug/模型 ID">
+                        {a.providerSlug}
+                      </code>
+                    ) : (
+                      <span>未接入网关</span>
+                    )}
+                    <span className="text-muted-foreground">
+                      {a.modelsSyncedAt
+                        ? `模型：${a.modelCount ?? 0} 个 · ${date(a.modelsSyncedAt)} 同步`
+                        : a.providerSlug
+                          ? `模型：${a.modelCount ?? 0} 个`
+                          : '模型：尚未同步'}
+                    </span>
                   </div>
-                  {a.providerSlug && (
-                    <>
-                      <code className="break-all">{a.providerSlug}/模型ID</code>
-                      <p className="mt-1 text-muted-foreground">
-                        使用现有网关令牌调用，可在
-                        <Link href="/aliases" className="underline">
-                          别名
-                        </Link>
-                        中配置路由。
-                      </p>
-                    </>
-                  )}
-                  <p className="mt-1 text-muted-foreground">
-                    {a.modelsSyncedAt
-                      ? `模型：${a.modelCount ?? 0} 个 · 官方模型接口同步于 ${date(a.modelsSyncedAt)}`
-                      : a.providerSlug
-                        ? `模型：${a.modelCount ?? 0} 个 · 手动添加`
-                        : '模型：尚未同步'}
-                  </p>
                   {a.modelsError && (
                     <p className="mt-1 text-destructive" role="status">
                       {a.modelsError}
@@ -877,7 +867,7 @@ export default function SubscriptionsClient({
                 : '模型'}
             </SheetTitle>
             <SheetDescription>
-              停用的模型不再参与网关路由。删除的模型如果官方仍在列出，下次同步会重新加入，想长期屏蔽请停用。思考强度用请求参数控制（reasoning_effort、reasoning.effort 或 thinking）。
+              同一模型的不同思考强度已合并，调用时用 reasoning_effort、reasoning.effort 或 thinking 选择；停用的模型不参与路由。
             </SheetDescription>
           </SheetHeader>
           <SheetBody className="space-y-3">
@@ -908,89 +898,63 @@ export default function SubscriptionsClient({
             ) : (
               <ul className="divide-y rounded-md border">
                 {sheetModels.map((m) => {
-                  const draft = aliasDrafts[m.id] ?? m.alias ?? '';
                   const summary = reasoningSummary(m.reasoning);
+                  const editing = aliasDrafts[m.id] !== undefined;
+                  const meta = [
+                    summary && !summary.levels.length && summary.budget ? '思考预算可调' : null,
+                    m.alias ? `别名 ${m.alias}` : null,
+                    m.synced ? null : '手动添加',
+                  ].filter((item): item is string => !!item);
                   return (
-                    <li
-                      key={m.id}
-                      className={`space-y-2 p-3 ${m.enabled ? '' : 'opacity-60'}`}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <code className="break-all text-sm">{m.modelId}</code>
-                          {m.displayName && m.displayName !== m.modelId && (
-                            <p className="text-xs text-muted-foreground">
-                              {m.displayName}
-                            </p>
-                          )}
-                          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
-                            <Badge variant="outline">
-                              {m.synced ? '官方同步' : '手动添加'}
-                            </Badge>
-                            {summary && summary.levels.length > 0 && (
-                              <span>
-                                思考强度{' '}
-                                {summary.levels.map((level, index) => (
-                                  <span key={level}>
-                                    {index ? ' · ' : ''}
-                                    <span
-                                      className={
-                                        level === summary.defaultLevel
-                                          ? 'font-semibold text-foreground'
-                                          : undefined
-                                      }
-                                    >
-                                      {level}
-                                    </span>
-                                  </span>
-                                ))}
-                              </span>
-                            )}
-                            {summary &&
-                              !summary.levels.length &&
-                              summary.budget && <span>思考预算可调</span>}
-                          </div>
-                        </div>
+                    <li key={m.id} className={`px-3 py-2 ${m.enabled ? '' : 'opacity-60'}`}>
+                      <div className="flex items-center gap-3">
                         <Switch
                           aria-label={`启用 ${m.modelId}`}
                           checked={m.enabled}
                           disabled={!!busy}
-                          onCheckedChange={(enabled) =>
-                            void changeModel(m, 'PATCH', { enabled })
-                          }
+                          onCheckedChange={(enabled) => void changeModel(m, 'PATCH', { enabled })}
                         />
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Input
-                          aria-label={`${m.modelId} 的别名`}
-                          value={draft}
-                          onChange={(e) =>
-                            setAliasDrafts((drafts) => ({
-                              ...drafts,
-                              [m.id]: e.target.value,
-                            }))
-                          }
-                          placeholder="别名（可选）"
-                          className="h-8 w-40 text-xs"
-                        />
-                        {draft !== (m.alias ?? '') && (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={!!busy}
-                            onClick={() =>
-                              void changeModel(m, 'PATCH', {
-                                alias: draft.trim() || null,
-                              })
-                            }
-                          >
-                            保存别名
-                          </Button>
-                        )}
-                        <Button
-                          size="sm"
-                          variant="ghost"
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate font-mono text-[13px]" title={m.displayName ?? m.modelId}>
+                            {m.modelId}
+                          </div>
+                          {(summary?.levels.length || meta.length > 0) && (
+                            <div className="truncate text-[11px] text-muted-foreground">
+                              {summary?.levels.map((level, index) => (
+                                <span key={level}>
+                                  {index ? ' · ' : ''}
+                                  <span
+                                    className={
+                                      level === summary.defaultLevel ? 'font-semibold text-foreground' : undefined
+                                    }
+                                  >
+                                    {level}
+                                  </span>
+                                </span>
+                              ))}
+                              {meta.map((item, index) => (
+                                <span key={item}>
+                                  {index || summary?.levels.length ? ' · ' : ''}
+                                  <span>{item}</span>
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          aria-label={`编辑 ${m.modelId} 别名`}
                           disabled={!!busy}
+                          className="flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+                          onClick={() => setAliasDrafts((drafts) => ({ ...drafts, [m.id]: m.alias ?? '' }))}
+                        >
+                          <Pencil className="size-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`删除 ${m.modelId}`}
+                          disabled={!!busy}
+                          className="flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-destructive disabled:opacity-50"
                           onClick={async () => {
                             if (
                               await confirm({
@@ -1004,9 +968,39 @@ export default function SubscriptionsClient({
                               void changeModel(m, 'DELETE');
                           }}
                         >
-                          删除
-                        </Button>
+                          <Trash2 className="size-3.5" />
+                        </button>
                       </div>
+                      {editing && (
+                        <div className="mt-2 flex items-center gap-2 pl-12">
+                          <Input
+                            aria-label={`${m.modelId} 的别名`}
+                            autoFocus
+                            value={aliasDrafts[m.id]}
+                            onChange={(e) =>
+                              setAliasDrafts((drafts) => ({ ...drafts, [m.id]: e.target.value }))
+                            }
+                            placeholder="别名，留空清除"
+                            className="h-8 min-w-0 flex-1 text-xs"
+                          />
+                          <Button
+                            size="sm"
+                            disabled={!!busy}
+                            onClick={() =>
+                              void changeModel(m, 'PATCH', { alias: aliasDrafts[m.id].trim() || null })
+                            }
+                          >
+                            保存别名
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setAliasDrafts(({ [m.id]: _closed, ...rest }) => rest)}
+                          >
+                            取消
+                          </Button>
+                        </div>
+                      )}
                     </li>
                   );
                 })}

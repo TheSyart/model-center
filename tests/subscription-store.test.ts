@@ -687,3 +687,42 @@ test('subscription model management enforces ownership, field whitelist and alia
   assert.throws(() => store.deleteModel(a.id, other.id), /不存在/);
   db.close();
 });
+
+test('stored strength variants converge into base models when the schema migrates', () => {
+  const { store, db } = setup();
+  const a = store.saveAccount('antigravity', { ...credential, projectId: 'managed' });
+  store.connectGateway(a.id, ['placeholder']);
+  const providerId = store.get(a.id)!.providerId!;
+  const insert = db.prepare(
+    "INSERT INTO models(id,provider_id,model_id,display_name,alias,enabled,synced,pricing_source) VALUES(?,?,?,?,?,?,1,'subscription')"
+  );
+  insert.run('v1', providerId, 'gemini-3-pro-high', 'Gemini 3 Pro (High)', 'pro', 1);
+  insert.run('v2', providerId, 'gemini-3-pro-low', 'Gemini 3 Pro (Low)', null, 1);
+  insert.run('v3', providerId, 'gemini-2.5-flash', 'Gemini 2.5 Flash', null, 0);
+  insert.run('v4', providerId, 'gemini-2.5-flash-thinking', 'Gemini 2.5 Flash (Thinking)', null, 1);
+  const endpointId = (db.prepare('SELECT id FROM provider_endpoints WHERE provider_id=?').get(providerId) as { id: string }).id;
+  db.prepare("INSERT INTO provider_endpoint_models VALUES(?,?,'sync',1)").run(endpointId, 'gemini-3-pro-low');
+  migrateSubscriptionSchema(db);
+  migrateSubscriptionSchema(db);
+  const views = store.listModels(a.id);
+  assert.deepEqual(
+    views.map((m) => [m.modelId, m.alias, m.enabled, m.synced]),
+    [
+      ['gemini-2.5-flash', null, false, true],
+      ['gemini-3-pro', 'pro', true, true],
+      ['placeholder', null, true, false],
+    ]
+  );
+  assert.deepEqual(views[1].reasoning, {
+    control: 'level',
+    upstreamDefault: 'gemini-3-pro-high',
+    legacyIds: ['gemini-3-pro-high', 'gemini-3-pro-low'],
+    variants: { high: 'gemini-3-pro-high', low: 'gemini-3-pro-low' },
+  });
+  assert.equal(views[0].reasoning?.thinkingVariant, 'gemini-2.5-flash-thinking');
+  assert.deepEqual(db.prepare('SELECT model_id FROM provider_endpoint_models ORDER BY model_id').all(), [
+    { model_id: 'gemini-3-pro' },
+    { model_id: 'gemini-3-pro-low' },
+  ]);
+  db.close();
+});

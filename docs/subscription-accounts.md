@@ -60,8 +60,10 @@ Copilot 服务商同时建立 Chat（默认）与 Responses 两个协议端点�
   - 目录用不同 ID 表示强度，例如 `gemini-3.1-pro-low`、`gemini-pro-agent`、`*-flash-high`、`claude-opus-4-6-thinking`、`gpt-oss-120b-medium`。同步时把它们合并成基础模型：`gemini-3.1-pro`、`gemini-3.6-flash`、`claude-opus-4-6`、`gpt-oss-120b`。
   - 请求带强度时，选对应档位的 ID；没有完全匹配的档位，就取最近的 ID 并附加 `thinkingLevel`。未带强度时用厂商默认档，Gemini 为 high。
   - 旧 ID 通过 `slug/旧ID`、裸模型名或别名仍可调用，自动换算成基础模型加对应强度，但不再出现在模型列表和 `/v1/models` 中。
-  - 已部署实例需要点击一次 **同步模型** 才会完成合并，旧行上的别名会迁移到基础模型。
-- **Claude Code：** 目录没有强度字段，按上表的模型族规则转换。
+  - 除了按 ID 后缀识别，显示名去掉 "(High)"、"(Low)"、"(Thinking)" 等强度标注后相同的条目也会合并，所以不规则 ID 同样能归到一起。
+  - 已入库的旧变体行在服务启动迁移时自动合并，不需要手动同步；旧行上的别名和端点目录会迁移到基础模型。
+- **Codex、Copilot、Claude Code：** 使用更保守的同一套规则。只合并 `-minimal/-low/-medium/-high` 与 `-thinking`/`-thought` 后缀，并且必须同时列出了同系列的另一个模型；自带档位元数据的模型、以及 `-max` 这类通常表示独立产品的后缀不合并。
+- **Claude Code：** 目录没有强度字段，强度参数按上表的模型族规则转换。
 
 ## 额度、账号与故障
 
@@ -80,7 +82,7 @@ Copilot 服务商同时建立 Chat（默认）与 Responses 两个协议端点�
 
 - `lib/subscriptions/oauth.ts`：Claude/Codex PKCE、GitHub Copilot 设备码与会话令牌交换、所有客户端的 state、代码交换、刷新、Google 项目初始化和控制面目标白名单。
 - `lib/gateway/reasoning.ts`：思考强度的规范化、档位与预算互换、钳制，以及按目录选择上游 ID（`planReasoning`）。`lib/protocols/reasoning-emit.ts`：写入各协议的强度字段，含 Claude 模型族规则表。
-- `models.ts`：四家账号级模型列表的请求、过滤与端点映射，以及 Antigravity 变体合并（`foldAntigravityVariants`）。`store.ts` 的 `syncGatewayModels` 负责只增不删的合并，以及 Copilot 双端点目录。
+- `models.ts`：四家账号级模型列表的请求、过滤与端点映射。`variants.ts`：强度变体合并规则（`foldModelVariants`，按 ID 后缀与显示名分组），拉取模型和启动迁移（`store.ts` 的 `convergeStoredModelVariants`）共用。`store.ts` 的 `syncGatewayModels` 负责只增不删的合并，以及 Copilot 双端点目录。
 - `quota.ts`：现有四家及旧 Gemini 额度解析；`store.ts` / `lifecycle.ts`：加密、会话、版本、刷新和快照。
 - `gateway.ts`：固定官方 URL、OAuth 请求头、Codex SSE 收集、Antigravity 包装、Copilot 按所选端点协议发往 `/chat/completions` 或 `/responses`，以及 Gemini 兼容。
 - `app/api/admin/subscriptions/[[...path]]/route.ts`：管理 API；`app/(admin)/subscriptions/`：交互界面。
@@ -100,6 +102,15 @@ Copilot 服务商同时建立 Chat（默认）与 Responses 两个协议端点�
 - CLIProxyAPI Gemini 删除前版本 **MIT**，SHA [`dd49a5200381f1849e489ed37f201c3741709634`](https://github.com/router-for-me/CLIProxyAPI/tree/dd49a5200381f1849e489ed37f201c3741709634)：历史 Gemini CLI 协议。当前 CLIProxyAPI 已删除 Gemini CLI OAuth，不能仅靠最新版本宣称支持。
 - 管理界面 **MIT**，SHA [`c98751140127a39985df565b827eec0c20d131d3`](https://github.com/router-for-me/Cli-Proxy-API-Management-Center/tree/c98751140127a39985df565b827eec0c20d131d3)：Claude/Codex 额度字段及 Antigravity CLI 分组额度协议。
 - Google Gemini CLI **Apache-2.0**，SHA [`9c1b0a610534d6f8120964cf2672c07807d8fc90`](https://github.com/google-gemini/gemini-cli/tree/9c1b0a610534d6f8120964cf2672c07807d8fc90)：旧 Gemini 兼容实现的授权码粘贴、项目发现、额度接口。完整证据见 `superpowers/specs/2026-09-14-subscription-accounts-design.md`。
+
+### 验证记录（2026-09-15，强度变体收敛与紧凑展示）
+
+上游 HTTP 全部为模拟响应，**未使用真实账号**。
+
+- **`npm run test:core`**：363 项通过。新增：显示名分组、通用厂商的保守合并规则（不合并 `-max`、自带档位和缺少同系列模型的条目）、半角/全角强度标注清理（`subscription-variants.test.ts`）；启动迁移自动合并已入库的变体行，并迁移别名与端点目录（`subscription-store.test.ts`）。
+- **`npx vitest run`**：11 个文件 82 项通过。两项依赖真实计时的用例（Copilot 设备码轮询、raw-data 卸载中止）在与构建、e2e 并行运行时超时，单独运行和在干净目录串行运行时通过。
+- **`npm run typecheck`、`npm run build`**：通过。
+- **`npx playwright test tests/e2e/subscriptions.spec.ts`**（注入 Antigravity 测试 client）：三种视口共 9 项通过。
 
 ### 验证记录（2026-09-15，思考强度参数化与订阅模型管理）
 

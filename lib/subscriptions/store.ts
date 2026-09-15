@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { replaceEndpointModelCatalogInTransaction } from '../services/provider-endpoint.ts';
 import { parseModelReasoning } from '../gateway/reasoning.ts';
+import { foldModelVariants, vendorFoldOptions } from './variants.ts';
 import type {
   AccountView,
   Authorization,
@@ -97,6 +98,107 @@ export function migrateSubscriptionSchema(db: Database.Database) {
   ] as const)
     if (!accountColumns.has(column))
       db.exec(`ALTER TABLE subscription_accounts ADD COLUMN ${column} ${ddl}`);
+  convergeStoredModelVariants(db);
+}
+
+/**
+ * Folds stored strength variants of subscription models into their base model without a
+ * network sync, so existing rows converge on the next start. Only synced rows are touched.
+ * Each fold keeps the variant callable through legacyIds, moves its alias to the base and
+ * copies its endpoint catalog entries. Idempotent: folded rows no longer match.
+ */
+export function convergeStoredModelVariants(
+  db: Database.Database,
+  now = Date.now()
+): number {
+  const table = (name: string) =>
+    !!db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?")
+      .get(name);
+  if (
+    !['models', 'providers', 'subscription_accounts', 'subscription_provider_links'].every(
+      table
+    )
+  )
+    return 0;
+  const columns = new Set(
+    (db.pragma('table_info(models)') as { name: string }[]).map((c) => c.name)
+  );
+  if (
+    !['alias', 'display_name', 'enabled', 'synced', 'reasoning_json', 'pricing_source'].every(
+      (column) => columns.has(column)
+    )
+  )
+    return 0;
+  const catalogs = table('provider_endpoint_models') && table('provider_endpoints');
+  const links = db
+    .prepare(
+      'SELECT l.provider_id,a.vendor FROM subscription_provider_links l JOIN subscription_accounts a ON a.id=l.account_id'
+    )
+    .all() as { provider_id: string; vendor: SubscriptionVendor }[];
+  let folded = 0;
+  for (const { provider_id: providerId, vendor } of links) {
+    const rows = db
+      .prepare(
+        'SELECT model_id,display_name,alias,enabled,reasoning_json FROM models WHERE provider_id=? AND synced=1 ORDER BY model_id'
+      )
+      .all(providerId) as {
+      model_id: string;
+      display_name: string | null;
+      alias: string | null;
+      enabled: number;
+      reasoning_json: string | null;
+    }[];
+    const byId = new Map(rows.map((row) => [row.model_id, row]));
+    const merges = foldModelVariants(
+      rows.map((row) => ({
+        id: row.model_id,
+        displayName: row.display_name,
+        reasoning: parseModelReasoning(row.reasoning_json) ?? undefined,
+      })),
+      vendorFoldOptions(vendor)
+    ).filter((model) => model.reasoning?.legacyIds?.some((id) => byId.has(id)));
+    if (!merges.length) continue;
+    db.transaction(() => {
+      for (const model of merges) {
+        const legacy = model
+          .reasoning!.legacyIds!.map((id) => byId.get(id))
+          .filter((row): row is NonNullable<typeof row> => !!row);
+        const reasoningJson = JSON.stringify(model.reasoning);
+        if (byId.has(model.id))
+          db.prepare(
+            'UPDATE models SET reasoning_json=? WHERE provider_id=? AND model_id=?'
+          ).run(reasoningJson, providerId, model.id);
+        else
+          db.prepare(
+            "INSERT INTO models(id,provider_id,model_id,display_name,enabled,synced,pricing_source,reasoning_json) VALUES(?,?,?,?,?,1,'subscription',?)"
+          ).run(
+            crypto.randomUUID(),
+            providerId,
+            model.id,
+            model.displayName,
+            legacy.every((row) => row.enabled !== 1) ? 0 : 1,
+            reasoningJson
+          );
+        for (const row of legacy) {
+          if (catalogs)
+            db.prepare(
+              'INSERT INTO provider_endpoint_models(endpoint_id,model_id,source,observed_at) SELECT endpoint_id,?,source,? FROM provider_endpoint_models WHERE model_id=? AND endpoint_id IN (SELECT id FROM provider_endpoints WHERE provider_id=?) ON CONFLICT(endpoint_id,model_id) DO NOTHING'
+            ).run(model.id, now, row.model_id, providerId);
+          db.prepare('DELETE FROM models WHERE provider_id=? AND model_id=?').run(
+            providerId,
+            row.model_id
+          );
+          if (row.alias)
+            db.prepare(
+              'UPDATE models SET alias=? WHERE provider_id=? AND model_id=? AND alias IS NULL'
+            ).run(row.alias, providerId, model.id);
+          folded++;
+        }
+      }
+    })();
+  }
+  return folded;
 }
 
 export const isValidModelId = (id: unknown): id is string =>
