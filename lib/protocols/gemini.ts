@@ -31,6 +31,50 @@ function parseJsonSafe(text: string): Json {
   }
 }
 
+function thoughtSignature(value: unknown): string | null {
+  if (typeof value !== 'string' || !value || value.length > 1024 * 1024) return null;
+  return value;
+}
+
+function toolCallThoughtSignature(message: Json, toolCall: Json): string | null {
+  const direct =
+    thoughtSignature(toolCall.extra_content?.google?.thought_signature) ??
+    thoughtSignature(toolCall.function?.extra_content?.google?.thought_signature) ??
+    thoughtSignature(toolCall.thoughtSignature) ??
+    thoughtSignature(toolCall.thought_signature);
+  if (direct) return direct;
+  const detail = Array.isArray(message.reasoning_details)
+    ? message.reasoning_details.find(
+        (item: Json) => item?.type === 'reasoning.encrypted' && item.id === toolCall.id && thoughtSignature(item.data)
+      )
+    : undefined;
+  return thoughtSignature(detail?.data);
+}
+
+function openAIToolCall(part: Json, index: number): Json {
+  const upstreamId = part.functionCall?.id;
+  const id =
+    typeof upstreamId === 'string' && upstreamId && upstreamId.length <= 1024
+      ? upstreamId
+      : `call_${Math.random().toString(36).slice(2, 10)}_${index}`;
+  const signature = thoughtSignature(part.thoughtSignature ?? part.thought_signature);
+  return {
+    id,
+    type: 'function',
+    index,
+    function: {
+      name: part.functionCall.name,
+      arguments: JSON.stringify(part.functionCall.args ?? {}),
+    },
+    ...(signature ? { extra_content: { google: { thought_signature: signature } } } : {}),
+  };
+}
+
+function encryptedReasoningDetail(toolCall: Json): Json | null {
+  const signature = thoughtSignature(toolCall.extra_content?.google?.thought_signature);
+  return signature ? { type: 'reasoning.encrypted', id: toolCall.id, data: signature } : null;
+}
+
 /** 从 URL 路径猜测图片 MIME（Gemini fileData 必填）。 */
 function guessMime(url: string): string {
   const m = /\.(png|jpe?g|gif|webp|heic|bmp)(?:[?#]|$)/i.exec(url);
@@ -84,7 +128,11 @@ export function irRequestToGemini(
       for (const tc of (m.tool_calls as Json[]) ?? []) {
         const name = tc.function?.name ?? '';
         if (tc.id && name) toolNameByCallId.set(tc.id, name);
-        parts.push({ functionCall: { name, args: parseJsonSafe(tc.function?.arguments ?? '{}') } });
+        const signature = toolCallThoughtSignature(m, tc);
+        parts.push({
+          ...(signature ? { thoughtSignature: signature } : {}),
+          functionCall: { name, args: parseJsonSafe(tc.function?.arguments ?? '{}') },
+        });
       }
       contents.push({ role: 'model', parts: parts.length ? parts : [{ text: '' }] });
     } else if (m.role === 'tool') {
@@ -156,14 +204,13 @@ export function geminiResponseToIR(json: Json, model: string): Json {
   // thought 片段是思考摘要，不属于正文
   const text = parts.filter((p) => typeof p.text === 'string' && p.thought !== true).map((p) => p.text).join('');
   const fnParts = parts.filter((p) => p.functionCall);
-  const toolCalls = fnParts.map((p, i) => ({
-    id: `call_${Math.random().toString(36).slice(2, 10)}_${i}`, // Gemini 无 call id，生成占位
-    type: 'function',
-    index: i,
-    function: { name: p.functionCall.name, arguments: JSON.stringify(p.functionCall.args ?? {}) },
-  }));
+  const toolCalls = fnParts.map(openAIToolCall);
   const message: Json = { role: 'assistant', content: text || null };
-  if (toolCalls.length) message.tool_calls = toolCalls;
+  if (toolCalls.length) {
+    message.tool_calls = toolCalls;
+    const details = toolCalls.map(encryptedReasoningDetail).filter(Boolean);
+    if (details.length) message.reasoning_details = details;
+  }
   return {
     id: `chatcmpl-gemini-${Math.random().toString(36).slice(2, 10)}`,
     object: 'chat.completion',
@@ -223,15 +270,11 @@ export function geminiStreamToIR(
         if (typeof p.text === 'string' && p.text && p.thought !== true) {
           yield chunk({ content: p.text });
         } else if (p.functionCall) {
+          const toolCall = openAIToolCall(p, toolCount++);
+          const detail = encryptedReasoningDetail(toolCall);
           yield chunk({
-            tool_calls: [
-              {
-                index: toolCount++,
-                id: `call_${Math.random().toString(36).slice(2, 10)}`,
-                type: 'function',
-                function: { name: p.functionCall.name ?? '', arguments: JSON.stringify(p.functionCall.args ?? {}) },
-              },
-            ],
+            tool_calls: [toolCall],
+            ...(detail ? { reasoning_details: [detail] } : {}),
           });
         }
       }

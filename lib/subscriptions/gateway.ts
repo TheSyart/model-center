@@ -11,6 +11,7 @@ import {
 import type { Credential, SubscriptionVendor } from './types.ts';
 
 type Json = Record<string, any>;
+const GEMINI_FUNCTION_SIGNATURE_BYPASS = 'skip_thought_signature_validator';
 interface WireRequest {
   url: string;
   headers: Record<string, string>;
@@ -192,6 +193,19 @@ export function subscriptionWireRequest(
         0x7fffffffffffffffn
       ).toString();
     delete body.safetySettings;
+    const contents = Array.isArray(body.contents)
+      ? body.contents.map((content: Json) => ({
+          ...content,
+          parts: Array.isArray(content.parts)
+            ? content.parts.map((part: Json) => {
+                const signature = part?.thoughtSignature ?? part?.thought_signature;
+                return part?.functionCall && (typeof signature !== 'string' || !signature)
+                  ? { ...part, thoughtSignature: GEMINI_FUNCTION_SIGNATURE_BYPASS }
+                  : part;
+              })
+            : content.parts,
+        }))
+      : body.contents;
     return {
       url: `https://daily-cloudcode-pa.googleapis.com/v1internal:${stream ? 'streamGenerateContent?alt=sse' : 'generateContent'}`,
       headers: { ...headers, 'User-Agent': ANTIGRAVITY_USER_AGENT },
@@ -201,7 +215,7 @@ export function subscriptionWireRequest(
         userAgent: 'antigravity',
         requestType: 'agent',
         requestId: `agent-${randomUUID()}`,
-        request: { ...body, sessionId },
+        request: { ...body, contents, sessionId },
       },
     };
   }

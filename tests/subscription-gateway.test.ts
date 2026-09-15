@@ -100,6 +100,36 @@ test('Gemini wraps the request with account project and model', () => {
     /项目/
   );
 });
+test('Antigravity supplies the validated bypass for tool history without replay metadata', () => {
+  const body = {
+    contents: [
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'echo', args: { text: 'hello' } } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: { name: 'echo', response: { result: 'hello' } },
+          },
+        ],
+      },
+    ],
+  };
+  const result = subscriptionWireRequest(
+    'antigravity',
+    credential,
+    { ...request, body },
+    'gemini-3.8-flash-tiered',
+    true
+  );
+  assert.equal(
+    (result.body as any).request.contents[0].parts[0].thoughtSignature,
+    'skip_thought_signature_validator'
+  );
+  assert.equal((body.contents[0].parts[0] as any).thoughtSignature, undefined, 'the caller request remains unchanged');
+});
 test('Codex non-stream clients receive terminal response including tool outputs and usage', async () => {
   const item = {
     type: 'function_call',
