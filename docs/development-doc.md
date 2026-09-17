@@ -88,7 +88,7 @@
 | DeepSeek | OpenAI 兼容 | `https://api.deepseek.com/v1` | `GET /models` | `GET /user/balance` | 余额返回 CNY/USD 双币种 |
 | Moonshot Kimi | OpenAI 兼容 | `https://api.moonshot.cn/v1` | `GET /models` | `GET /users/me/balance` | |
 | 智谱 GLM | OpenAI 兼容 | `https://open.bigmodel.cn/api/paas/v4` | `GET /models` | 无简易接口（需确认） | |
-| 阿里百炼（通义 Qwen） | OpenAI 兼容 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `GET /models` | 控制台查看 | |
+| 阿里百炼（通义 Qwen） | OpenAI 兼容 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `GET https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1/models`（独立目录地址，分页） | 控制台查看 | 普通百炼模型同步使用官方 Workspace 目录；推理 Base URL 不变 |
 | 火山方舟（豆包） | OpenAI 兼容 | `https://ark.cn-beijing.volces.com/api/v3` | `GET /models` | 控制台查看 | |
 | xAI Grok | OpenAI 兼容 | `https://api.x.ai/v1` | `GET /models` | 需确认 | |
 | Mistral | OpenAI 兼容 | `https://api.mistral.ai/v1` | `GET /models` | 控制台查看 | |

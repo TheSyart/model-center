@@ -3,7 +3,7 @@ import test from 'node:test';
 import Database from 'better-sqlite3';
 
 import { migrateProviderEndpointSchema } from '../lib/db/provider-endpoint-migration.ts';
-import { fetchAllUpstreamModels, syncProviderModels } from '../lib/services/model-sync.ts';
+import { fetchAllUpstreamModels, syncProviderModels, type SyncModelsDependencies } from '../lib/services/model-sync.ts';
 
 function database() {
   const sqlite = new Database(':memory:');
@@ -42,11 +42,18 @@ function database() {
 
 const provider = {
   id: 'provider-1', slug: 'example', name: 'Example', protocol: 'openai', baseUrl: 'https://legacy.example/v1',
-  presetKey: null, apiKeyEnc: 'cipher', enabled: 1, priority: 0, balanceConfig: null, remark: null,
+  presetKey: null, workspaceId: null, apiKeyEnc: 'cipher', enabled: 1, priority: 0, balanceConfig: null, remark: null,
   createdAt: null, updatedAt: null,
 };
 
-function dependencies(sqlite: Database.Database, fetchImpl: typeof fetch) {
+const bailianProvider = {
+  ...provider,
+  slug: 'bailian',
+  presetKey: 'bailian',
+  workspaceId: 'llm-a5kyboh5x4q9inqe',
+};
+
+function dependencies(sqlite: Database.Database, fetchImpl: typeof fetch): SyncModelsDependencies {
   let id = 0;
   return {
     sqlite,
@@ -103,6 +110,106 @@ test('Gemini synchronization follows nextPageToken using pageToken', async () =>
     'https://gemini.example/v1beta/models',
     'https://gemini.example/v1beta/models?pageToken=next+token',
   ]);
+});
+
+test('Bailian synchronization uses the official workspace catalog and follows output.total pages', async () => {
+  const urls: string[] = [];
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    urls.push(String(input));
+    assert.deepEqual(init?.headers, {
+      Authorization: 'Bearer upstream-key',
+      'Content-Type': 'application/json',
+    });
+    return urls.length === 1
+      ? Response.json({
+          success: true,
+          output: { total: 2, page_no: 1, page_size: 20, models: [{ model: 'qwen3-max' }] },
+          request_id: 'request-page-1',
+        })
+      : Response.json({
+          success: true,
+          output: { total: 2, page_no: 2, page_size: 20, models: [{ model: 'qwen-image-max' }] },
+          request_id: 'request-page-2',
+        });
+  }) as typeof fetch;
+
+  const ids = await fetchAllUpstreamModels(bailianProvider as any, 'upstream-key', fetchImpl);
+
+  assert.deepEqual(ids, ['qwen3-max', 'qwen-image-max']);
+  assert.deepEqual(urls, [
+    'https://llm-a5kyboh5x4q9inqe.cn-beijing.maas.aliyuncs.com/api/v1/models?page_no=1&page_size=20',
+    'https://llm-a5kyboh5x4q9inqe.cn-beijing.maas.aliyuncs.com/api/v1/models?page_no=2&page_size=20',
+  ]);
+});
+
+test('Bailian synchronization rejects missing or unsafe workspace IDs before the request', async () => {
+  let calls = 0;
+  const fetchImpl = (async () => {
+    calls++;
+    return Response.json({});
+  }) as typeof fetch;
+
+  await assert.rejects(
+    fetchAllUpstreamModels({ ...bailianProvider, workspaceId: null } as any, 'key', fetchImpl),
+    /Workspace ID/,
+  );
+  await assert.rejects(
+    fetchAllUpstreamModels({ ...bailianProvider, workspaceId: 'unsafe.example.com' } as any, 'key', fetchImpl),
+    /Workspace ID/,
+  );
+  assert.equal(calls, 0);
+});
+
+test('Bailian HTTP 200 business failures include the upstream code and request ID', async () => {
+  await assert.rejects(
+    fetchAllUpstreamModels(
+      bailianProvider as any,
+      'key',
+      (async () => Response.json({
+        success: false,
+        code: 'InvalidParameter',
+        message: 'workspace unavailable',
+        request_id: 'request-failed',
+      })) as typeof fetch,
+    ),
+    /InvalidParameter.*workspace unavailable.*request-failed/,
+  );
+});
+
+test('Bailian models do not inherit bundled prices and do not mark the OpenAI endpoint catalog complete', async () => {
+  const { sqlite, legacyId } = database();
+  sqlite.prepare("UPDATE providers SET slug = 'bailian' WHERE id = 'provider-1'").run();
+  let pricingLookups = 0;
+  const deps = dependencies(sqlite, (async () => Response.json({
+    success: true,
+    output: {
+      total: 1,
+      page_no: 1,
+      page_size: 20,
+      models: [{ model: 'qwen3-max', name: '通义千问3-Max', model_info: { context_window: 131072 } }],
+    },
+    request_id: 'request-ok',
+  })) as typeof fetch);
+  deps.lookupPricing = () => {
+    pricingLookups++;
+    return { input: 99, output: 99, cacheRead: null, cacheWrite: null, source: 'forbidden-fallback' };
+  };
+
+  await syncProviderModels(bailianProvider as any, 'key', deps);
+
+  assert.equal(pricingLookups, 0);
+  assert.deepEqual(
+    sqlite.prepare('SELECT model_id, display_name, context_window, input_price, output_price, pricing_source FROM models').all(),
+    [{
+      model_id: 'qwen3-max', display_name: '通义千问3-Max', context_window: 131072,
+      input_price: null, output_price: null, pricing_source: null,
+    }],
+  );
+  assert.deepEqual(
+    sqlite.prepare('SELECT model_catalog_complete, models_observed_at FROM provider_endpoints WHERE id = ?').get(legacyId),
+    { model_catalog_complete: 0, models_observed_at: 500 },
+  );
+  sqlite.close();
 });
 
 for (const invalidName of ['models/', '  models/   ']) {

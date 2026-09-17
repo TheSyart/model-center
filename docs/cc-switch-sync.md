@@ -9,7 +9,7 @@
 - 身份范围：当前逻辑供应商 `bailian`（Bailian，包含历史 Qwen Coder 别名）及 `bailian-for-coding`（Bailian For Coding）。两者分别维护，不合并普通按量服务与 Coding Plan，不跨地域或凭据共享配置。未来新增百炼身份必须显式加入映射。
 - `GET /api/v1/models` 用于常规模型目录、能力、上下文与价格元数据；`GET /modelstudio/billing/overview` 用于月度官方账单概览。模型名称含 `qwen` 不代表供应商是百炼；第三方平台销售 Qwen 模型的配置与定价不在此例外内。
 - 模型调用 Base URL、Logo、鉴权提示、Coding Plan 等这两个接口未提供的信息，改从对应百炼官方文档或官方资源维护，不能声称已由这两个接口覆盖。普通模型目录不能代替 Coding Plan 专属目录或套餐额度。
-- **落地状态：本次仅更新维护规则与接口契约，未实现官方适配器、运行时数据源切换或真实凭据联调。** 当前生成快照和代码仍可能读取 CC Switch 的百炼数据；下面的官方来源优先级是下一次实现必须落实的目标，不是当前功能已上线的声明。
+- **落地状态（2026-09-17）：普通 `bailian` 的模型同步已切换到北京地域官方 Workspace 模型目录。** 服务商需配置 `workspace_id`；运行时逐页读取 `output.total/page_no/page_size/models`，所有页面校验成功后才事务入库，并保存新模型的官方名称和上下文长度。同步失败保留上次成功数据，不回退到 CC Switch 价格。`bailian-for-coding`、官方价格、账单概览和生成预设仍未切换，继续按本节边界单独实现。
 - 保留当前 CC Switch 历史快照、用户手动配置和手动价格。后续实现来源切换时，不再用新的 CC Switch 百炼记录覆盖它们；不要为了这次文档更新手改生成文件、删除服务商或改动基线数量。
 
 完整接口契约、价格边界与下一次接入步骤见下方“阿里云百炼官方接口维护契约”。
@@ -155,7 +155,7 @@ Coding Plan 清单为 Kimi、智谱个人版、智谱团队版、MiniMax、ZenMu
 | `providers[]` | 模型作者；不能为“同步百炼”固定填 `qwen`，否则会漏掉百炼托管的其他作者模型 |
 | `inference_providers[]` | 实际推理服务商；根据目标配置选择，不把返回的第三方渠道价格混入百炼直连价格 |
 | `capabilities[]` / `features[]` | 模态类型与能力过滤；全量目录同步不要只取具备特定能力的子集 |
-| `context_window` | 返回上下文长度不小于该值的模型；全量同步时省略 |
+| `context_window` | 返回上下文长度严格小于该值的模型；全量同步时省略 |
 | `service_site` | 部署模式；不传会返回所有模式，同一模型跨站点价格不能混用 |
 | `supports[]` | 默认 `inference`；另支持 `deploy`，部署可用不等于网关推理可用 |
 | `deployment_methods[]` | 文档给出 `ptu`（预置吞吐量） |
@@ -195,7 +195,7 @@ curl --fail-with-body --get \
 | `published_time/equivalent_snapshot` | 保留可选的发布时间与快照关系；不擅自补时区、伪造发布时间或改写调用 ID |
 | `prices[].range_name/prices[]` | 原样保留全部阶梯及计费项，按下一节规则转为可用定价 |
 
-当前 `lib/services/model-sync.ts` 解析的是 `data[].id` 或 Gemini `models[].name`，不能直接解析此处的 `output.models[].model`，分页也不是现有 `has_more/last_id` 模式。接入需增加供应商专属适配器，不能只换 URL。全量模型目录不等于协议级支持清单，尤其经过模态/部署筛选的结果不得直接把所有 `provider_endpoints.model_catalog_complete` 标记为完整。
+`lib/services/model-sync.ts` 已为普通 `bailian` 增加专属适配器，独立于推理 Base URL 组装 Workspace 模型目录地址，并按 `output.total` 完成分页。全量模型目录不等于协议级支持清单，因此同步结果不会把 OpenAI 兼容端点的 `provider_endpoints.model_catalog_complete` 标记为完整。
 
 ### 官方价格与四档价格的映射
 

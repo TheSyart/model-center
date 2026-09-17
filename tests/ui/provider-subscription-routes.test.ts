@@ -6,7 +6,7 @@ vi.mock('@/lib/db', async () => {
   const { drizzle } = await import('drizzle-orm/better-sqlite3');
   const schema = await import('@/lib/db/schema');
   const sqlite = new Database(':memory:');
-  sqlite.exec(`CREATE TABLE providers(id TEXT PRIMARY KEY,slug TEXT UNIQUE,name TEXT,protocol TEXT,base_url TEXT,preset_key TEXT,api_key_enc TEXT,enabled INTEGER,priority INTEGER,balance_config TEXT,remark TEXT,created_at INTEGER,updated_at INTEGER);
+  sqlite.exec(`CREATE TABLE providers(id TEXT PRIMARY KEY,slug TEXT UNIQUE,name TEXT,protocol TEXT,base_url TEXT,preset_key TEXT,api_key_enc TEXT,enabled INTEGER,priority INTEGER,workspace_id TEXT,balance_config TEXT,remark TEXT,created_at INTEGER,updated_at INTEGER);
     CREATE TABLE provider_endpoints(id TEXT PRIMARY KEY,provider_id TEXT,protocol TEXT,base_url TEXT,enabled INTEGER,is_default INTEGER,preset_variant_slug TEXT,source_ref TEXT,model_catalog_complete INTEGER,models_observed_at INTEGER,created_at INTEGER,updated_at INTEGER);
     CREATE TABLE subscription_accounts(id TEXT PRIMARY KEY,enabled INTEGER,updated_at INTEGER);
     CREATE TABLE subscription_provider_links(provider_id TEXT PRIMARY KEY,account_id TEXT);
@@ -44,7 +44,9 @@ beforeEach(() => {
     'DELETE FROM providers;DELETE FROM subscription_accounts;DELETE FROM subscription_provider_links;'
   );
   const add = sqlite.prepare(
-    'INSERT INTO providers VALUES(?,?,?,?,?,NULL,?,1,0,NULL,NULL,1,1)'
+    `INSERT INTO providers
+      (id, slug, name, protocol, base_url, preset_key, api_key_enc, enabled, priority, balance_config, remark, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, NULL, ?, 1, 0, NULL, NULL, 1, 1)`
   );
   add.run(
     'oauth',

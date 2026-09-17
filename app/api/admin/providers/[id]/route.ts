@@ -6,6 +6,7 @@ import { getPreset } from '@/lib/presets';
 import { EndpointValidationError, listProviderEndpoints, replaceProviderEndpoints } from '@/lib/services/provider-endpoint';
 import { resolveEndpointSetForPatch } from '@/lib/services/provider-endpoint-request';
 import { getProvider, serializeProvider, validateBaseUrl, providerAuthPolicy, ProviderAuthError, rejectSubscriptionProviderAction } from '@/lib/services/provider';
+import { isOfficialBailianCatalogProvider, normalizeBailianWorkspaceId } from '@/lib/services/bailian-catalog';
 
 interface PatchBody {
   name?: string;
@@ -19,6 +20,7 @@ interface PatchBody {
   priority?: number;
   remark?: string;
   balance_config?: string | null;
+  workspace_id?: unknown;
 }
 
 // PATCH /api/admin/providers/:id：修改（含启用/禁用）；api_key 非空时才更新
@@ -70,6 +72,27 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   }
   if (body.balance_config !== undefined) {
     updates.balanceConfig = body.balance_config;
+  }
+  const nextPresetKey = body.preset_key === undefined
+    ? existing.presetKey
+    : typeof body.preset_key === 'string' ? body.preset_key.trim() : null;
+  const officialBailian = isOfficialBailianCatalogProvider({ slug: existing.slug, presetKey: nextPresetKey });
+  if (body.workspace_id !== undefined) {
+    let workspaceId: string | null;
+    try {
+      workspaceId = normalizeBailianWorkspaceId(body.workspace_id);
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : '百炼 Workspace ID 无效' }, { status: 400 });
+    }
+    if (officialBailian && !workspaceId) {
+      return NextResponse.json({ error: '百炼服务商必须配置 Workspace ID' }, { status: 400 });
+    }
+    if (!officialBailian && workspaceId) {
+      return NextResponse.json({ error: 'Workspace ID 仅用于普通百炼服务商' }, { status: 400 });
+    }
+    updates.workspaceId = workspaceId;
+  } else if (body.preset_key !== undefined && !officialBailian) {
+    updates.workspaceId = null;
   }
 
   sqlite.transaction(() => {

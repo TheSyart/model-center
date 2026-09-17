@@ -142,8 +142,9 @@ export function replaceEndpointModelCatalog(
   endpointId: string,
   modelIds: readonly string[],
   observedAt = Date.now(),
+  complete = true,
 ): void {
-  sqlite.transaction(() => replaceEndpointModelCatalogInTransaction(sqlite, endpointId, modelIds, observedAt))();
+  sqlite.transaction(() => replaceEndpointModelCatalogInTransaction(sqlite, endpointId, modelIds, observedAt, complete))();
 }
 
 /** Caller owns the SQLite transaction, allowing model rows and catalog state to commit together. */
@@ -152,6 +153,7 @@ export function replaceEndpointModelCatalogInTransaction(
   endpointId: string,
   modelIds: readonly string[],
   observedAt = Date.now(),
+  complete = true,
 ): void {
   const ids = [...new Set(modelIds.map((modelId) => modelId.trim()).filter(Boolean))];
   const endpoint = sqlite.prepare('SELECT id FROM provider_endpoints WHERE id = ?').get(endpointId) as { id: string } | undefined;
@@ -164,9 +166,9 @@ export function replaceEndpointModelCatalogInTransaction(
   for (const modelId of ids) insert.run(endpointId, modelId, observedAt);
   sqlite.prepare(`
     UPDATE provider_endpoints
-    SET model_catalog_complete = 1, models_observed_at = ?, updated_at = ?
+    SET model_catalog_complete = ?, models_observed_at = ?, updated_at = ?
     WHERE id = ?
-  `).run(observedAt, observedAt, endpointId);
+  `).run(complete ? 1 : 0, observedAt, observedAt, endpointId);
 }
 
 export function serializeEndpoint(endpoint: ProviderEndpoint) {

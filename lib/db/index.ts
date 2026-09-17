@@ -9,6 +9,7 @@ import { migrateUsageSchema } from './usage-migration';
 import { migrateModelPricingSchema } from './pricing-migration';
 import { migrateModelReasoningSchema } from './model-reasoning-migration';
 import { migrateProviderEndpointSchema } from './provider-endpoint-migration';
+import { migrateProviderCatalogSchema } from './provider-catalog-migration';
 import { lookupBundledPricing } from '@/lib/services/model-pricing';
 import ccSwitchManifest from '@/lib/presets/cc-switch-manifest.json';
 import { migrateSubscriptionSchema } from '@/lib/subscriptions/store';
@@ -28,6 +29,7 @@ CREATE TABLE IF NOT EXISTS providers (
   api_key_enc   TEXT NOT NULL,
   enabled       INTEGER NOT NULL DEFAULT 1,
   priority      INTEGER NOT NULL DEFAULT 0,
+  workspace_id  TEXT,
   balance_config TEXT,
   remark        TEXT,
   created_at    INTEGER,
@@ -175,6 +177,7 @@ function migrate(sqlite: Database.Database) {
   migrateUsageSchema(sqlite);
   migrateModelPricingSchema(sqlite, lookupBundledPricing, ccSwitchManifest.commit);
   migrateModelReasoningSchema(sqlite);
+  migrateProviderCatalogSchema(sqlite);
   migrateProviderEndpointSchema(sqlite);
   migrateSubscriptionSchema(sqlite);
 }

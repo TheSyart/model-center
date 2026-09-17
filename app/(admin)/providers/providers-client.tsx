@@ -17,8 +17,9 @@ import type { ModelItem } from './model-table';
 import ProviderForm from './provider-form';
 import type { ProviderFormState, ProviderView } from './provider-types';
 import { createCustomFormEndpoints, protocolDisplayName, validateFormEndpoints } from '@/lib/services/provider-form';
+import { isOfficialBailianCatalogProvider } from '@/lib/services/bailian-catalog';
 
-const EMPTY_FORM: ProviderFormState = { id: null, preset_key: null, slug: '', name: '', api_key: '', remark: '', endpoints: createCustomFormEndpoints() };
+const EMPTY_FORM: ProviderFormState = { id: null, preset_key: null, slug: '', name: '', api_key: '', workspace_id: '', remark: '', endpoints: createCustomFormEndpoints() };
 
 function quotaTone(tiers?: { utilization: number }[]): string {
   if (!tiers?.length) return 'text-success';
@@ -221,6 +222,9 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
       };
       if (form.preset_key) payload.preset_key = form.preset_key;
       if (form.api_key) payload.api_key = form.api_key;
+      if (isOfficialBailianCatalogProvider({ slug: form.slug, presetKey: form.preset_key })) {
+        payload.workspace_id = form.workspace_id;
+      }
       if (!isEdit) payload.slug = form.slug;
       const res = await fetch(isEdit ? `/api/admin/providers/${form.id}` : '/api/admin/providers', {
         method: isEdit ? 'PATCH' : 'POST',
@@ -423,6 +427,7 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
                             slug: p.slug,
                             name: p.name,
                             api_key: '',
+                            workspace_id: p.workspace_id ?? '',
                             remark: p.remark ?? '',
                             endpoints: p.endpoints.map((endpoint) => ({
                               protocol: endpoint.protocol,

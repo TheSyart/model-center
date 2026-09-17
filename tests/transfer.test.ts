@@ -34,7 +34,7 @@ function database() {
       id TEXT PRIMARY KEY, slug TEXT UNIQUE NOT NULL, name TEXT NOT NULL,
       protocol TEXT NOT NULL, base_url TEXT NOT NULL, preset_key TEXT,
       api_key_enc TEXT NOT NULL, enabled INTEGER NOT NULL, priority INTEGER NOT NULL,
-      balance_config TEXT, remark TEXT, created_at INTEGER, updated_at INTEGER
+      workspace_id TEXT, balance_config TEXT, remark TEXT, created_at INTEGER, updated_at INTEGER
     );
     CREATE TABLE provider_endpoints (
       id TEXT PRIMARY KEY, provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
@@ -84,6 +84,7 @@ test('v3 export round-trips client-owned endpoints and a preset-backed import se
     version: 3,
     providers: [{
       slug: 'example', name: 'Example', preset_key: 'example-preset', default_protocol: 'anthropic', api_key: 'secret',
+      workspace_id: 'llm-workspace',
       endpoints: [
         { protocol: 'openai', base_url: 'https://chat.example/v1', enabled: true },
         { protocol: 'anthropic', base_url: 'https://claude.example', enabled: true },
@@ -99,6 +100,7 @@ test('v3 export round-trips client-owned endpoints and a preset-backed import se
     { protocol: 'openai', base_url: 'https://chat.example/v1', enabled: true },
   ]);
   assert.equal(exported.providers[0]?.default_protocol, 'anthropic');
+  assert.equal(exported.providers[0]?.workspace_id, 'llm-workspace');
   assert.equal('id' in (exported.providers[0]?.endpoints[0] ?? {}), false);
 
   const target = database();
@@ -106,8 +108,8 @@ test('v3 export round-trips client-owned endpoints and a preset-backed import se
   const report = targetTransfer.importConfig(exported);
   assert.equal(report.providers.added, 1);
   assert.deepEqual(
-    target.prepare('SELECT protocol, base_url FROM providers WHERE slug = ?').get('example'),
-    { protocol: 'anthropic', base_url: 'https://claude.example' },
+    target.prepare('SELECT protocol, base_url, workspace_id FROM providers WHERE slug = ?').get('example'),
+    { protocol: 'anthropic', base_url: 'https://claude.example', workspace_id: 'llm-workspace' },
   );
   assert.deepEqual(
     target.prepare('SELECT protocol, is_default FROM provider_endpoints ORDER BY protocol').all(),

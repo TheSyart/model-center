@@ -11,6 +11,7 @@ export const providers = sqliteTable('providers', {
   apiKeyEnc: text('api_key_enc').notNull(), // AES-GCM 密文
   enabled: integer('enabled').notNull().default(1),
   priority: integer('priority').notNull().default(0),
+  workspaceId: text('workspace_id'),
   balanceConfig: text('balance_config'), // JSON: {endpoint, method, json_path, unit}
   remark: text('remark'),
   createdAt: integer('created_at'),

@@ -17,6 +17,7 @@ export interface ProviderView {
   endpoints: ProviderEndpointView[];
   enabled: boolean;
   priority: number;
+  workspace_id: string | null;
   remark: string | null;
   has_key: boolean;
   auth_kind?: 'api_key' | 'subscription';
@@ -29,6 +30,7 @@ export interface ProviderFormState {
   slug: string;
   name: string;
   api_key: string;
+  workspace_id: string;
   remark: string;
   endpoints: ProviderFormEndpoint[];
 }

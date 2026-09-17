@@ -10,6 +10,7 @@ export interface ProviderSerializationSource {
   apiKeyEnc: string;
   enabled: number;
   priority: number;
+  workspaceId?: string | null;
   balanceConfig: string | null;
   remark: string | null;
   createdAt: number | null;
@@ -33,6 +34,7 @@ export function serializeProviderRecord(provider: ProviderSerializationSource, e
     endpoints: endpoints.map(serializeEndpoint),
     enabled: provider.enabled === 1,
     priority: provider.priority,
+    workspace_id: provider.workspaceId ?? null,
     balance_config: provider.balanceConfig,
     remark: provider.remark,
     has_key: !subscriptionAccountId && !!provider.apiKeyEnc,

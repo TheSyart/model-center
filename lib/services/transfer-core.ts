@@ -45,6 +45,7 @@ export interface ExportedConfig {
     api_key: string;
     enabled: boolean;
     priority: unknown;
+    workspace_id: unknown;
     balance_config: unknown;
     remark: unknown;
   }>;
@@ -115,6 +116,7 @@ export function createTransferService(deps: TransferDependencies): TransferServi
           api_key: includeKeys ? deps.decrypt(String(provider.api_key_enc)) : MASKED_TRANSFER_KEY,
           enabled: provider.enabled === 1,
           priority: provider.priority,
+          workspace_id: provider.workspace_id ?? null,
           balance_config: provider.balance_config ?? null,
           remark: provider.remark ?? null,
         };
@@ -157,11 +159,12 @@ export function createTransferService(deps: TransferDependencies): TransferServi
         const providerId = deps.randomId();
         sqlite.transaction(() => {
           sqlite.prepare(`INSERT INTO providers
-            (id, slug, name, protocol, base_url, preset_key, api_key_enc, enabled, priority, balance_config, remark, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+            (id, slug, name, protocol, base_url, preset_key, api_key_enc, enabled, priority, workspace_id, balance_config, remark, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
             .run(providerId, slug, text(row.name) || preset?.name || slug, defaultEndpoint.protocol, defaultEndpoint.base_url,
               preset?.presetKey ?? null, deps.encrypt(apiKey), truthy(row.enabled) ? 1 : 0,
-              typeof row.priority === 'number' ? row.priority : 0, row.balance_config ?? null, text(row.remark) ?? null, now, now);
+              typeof row.priority === 'number' ? row.priority : 0, text(row.workspace_id) ?? null,
+              row.balance_config ?? null, text(row.remark) ?? null, now, now);
           replaceProviderEndpoints(sqlite, providerId, endpoints, now, deps.validateBaseUrl);
         })();
         report.providers.added++;

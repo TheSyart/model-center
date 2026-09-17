@@ -368,7 +368,7 @@ test('provider serialization exposes endpoint defaults without leaking encrypted
     {
       id: 'provider-1', slug: 'example', name: 'Example', protocol: 'openai', baseUrl: 'https://chat.example/v1',
       presetKey: 'example-preset', apiKeyEnc: 'encrypted-secret', enabled: 1, priority: 2,
-      balanceConfig: null, remark: null, createdAt: 10, updatedAt: 20,
+      workspaceId: 'llm-workspace', balanceConfig: null, remark: null, createdAt: 10, updatedAt: 20,
     },
     [{
       id: 'endpoint-1', providerId: 'provider-1', protocol: 'openai', baseUrl: 'https://chat.example/v1',
@@ -381,6 +381,7 @@ test('provider serialization exposes endpoint defaults without leaking encrypted
   assert.equal(serialized.protocol, serialized.default_protocol);
   assert.equal(serialized.base_url, serialized.default_base_url);
   assert.equal(serialized.endpoints.length, 1);
+  assert.equal(serialized.workspace_id, 'llm-workspace');
   assert.equal(serialized.has_key, true);
   assert.equal('apiKeyEnc' in serialized, false);
   assert.equal('api_key_enc' in serialized, false);

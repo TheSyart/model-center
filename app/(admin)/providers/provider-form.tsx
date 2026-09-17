@@ -19,6 +19,7 @@ import {
 import type { ProviderProtocol } from '@/lib/presets/types';
 import type { ProviderFormState } from './provider-types';
 import PresetCardGrid from './preset-card-grid';
+import { isOfficialBailianCatalogProvider } from '@/lib/services/bailian-catalog';
 
 export interface ProviderFormProps {
   value: ProviderFormState;
@@ -76,6 +77,7 @@ export default function ProviderForm({ value, error, saving, onChange, onSubmit,
   const advancedId = isEdit ? 'provider-edit-advanced-config' : 'provider-create-advanced-config';
   const [advanced, setAdvanced] = useState(isEdit || !value.preset_key);
   const [showKey, setShowKey] = useState(false);
+  const isBailian = isOfficialBailianCatalogProvider({ slug: value.slug, presetKey: value.preset_key });
   useEffect(() => setAdvanced(isEdit || !value.preset_key), [isEdit, value.preset_key]);
 
   function selectPreset(presetKey: string | null) {
@@ -85,6 +87,7 @@ export default function ProviderForm({ value, error, saving, onChange, onSubmit,
       preset_key: preset?.presetKey ?? null,
       slug: preset?.slug ?? '',
       name: preset?.name ?? '',
+      workspace_id: preset?.presetKey === 'bailian' ? value.workspace_id : '',
       endpoints: preset ? presetEndpoints(preset.presetKey) : createCustomFormEndpoints(),
     });
   }
@@ -95,6 +98,7 @@ export default function ProviderForm({ value, error, saving, onChange, onSubmit,
       {!isEdit && <div className="mt-5"><PresetCardGrid selectedPresetKey={value.preset_key} onSelectPreset={selectPreset} /></div>}
       <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2">
         <label className="block md:col-span-2"><span className="mb-1.5 block text-sm font-medium text-muted-foreground">API Key{isEdit ? '（留空则不修改）' : '（加密存储）'}</span><div className="relative"><input type={showKey ? 'text' : 'password'} value={value.api_key} onChange={(event) => onChange({ ...value, api_key: event.target.value })} placeholder={isEdit ? '留空则不修改' : 'sk-…'} className={`w-full ${inputCls} pr-12`} required={!isEdit} /><button type="button" onClick={() => setShowKey((shown) => !shown)} aria-label={showKey ? '隐藏 API Key' : '显示 API Key'} className="absolute right-0.5 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground sm:right-1 sm:h-10 sm:w-10">{showKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}</button></div></label>
+        {isBailian && <label className="block md:col-span-2"><span className="mb-1.5 block text-sm font-medium text-muted-foreground">Workspace ID（北京地域）</span><input value={value.workspace_id} onChange={(event) => onChange({ ...value, workspace_id: event.target.value })} placeholder="llm-xxxxxxxxxxxxxxxx" className={`w-full ${inputCls}`} required /><span className="mt-1.5 block text-xs leading-5 text-muted-foreground">只用于官方模型目录；推理仍使用服务商端点中的 Base URL。</span></label>}
         <label className="block md:col-span-2"><span className="mb-1.5 block text-sm font-medium text-muted-foreground">备注</span><input value={value.remark} onChange={(event) => onChange({ ...value, remark: event.target.value })} className={`w-full ${inputCls}`} /></label>
       </div>
       <div className="mt-5 border-t border-border pt-4">

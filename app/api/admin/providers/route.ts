@@ -6,6 +6,7 @@ import { getPreset } from '@/lib/presets';
 import { EndpointValidationError, replaceProviderEndpoints } from '@/lib/services/provider-endpoint';
 import { resolveEndpointSetForCreate } from '@/lib/services/provider-endpoint-request';
 import { getProvider, listProviders, providerAuthPolicy, serializeProvider, validateBaseUrl } from '@/lib/services/provider';
+import { isOfficialBailianCatalogProvider, normalizeBailianWorkspaceId } from '@/lib/services/bailian-catalog';
 
 // GET /api/admin/providers：服务商列表（不含 api_key，只返回 has_key）。
 // ?auth_kind=api_key 只返回 API Key 服务商（服务商页）；默认含订阅服务商（别名、日志、看板需要）。
@@ -27,6 +28,7 @@ interface CreateBody {
   remark?: string;
   priority?: number;
   enabled?: boolean;
+  workspace_id?: unknown;
 }
 
 // POST /api/admin/providers：新建服务商（api_key 加密入库）
@@ -60,6 +62,19 @@ export async function POST(req: NextRequest) {
   if (!apiKey) {
     return NextResponse.json({ error: 'api_key 不能为空' }, { status: 400 });
   }
+  let workspaceId: string | null;
+  try {
+    workspaceId = normalizeBailianWorkspaceId(body.workspace_id);
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : '百炼 Workspace ID 无效' }, { status: 400 });
+  }
+  const officialBailian = isOfficialBailianCatalogProvider({ slug, presetKey: preset?.presetKey ?? presetKey });
+  if (officialBailian && !workspaceId) {
+    return NextResponse.json({ error: '百炼服务商必须配置 Workspace ID' }, { status: 400 });
+  }
+  if (!officialBailian && workspaceId) {
+    return NextResponse.json({ error: 'Workspace ID 仅用于普通百炼服务商' }, { status: 400 });
+  }
 
   const now = Date.now();
   const defaultEndpoint = endpoints.find((endpoint) => endpoint.is_default)!;
@@ -74,6 +89,7 @@ export async function POST(req: NextRequest) {
     apiKeyEnc: encrypt(apiKey),
     enabled: body.enabled === false ? 0 : 1,
     priority: typeof body.priority === 'number' ? body.priority : 0,
+    workspaceId,
     balanceConfig: balancePreset?.balance?.endpoint
       ? JSON.stringify({ endpoint: balancePreset.balance.endpoint, method: balancePreset.balance.method ?? 'GET' })
       : null,
