@@ -9,7 +9,7 @@
 - 身份范围：当前逻辑供应商 `bailian`（Bailian，包含历史 Qwen Coder 别名）及 `bailian-for-coding`（Bailian For Coding）。两者分别维护，不合并普通按量服务与 Coding Plan，不跨地域或凭据共享配置。未来新增百炼身份必须显式加入映射。
 - `GET /api/v1/models` 用于常规模型目录、能力、上下文与价格元数据；`GET /modelstudio/billing/overview` 用于月度官方账单概览。模型名称含 `qwen` 不代表供应商是百炼；第三方平台销售 Qwen 模型的配置与定价不在此例外内。
 - 模型调用 Base URL、Logo、鉴权提示、Coding Plan 等这两个接口未提供的信息，改从对应百炼官方文档或官方资源维护，不能声称已由这两个接口覆盖。普通模型目录不能代替 Coding Plan 专属目录或套餐额度。
-- **落地状态（2026-09-17）：普通 `bailian` 的模型同步已切换到北京地域官方 Workspace 模型目录。** 服务商需配置 `workspace_id`；运行时逐页读取 `output.total/page_no/page_size/models`，所有页面校验成功后才事务入库，并保存新模型的官方名称和上下文长度。同步失败保留上次成功数据，不回退到 CC Switch 价格。`bailian-for-coding`、官方价格、账单概览和生成预设仍未切换，继续按本节边界单独实现。
+- **落地状态（2026-09-17）：普通 `bailian` 的模型同步已切换到北京地域官方 Workspace 模型目录。** 服务商需配置 `workspace_id`；运行时逐页读取 `output.total/page_no/page_size/models`，对官方 429 限流执行有限退避重试，所有页面校验成功后才事务入库，并保存新模型的官方名称和上下文长度。同步失败保留上次成功数据，不回退到 CC Switch 价格。`bailian-for-coding`、官方价格、账单概览和生成预设仍未切换，继续按本节边界单独实现。
 - 保留当前 CC Switch 历史快照、用户手动配置和手动价格。后续实现来源切换时，不再用新的 CC Switch 百炼记录覆盖它们；不要为了这次文档更新手改生成文件、删除服务商或改动基线数量。
 
 完整接口契约、价格边界与下一次接入步骤见下方“阿里云百炼官方接口维护契约”。

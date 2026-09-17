@@ -39,6 +39,7 @@ export interface SyncResult {
 const SYNC_TIMEOUT_MS = 30_000;
 const MAX_MODEL_PAGES = 100;
 const BAILIAN_PAGE_SIZE = 20;
+const BAILIAN_MAX_ATTEMPTS = 5;
 
 interface UpstreamModelRecord {
   id: string;
@@ -153,15 +154,42 @@ function parseBailianPage(json: unknown, expectedPage: number): {
   return { total: Number(output.total), pageSize: Number(output.page_size), models };
 }
 
+function bailianRetryDelayMs(response: Response, attempt: number): number {
+  const retryAfter = response.headers.get('retry-after');
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1_000, 30_000);
+    const date = Date.parse(retryAfter);
+    if (Number.isFinite(date)) return Math.min(Math.max(0, date - Date.now()), 30_000);
+  }
+  return Math.min(2_000 * (2 ** (attempt - 1)), 30_000);
+}
+
+async function fetchBailianPage(
+  provider: SyncProviderRow,
+  apiKey: string,
+  page: number,
+  fetchImpl: typeof fetch,
+): Promise<Response> {
+  for (let attempt = 1; attempt <= BAILIAN_MAX_ATTEMPTS; attempt++) {
+    const response = await fetchImpl(bailianCatalogUrl(provider.workspaceId, page, BAILIAN_PAGE_SIZE), {
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(SYNC_TIMEOUT_MS),
+    });
+    if (response.status !== 429) return response;
+    const body = (await response.text()).slice(0, 300);
+    if (attempt === BAILIAN_MAX_ATTEMPTS) throw new Error(`百炼模型目录返回 429: ${body}`);
+    await new Promise((resolve) => setTimeout(resolve, bailianRetryDelayMs(response, attempt)));
+  }
+  throw new Error('百炼模型目录重试状态异常');
+}
+
 async function fetchBailianModels(provider: SyncProviderRow, apiKey: string, fetchImpl: typeof fetch): Promise<UpstreamModelRecord[]> {
   const models: UpstreamModelRecord[] = [];
   const seenIds = new Set<string>();
   let expectedTotal: number | null = null;
   for (let page = 1; page <= MAX_MODEL_PAGES; page++) {
-    const response = await fetchImpl(bailianCatalogUrl(provider.workspaceId, page, BAILIAN_PAGE_SIZE), {
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(SYNC_TIMEOUT_MS),
-    });
+    const response = await fetchBailianPage(provider, apiKey, page, fetchImpl);
     if (!response.ok) {
       const body = (await response.text()).slice(0, 300);
       throw new Error(`百炼模型目录返回 ${response.status}: ${body}`);

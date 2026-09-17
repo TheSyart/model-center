@@ -176,6 +176,31 @@ test('Bailian HTTP 200 business failures include the upstream code and request I
   );
 });
 
+test('Bailian synchronization retries a throttled catalog page before failing the sync', async () => {
+  let calls = 0;
+  const ids = await fetchAllUpstreamModels(
+    bailianProvider as any,
+    'key',
+    (async () => {
+      calls++;
+      if (calls === 1) {
+        return new Response(JSON.stringify({ code: 'Throttling.RateQuota' }), {
+          status: 429,
+          headers: { 'Retry-After': '0', 'Content-Type': 'application/json' },
+        });
+      }
+      return Response.json({
+        success: true,
+        output: { total: 1, page_no: 1, page_size: 20, models: [{ model: 'qwen3-max' }] },
+        request_id: 'request-after-retry',
+      });
+    }) as typeof fetch,
+  );
+
+  assert.equal(calls, 2);
+  assert.deepEqual(ids, ['qwen3-max']);
+});
+
 test('Bailian models do not inherit bundled prices and do not mark the OpenAI endpoint catalog complete', async () => {
   const { sqlite, legacyId } = database();
   sqlite.prepare("UPDATE providers SET slug = 'bailian' WHERE id = 'provider-1'").run();
