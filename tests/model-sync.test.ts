@@ -237,6 +237,37 @@ test('Bailian models do not inherit bundled prices and do not mark the OpenAI en
   sqlite.close();
 });
 
+test('Bailian synchronization fills missing official metadata without overwriting existing model settings', async () => {
+  const { sqlite } = database();
+  sqlite.prepare(`INSERT INTO models (
+    id, provider_id, model_id, alias, display_name, enabled,
+    input_price, output_price, pricing_source, context_window, synced
+  ) VALUES ('existing-row', 'provider-1', 'qwen3-max', 'stable-alias', NULL, 0, 1.25, 2.5, 'manual', NULL, 0)`).run();
+  const fetchImpl = (async () => Response.json({
+    success: true,
+    output: {
+      total: 1,
+      page_no: 1,
+      page_size: 20,
+      models: [{ model: 'qwen3-max', name: '通义千问3-Max', model_info: { context_window: 131072 } }],
+    },
+    request_id: 'request-metadata',
+  })) as typeof fetch;
+
+  const result = await syncProviderModels(bailianProvider as any, 'key', dependencies(sqlite, fetchImpl));
+
+  assert.equal(result.added, 0);
+  assert.deepEqual(
+    sqlite.prepare(`SELECT alias, display_name, enabled, input_price, output_price, pricing_source, context_window, synced
+      FROM models WHERE id = 'existing-row'`).get(),
+    {
+      alias: 'stable-alias', display_name: '通义千问3-Max', enabled: 0,
+      input_price: 1.25, output_price: 2.5, pricing_source: 'manual', context_window: 131072, synced: 0,
+    },
+  );
+  sqlite.close();
+});
+
 for (const invalidName of ['models/', '  models/   ']) {
   test(`Gemini synchronization rejects an empty normalized model name (${JSON.stringify(invalidName)}) without database writes`, async () => {
     const { sqlite, legacyId } = database();

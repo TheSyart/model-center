@@ -294,8 +294,16 @@ export async function syncProviderModels(
         pricing_source, pricing_source_ref, pricing_synced_at
       ) VALUES (?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?)
     `);
+    const fillMissingOfficialMetadata = dependencies.sqlite.prepare(`
+      UPDATE models
+      SET display_name = COALESCE(display_name, ?), context_window = COALESCE(context_window, ?)
+      WHERE provider_id = ? AND model_id = ?
+    `);
     for (const model of upstreamModels) {
-      if (existingIds.has(model.id)) continue;
+      if (existingIds.has(model.id)) {
+        if (bailianCatalog) fillMissingOfficialMetadata.run(model.displayName, model.contextWindow, provider.id, model.id);
+        continue;
+      }
       const pricing = bailianCatalog ? null : dependencies.lookupPricing(requestProvider.baseUrl, requestProvider.protocol, model.id);
       insert.run(
         dependencies.randomId(), provider.id, model.id, model.displayName, model.contextWindow,
