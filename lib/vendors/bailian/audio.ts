@@ -113,21 +113,6 @@ export function acceptsBailianTts(target: { provider: ProviderRow; modelId: stri
   );
 }
 
-/** 多模态生成端点同时服务 Qwen-TTS 与 ASR，原生透传面按端点而不是按 ASR/TTS 判定。 */
-export function acceptsBailianMultimodalAudio(target: { provider: ProviderRow; modelId: string }): boolean {
-  const route = resolveBailianAudioRoute(target.modelId);
-  return (
-    isOfficialBailianCatalogProvider(target.provider) &&
-    route.supported &&
-    (route.kind === 'asr' || route.kind === 'qwen-tts')
-  );
-}
-
-export function acceptsBailianSpeechSynthesizer(target: { provider: ProviderRow; modelId: string }): boolean {
-  const route = resolveBailianAudioRoute(target.modelId);
-  return isOfficialBailianCatalogProvider(target.provider) && route.supported && route.kind === 'ws-tts';
-}
-
 /**
  * 自定义音色的准入：服务商要在百炼官方目录下，模型要是个语音合成模型。
  *

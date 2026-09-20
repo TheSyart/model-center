@@ -16,7 +16,8 @@ export interface RequestLogFields {
   tokenId?: string | null;
   tokenName?: string | null;
   tokenPrefix?: string | null;
-  entryProtocol: 'openai' | 'anthropic' | 'responses';
+  /** dashscope 是百炼原生路径的透传面，它不属于任何对话协议。 */
+  entryProtocol: 'openai' | 'anthropic' | 'responses' | 'dashscope';
   /** 实际选中的上游端点，允许历史日志为空。 */
   providerEndpointId?: string | null;
   /** 实际请求上游所用协议；入口协议继续单独保留。 */
