@@ -4,11 +4,27 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-// after() 在测试里同步执行，这样日志断言不必等事件循环。
+/**
+ * after() 在测试里立即执行，这样日志断言不必等事件循环。
+ * 流式分支的回调是 async 的，所以把它的 Promise 收集起来供 flushAfter() 等待。
+ */
+const afterCalls: Array<Promise<unknown>> = [];
 vi.mock('next/server', async (importOriginal) => {
   const actual = await importOriginal<typeof import('next/server')>();
-  return { ...actual, after: (fn: () => void) => fn() };
+  return {
+    ...actual,
+    after: (fn: () => unknown) => {
+      const result = fn();
+      if (result && typeof (result as Promise<unknown>).then === 'function') {
+        afterCalls.push(result as Promise<unknown>);
+      }
+    },
+  };
 });
+
+async function flushAfter(): Promise<void> {
+  while (afterCalls.length > 0) await afterCalls.shift();
+}
 
 let runModalityRequest: typeof import('../../lib/gateway/modality-pipeline').runModalityRequest;
 let createToken: typeof import('../../lib/services/token').createToken;
@@ -74,6 +90,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   sqlite.prepare('DELETE FROM request_logs').run();
+  afterCalls.length = 0;
 });
 
 afterAll(() => {
@@ -224,5 +241,111 @@ describe('upstream status handling', () => {
     expect((await res.json()).error.code).toBe('upstream_error');
     expect(lastLog()?.status).toBe(400);
     expect(lastLog()?.error).toContain('InvalidParameter');
+  });
+
+  describe('streaming outcomes', () => {
+    /** 一个手动控制结束时机的流式 outcome。 */
+    function streamingOutcome() {
+      let resolveDone!: (d: Record<string, unknown>) => void;
+      const done = new Promise<Record<string, unknown>>((r) => { resolveDone = r; });
+      return {
+        done,
+        finish: (d: Record<string, unknown>) => resolveDone(d),
+        outcome: {
+          response: new Response(new ReadableStream(), { status: 200 }),
+          stream: { done },
+        },
+      };
+    }
+
+    test('the log waits for the stream to finish, and records stream: true', async () => {
+      const s = streamingOutcome();
+      const res = await runModalityRequest(
+        baseOptions({ requestedModel: 'cosyvoice-v3-tts', execute: async () => s.outcome }) as never,
+      );
+
+      expect(res.status).toBe(200);
+      // 响应头已经发出，但流还没走完——这时写日志会记下一个假的时长。
+      expect(lastLog()).toBeUndefined();
+
+      s.finish({ firstTokenMs: 380, durationMs: 4200 });
+      await flushAfter();
+
+      const log = lastLog();
+      expect(log?.stream).toBe(1);
+      expect(log?.first_token_ms).toBe(380);
+      expect(log?.duration_ms).toBe(4200);
+      // 音频按时长与字符数计价，不是 token——这一条不因流式而改变。
+      expect(log?.usage_json ?? null).toBeNull();
+    });
+
+    test('the wall-clock timeout stops at the response headers, not mid-stream', async () => {
+      const s = streamingOutcome();
+      let signal!: AbortSignal;
+      await runModalityRequest(
+        baseOptions({
+          requestedModel: 'cosyvoice-v3-tts',
+          timeoutMs: 20,
+          execute: async (attempt: { signal: AbortSignal }) => { signal = attempt.signal; return s.outcome; },
+        }) as never,
+      );
+
+      // 超时只约束首包。留着墙钟，一段两分钟的长合成会在半路被掐断。
+      await new Promise((r) => setTimeout(r, 60));
+      expect(signal.aborted).toBe(false);
+
+      s.finish({});
+      await flushAfter();
+    });
+
+    test('a client hang-up after the headers still aborts the upstream', async () => {
+      const s = streamingOutcome();
+      const client = new AbortController();
+      let signal!: AbortSignal;
+      await runModalityRequest(
+        baseOptions({
+          requestedModel: 'cosyvoice-v3-tts',
+          clientSignal: client.signal,
+          execute: async (attempt: { signal: AbortSignal }) => { signal = attempt.signal; return s.outcome; },
+        }) as never,
+      );
+
+      // 监听摘早了，客户端挂断之后上游还在合成、还在计费。
+      client.abort();
+      expect(signal.aborted).toBe(true);
+
+      s.finish({});
+      await flushAfter();
+    });
+
+    test('a note from the transport reaches the log even though the status is 200', async () => {
+      const s = streamingOutcome();
+      await runModalityRequest(
+        baseOptions({ requestedModel: 'cosyvoice-v3-tts', execute: async () => s.outcome }) as never,
+      );
+
+      // 字节已经开始流，状态码定死 200——日志是唯一还能说出真相的地方。
+      s.finish({ error: '上游流异常: truncated' });
+      await flushAfter();
+
+      expect(lastLog()?.status).toBe(200);
+      expect(lastLog()?.error).toContain('truncated');
+    });
+
+    test('a rejecting done still writes a log', async () => {
+      const res = await runModalityRequest(
+        baseOptions({
+          requestedModel: 'cosyvoice-v3-tts',
+          execute: async () => ({
+            response: new Response(new ReadableStream(), { status: 200 }),
+            stream: { done: Promise.reject(new Error('读流时炸了')) },
+          }),
+        }) as never,
+      );
+
+      expect(res.status).toBe(200);
+      await flushAfter();
+      expect(lastLog()?.error).toContain('流中断');
+    });
   });
 });

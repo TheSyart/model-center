@@ -4,6 +4,7 @@ import { GatewayError } from './errors';
 import { writeRequestLog } from './logger';
 import { resolveModel } from './router';
 import type { RouteTarget } from './router';
+import type { StreamTiming } from './stream-observer';
 import { isUpstreamError } from '@/lib/upstream-error';
 import { checkSpendLimit, SPEND_WINDOW_LABELS } from '@/lib/services/token';
 import type { TokenRow } from '@/lib/services/token';
@@ -28,6 +29,16 @@ export interface ModalityAttempt {
   apiKey: string;
   /** 客户端断连或超时都会 abort，调用方必须原样传给 fetch。 */
   signal: AbortSignal;
+  /** 请求起始时刻，与日志的 ts 同源。流式出口用它算首包与总时长。 */
+  startedAt: number;
+}
+
+/** 流式响应结束后才知道的那几个字段。 */
+export interface ModalityStreamDone {
+  firstTokenMs?: number | null;
+  durationMs?: number | null;
+  error?: string | null;
+  status?: number;
 }
 
 export interface ModalityOutcome {
@@ -37,6 +48,39 @@ export interface ModalityOutcome {
   status?: number;
   /** 上游错误摘要；成功时留空。 */
   error?: string | null;
+  /**
+   * 置位表示 response.body 还在流，此时：
+   *  1. execute 解析 == 响应头就绪，墙钟超时的使命到此为止（对齐 forward.ts 的口径）；
+   *  2. 客户端断连的监听**保留到 done 结算**——摘早了，挂断之后上游还在合成、还在计费；
+   *  3. 日志推迟到 done 结算后写，并记 stream: true。
+   *
+   * 不置位就是老路径，四个非流式调用方行为一字不变。
+   */
+  stream?: { done: Promise<ModalityStreamDone> };
+}
+
+/**
+ * observeReadableStream 的 timing → ModalityStreamDone。
+ *
+ * **绝不 reject**：日志的 after() 在等它，悬挂就是永久泄漏。
+ * note() 在 timing 结算之后求值，用来把「上游流异常结束」这类信息补进日志——
+ * 那时 HTTP 状态码已经是 200，日志是唯一能说出真相的地方。
+ */
+export function modalityStreamDone(
+  timing: Promise<StreamTiming>,
+  note?: () => string | null,
+): Promise<ModalityStreamDone> {
+  return timing.then(
+    (t) => {
+      const parts = [t.cancelled ? '客户端中断流' : null, note?.() ?? null].filter(Boolean);
+      return {
+        firstTokenMs: t.firstTokenMs,
+        durationMs: t.durationMs,
+        error: parts.length > 0 ? parts.join('；') : null,
+      };
+    },
+    (e) => ({ error: `流中断: ${e instanceof Error ? e.message : String(e)}`.slice(0, 500) }),
+  );
 }
 
 export interface ModalityRequestOptions {
@@ -73,26 +117,33 @@ export async function runModalityRequest(options: ModalityRequestOptions): Promi
     source: options.source ?? 'unknown',
   };
 
-  const log = (status: number, error: string | null) => {
+  const log = (
+    status: number,
+    error: string | null,
+    extra?: { stream?: boolean; latencyMs?: number; firstTokenMs?: number | null; durationMs?: number | null },
+  ) => {
     const base = logBase;
-    const latencyMs = Date.now() - startedAt;
+    const latencyMs = extra?.latencyMs ?? Date.now() - startedAt;
     after(() =>
       writeRequestLog({
         ts: startedAt,
         ...base,
         status,
         latencyMs,
+        firstTokenMs: extra?.firstTokenMs ?? null,
+        durationMs: extra?.durationMs ?? latencyMs,
         // 音频计量单位是时长与字符数，不是 token。把它们冒充成 token 再乘以
         // 每百万 token 的单价，会在仪表盘上得到一个无法与官方账单对账的数字；
         // 与 lib/services/pricing.ts 对非美元币种返回 null 是同一条原则。
         usage: null,
         error,
-        stream: false,
+        stream: extra?.stream ?? false,
       }),
     );
   };
 
   const controller = new AbortController();
+  let streaming = false;
   const onClientAbort = () => controller.abort();
   options.clientSignal.addEventListener('abort', onClientAbort);
   if (options.clientSignal.aborted) controller.abort();
@@ -130,9 +181,37 @@ export async function runModalityRequest(options: ModalityRequestOptions): Promi
       target,
       apiKey: decrypt(target.provider.apiKeyEnc),
       signal: controller.signal,
+      startedAt,
     });
     const status = outcome.status ?? outcome.response.status;
-    log(status, outcome.error ?? null);
+    // 到响应头为止的耗时，与 fetchUpstream 的 latencyMs 同口径。
+    const latencyMs = Date.now() - startedAt;
+
+    if (!outcome.stream) {
+      log(status, outcome.error ?? null, { latencyMs, durationMs: latencyMs });
+      return outcome.response;
+    }
+
+    // 响应头已经发出，墙钟超时不能再管了——它会在流到一半时掐断上游。
+    // 之后的存活性由传输层的帧间隔计时器负责，那是唯一能区分「慢」和「挂」的地方。
+    streaming = true;
+    clearTimeout(timeout);
+    after(async () => {
+      let done: ModalityStreamDone = {};
+      try {
+        done = await outcome.stream!.done;
+      } catch (e) {
+        done = { error: `流中断: ${e instanceof Error ? e.message : String(e)}`.slice(0, 500) };
+      } finally {
+        options.clientSignal.removeEventListener('abort', onClientAbort);
+      }
+      log(done.status ?? status, done.error ?? outcome.error ?? null, {
+        stream: true,
+        latencyMs,
+        firstTokenMs: done.firstTokenMs ?? null,
+        durationMs: done.durationMs ?? Date.now() - startedAt,
+      });
+    });
     return outcome.response;
   } catch (e) {
     if (e instanceof GatewayError) {
@@ -156,7 +235,11 @@ export async function runModalityRequest(options: ModalityRequestOptions): Promi
     log(status, message);
     return options.errorResponse(status, message, aborted ? 'upstream_timeout' : 'internal_error');
   } finally {
-    clearTimeout(timeout);
-    options.clientSignal.removeEventListener('abort', onClientAbort);
+    // 流式分支自己清了计时器，且断连监听要留到 done 结算——
+    // 提前摘掉，客户端挂断之后上游会继续合成、继续计费。
+    if (!streaming) {
+      clearTimeout(timeout);
+      options.clientSignal.removeEventListener('abort', onClientAbort);
+    }
   }
 }
