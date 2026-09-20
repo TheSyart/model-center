@@ -1,5 +1,8 @@
 # Antigravity 授权接入
 
+> 体裁：计划 · 状态：已交付（2026-09-14，提交 7f77af7）· 最后核对：2026-09-20
+> 保留作为当初的决策记录。实现以 `lib/subscriptions/` 与 `docs/subscription-accounts.md` 为准。
+
 用户已明确将 Google 订阅入口改为 Antigravity，不使用 Gemini CLI 个人授权。
 
 ## 契约与范围

@@ -1,6 +1,9 @@
 # Model Center —— 个人模型聚合平台 · 开发文档
 
-> 版本：v0.5  日期：2026-08-24
+> 体裁：契约 · 状态：在用 · 最后核对：2026-09-20
+> 版本：v0.5（初稿 2026-08-24）
+> 本次核对只处理了结构性失真——删掉了已与代码不符的「目录结构」一节；
+> 其余章节未逐条复核，与实现不一致时以代码为准。
 > 定位：单人自用的模型 API 聚合网关 + 管理后台。把各家模型服务商的 API Key 统一收进来，对外只暴露一个兼容 OpenAI 协议的接口，通过模型名路由到不同服务商；同时提供服务商管理、预设提示词、额度查询、模型列表同步等管理能力。
 > 服务商、模型、定价与图标固定同步自 [farion1231/cc-switch](https://github.com/farion1231/cc-switch)；精确 SHA、字段映射和更新流程见 `docs/cc-switch-sync.md`。
 
@@ -207,35 +210,6 @@
 4. 按 provider.protocol 判断：**入口协议与原生协议一致 → 原生透传**（仅改鉴权与 model 名）；否则选适配器经 IR 双向转换。
 5. 上游响应（流式/非流式）→ 转换回入口协议格式 → 返回客户端。
 6. 异步写请求日志（含 usage tokens、耗时、状态码、错误摘要）。
-
-### 5.2 目录结构（建议）
-
-```
-model-center/
-├── app/
-│   ├── (admin)/                # 管理后台页面
-│   │   ├── page.tsx            # 仪表盘（余额/用量总览）
-│   │   ├── providers/          # 服务商管理
-│   │   ├── models/             # 模型列表与别名
-│   │   ├── prompts/            # 预设提示词
-│   │   ├── logs/               # 请求日志
-│   │   └── settings/           # 设置（令牌入口、导入导出、保留策略）
-│   ├── api/
-│   │   ├── v1/                 # 网关：chat/completions, messages(Anthropic出口), models
-│   │   └── admin/              # 管理 API：providers/models/prompts/balance/logs/…
-│   └── layout.tsx
-├── lib/
-│   ├── adapters/               # openai.ts / anthropic.ts / gemini.ts
-│   ├── gateway/                # router.ts（模型解析）、forward.ts（转发+流）
-│   ├── services/               # provider.ts / prompt.ts / balance.ts / stats.ts
-│   ├── crypto.ts               # AES-GCM 加解密
-│   ├── db/                     # schema + client
-│   └── presets.ts              # 内置服务商预设（§3.1 表格的代码化）
-├── prisma/ (或 drizzle/)
-├── tests/
-├── .env.example
-└── package.json
-```
 
 ---
 

@@ -4,6 +4,8 @@
 
 厂商官方接口资料（网址、契约、计费、已确认「没有」的结论）集中在 `docs/vendor-apis/`，动手查任何厂商接口前先看那里，别重复调研。新增或修正时同步更新该条目的核对日期。
 
+文档的体裁、状态与核对日期规范见 `docs/README.md`，那里也是四类文档的统一入口。新增或修改任何 `docs/` 下的文件时，顶部的「体裁 · 状态 · 最后核对」三项必须同步更新。
+
 - `lib/presets/cc-switch.ts`、`lib/presets/cc-switch-catalog.json`、`lib/presets/cc-switch-manifest.json`、`lib/pricing/cc-switch.ts` 和同步来的 `public/logos/*` 是生成内容，禁止手工编辑。
 - CC Switch 更新必须先解析 `main` 的 SHA，再以该不可变 SHA 生成；禁止在一次同步中混用 `main` 的不同时点。
 - 保持 slug 稳定，不覆盖已有服务商的 Base URL、API Key、启用状态、优先级或备注。

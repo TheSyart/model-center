@@ -1,5 +1,8 @@
 # 订阅账号：登录、额度与网关
 
+> 体裁：契约 · 状态：在用 · 最后核对：2026-09-15
+> 改订阅登录、额度或网关接入前先读本文。实现在 `lib/subscriptions/`。
+
 新增管理入口 `/subscriptions`，原生集成到 Model Center 的 Next.js 服务中，无需部署 CLIProxyAPI sidecar。当前登录入口为 Claude Code、Codex、Antigravity CLI（反重力）和 GitHub Copilot。前三家参考固定版本 CLIProxyAPI 的独立授权和请求执行协议，GitHub Copilot 参考固定版本 cc-switch 的设备码登录与模型接口；**没有执行真实账号的登录、额度查询、模型拉取或推理验收**。
 
 ## 使用
@@ -154,7 +157,7 @@ Copilot 服务商同时建立 Chat（默认）与 Responses 两个协议端点�
 
 当前请求版本按固定上游快照实现（hub 2.9.1、额度 CLI 1.0.13）；未复制上游动态客户端版本更新、签名缓存、全部模型特例和工具 schema 修复。后续服务端协议变化需依据实际响应更新，不能用基本 JSON/SSE 测试宣称所有模型扩展兼容。
 
-此前基线已通过（本次验证结果见 `antigravity-integration-plan.md`）：
+此前基线已通过（本次验证结果见 `superpowers/plans/2026-09-14-antigravity-integration.md`）：
 
 - 核心测试 308 项；UI/运行时集成测试 63 项（含真实 SQLite/Drizzle/AES、管理路由及网关转换，上游 HTTP 使用模拟响应）。
 - 三家 Chat 入口的 JSON/SSE 共 6 条网关路径；401 后令牌轮转重试、429 后别名账号回退、原生 Claude 能力请求头、Codex 原生 Responses data-only SSE 用量与字节保真、订阅日志不计 API 金额、API Key 旧接口回归。
