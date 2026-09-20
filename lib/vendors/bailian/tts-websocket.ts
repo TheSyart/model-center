@@ -34,6 +34,8 @@ export interface BailianWsTtsOptions {
   volume?: number;
   rate?: number;
   pitch?: number;
+  /** 仅 instruct 系模型生效。注意上游这里是**单数** instruction。 */
+  instruction?: string;
   signal?: AbortSignal;
   /** 测试注入用。 */
   connect?: (url: string, apiKey: string) => WebSocketLike;
@@ -251,6 +253,7 @@ export function openBailianTtsStream(
       ...(options.volume !== undefined ? { volume: options.volume } : {}),
       ...(options.rate !== undefined ? { rate: options.rate } : {}),
       ...(options.pitch !== undefined ? { pitch: options.pitch } : {}),
+      ...(options.instruction ? { instruction: options.instruction } : {}),
     };
 
     try {

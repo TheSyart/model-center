@@ -21,6 +21,7 @@ import {
   audioFormatFromName,
   supportsBailianVocabulary,
   realtimeSiblingFor,
+  normalizeBailianSpeechParams,
 } from '../lib/vendors/bailian/audio.ts';
 import { buildFiletransInput } from '../lib/vendors/bailian/asr-filetrans.ts';
 import { streamingModeFor, ttsFailureHint } from '../lib/vendors/bailian/tts-websocket.ts';
@@ -417,4 +418,19 @@ test('a 411 names the one voice qwen-audio actually accepts', () => {
   const hint31 = ttsFailureHint('qwen-audio-3.1-tts-flash', undefined, '[cosyvoice:]Engine error [411]');
   assert.match(hint31, /voice-enrollment|克隆/);
   assert.equal(ttsFailureHint('cosyvoice-v3-flash', 'longanhuan', 'some other failure'), '');
+});
+
+test('speech parameters are clamped into the range upstream accepts', () => {
+  // OpenAI 的 speed 是 0.25–4.0，百炼只认 0.5–2.0。透传超范围的值上游只会回
+  // 一句看不懂的参数错误；钳到边界更接近调用方的本意。
+  assert.deepEqual(normalizeBailianSpeechParams({ speed: 4 }).rate, 2);
+  assert.deepEqual(normalizeBailianSpeechParams({ speed: 0.1 }).rate, 0.5);
+  assert.deepEqual(normalizeBailianSpeechParams({ speed: 1.25 }).rate, 1.25);
+  assert.deepEqual(normalizeBailianSpeechParams({ pitch: 9 }).pitch, 2);
+  assert.deepEqual(normalizeBailianSpeechParams({ volume: -5 }).volume, 0);
+  assert.deepEqual(normalizeBailianSpeechParams({ volume: 500 }).volume, 100);
+  // 不传就是不传，别替调用方编一个默认值出来。
+  assert.deepEqual(normalizeBailianSpeechParams({}), { rate: undefined, pitch: undefined, volume: undefined });
+  assert.equal(normalizeBailianSpeechParams({ speed: 'fast' }).rate, undefined);
+  assert.equal(normalizeBailianSpeechParams({ speed: NaN }).rate, undefined);
 });

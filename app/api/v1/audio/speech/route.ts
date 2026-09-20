@@ -13,6 +13,7 @@ import {
   bailianAudioRejectMessage,
   callBailianTts,
   canStreamBailianTts,
+  normalizeBailianSpeechParams,
   openBailianTtsAudioStream,
   realtimeSiblingFor,
 } from '@/lib/vendors/bailian/audio';
@@ -76,9 +77,12 @@ async function handlePost(req: NextRequest): Promise<Response> {
       ? 'audio'
       : null;
   const voice = typeof body.voice === 'string' ? body.voice.trim() : undefined;
-  const speed = typeof body.speed === 'number' ? body.speed : undefined;
+  // speed 是 OpenAI 标准字段；pitch / volume / instructions 是扩展，不传不影响兼容。
+  const { rate: speed, pitch, volume } = normalizeBailianSpeechParams(body);
+  const instructions = typeof body.instructions === 'string' ? body.instructions.trim() : undefined;
   // Qwen-TTS 的 language_type（如 Chinese / English）；其它族忽略。
   const languageType = typeof body.language === 'string' ? body.language.trim() : undefined;
+  const sampleRate = typeof body.sample_rate === 'number' ? body.sample_rate : undefined;
 
   /** 流式分支。到 openBailianTtsAudioStream 解析为止都还能变成 HTTP 4xx。 */
   async function streamSpeech({
@@ -103,7 +107,11 @@ async function handlePost(req: NextRequest): Promise<Response> {
         text,
         voice,
         format,
+        sampleRate,
         rate: speed,
+        pitch,
+        volume,
+        instructions,
         languageType,
         signal,
       });
@@ -123,7 +131,11 @@ async function handlePost(req: NextRequest): Promise<Response> {
         text,
         voice,
         format,
+        sampleRate,
         rate: speed,
+        pitch,
+        volume,
+        instructions,
         languageType,
         signal,
       });
@@ -203,7 +215,11 @@ async function handlePost(req: NextRequest): Promise<Response> {
         text,
         voice,
         format,
+        sampleRate,
         rate: speed,
+        pitch,
+        volume,
+        instructions,
         languageType,
         signal,
       });

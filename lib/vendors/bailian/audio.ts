@@ -477,6 +477,7 @@ export async function callBailianTts(
       volume: options.volume,
       rate: options.rate,
       pitch: options.pitch,
+      instruction: options.instructions,
       signal: options.signal,
       connect: options.connect,
     });
@@ -636,6 +637,29 @@ export async function tryHandleBailianSpecialChat(
   };
 }
 
+/**
+ * 把 OpenAI 面的合成参数折算成百炼的取值范围。
+ *
+ * **钳住而不是透传。** OpenAI 的 speed 是 0.25–4.0，百炼只认 0.5–2.0；
+ * 把 3.0 原样发过去，上游只会回一句看不懂的参数错误。钳到边界是「尽力照做」，
+ * 更接近调用方的本意，也比直接 400 有用。区间取自百炼官方文档。
+ */
+export function normalizeBailianSpeechParams(input: {
+  speed?: unknown;
+  pitch?: unknown;
+  volume?: unknown;
+}): { rate?: number; pitch?: number; volume?: number } {
+  const clamp = (value: unknown, min: number, max: number): number | undefined => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+    return Math.min(max, Math.max(min, value));
+  };
+  return {
+    rate: clamp(input.speed, 0.5, 2),
+    pitch: clamp(input.pitch, 0.5, 2),
+    volume: clamp(input.volume, 0, 100),
+  };
+}
+
 // ---------- 流式 TTS ----------
 
 export interface BailianTtsStreamHandle {
@@ -701,6 +725,7 @@ export async function openBailianTtsAudioStream(
     volume: options.volume,
     rate: options.rate,
     pitch: options.pitch,
+    instruction: options.instructions,
     signal: options.signal,
     connect: options.connect,
     maxBufferedBytes: options.maxBufferedBytes,
