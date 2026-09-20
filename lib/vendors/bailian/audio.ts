@@ -1,6 +1,7 @@
 import { isOfficialBailianCatalogProvider, normalizeBailianWorkspaceId } from './catalog.ts';
 import type { ProviderRow } from '../../services/provider.ts';
 import { UpstreamError } from '../../upstream-error.ts';
+import { synthesizeOverWebSocket } from './tts-websocket.ts';
 
 /**
  * 百炼语音接口。
@@ -36,12 +37,19 @@ export function isBailianTtsModel(modelId: string): boolean {
 }
 
 /**
- * 语音模型的三个族，各自的端点与请求体都不同。
- *  - `qwen-tts`：qwen-tts / qwen3-tts-*，多模态生成端点
- *  - `legacy-tts`：cosyvoice / sambert，SpeechSynthesizer 端点
- *  - `asr`：多模态生成端点，但请求体是 messages 结构
+ * 语音模型分四族，端点、协议、请求体各不相同，且没有交集——
+ * 把 qwen3-tts-flash 发去 WebSocket 会得到 `Model not found`，
+ * 把 sambert 发去 HTTP 会得到 `does not support http call`。
  */
-export type BailianAudioKind = 'qwen-tts' | 'legacy-tts' | 'asr';
+export type BailianAudioKind =
+  /** qwen-tts / qwen3-tts-*：HTTP 多模态生成端点。WebSocket 上查无此模型。 */
+  | 'qwen-tts'
+  /** sambert / cosyvoice / qwen-audio-*-tts：只能 WebSocket，HTTP 端点会拒。 */
+  | 'ws-tts'
+  /** 同步语音识别：HTTP 多模态生成端点。 */
+  | 'asr'
+  /** 录音文件转写：HTTP 异步提交 + 轮询。 */
+  | 'asr-filetrans';
 
 export type BailianAudioRoute =
   | { supported: true; kind: BailianAudioKind }
@@ -56,15 +64,14 @@ export function resolveBailianAudioRoute(modelId: string): BailianAudioRoute {
     return { supported: false, reason: '实时语音模型只提供 WebSocket 接口，网关的 HTTP 面无法承载' };
   }
 
-  // 录音文件转写走 /api/v1/services/audio/asr/transcription 的异步提交 + 轮询，
-  // 与这里的同步调用是两套流程，没实现就别把请求发到错的端点上。
-  if (lower.includes('filetrans')) {
-    return { supported: false, reason: '录音文件转写是异步接口（提交后轮询），网关暂未实现' };
-  }
-
+  if (lower.includes('filetrans')) return { supported: true, kind: 'asr-filetrans' };
   if (isBailianAsrModel(modelId)) return { supported: true, kind: 'asr' };
-  if (lower.includes('cosyvoice') || lower.includes('sambert')) {
-    return { supported: true, kind: 'legacy-tts' };
+
+  // 这三族只有 WebSocket。qwen-audio-*-tts 的名字里同时有 audio 和 tts，
+  // 判定顺序要放在 asr 之后（qwen-audio-*-asr-* 已经被上一行接走）。
+  if (lower.includes('cosyvoice') || lower.includes('sambert') ||
+      (lower.includes('qwen-audio') && lower.includes('tts'))) {
+    return { supported: true, kind: 'ws-tts' };
   }
   if (isBailianTtsModel(modelId)) return { supported: true, kind: 'qwen-tts' };
 
@@ -74,7 +81,11 @@ export function resolveBailianAudioRoute(modelId: string): BailianAudioRoute {
 /** 准入判定：服务商必须是百炼官方目录，且模型确实能走 HTTP。 */
 export function acceptsBailianAsr(target: { provider: ProviderRow; modelId: string }): boolean {
   const route = resolveBailianAudioRoute(target.modelId);
-  return isOfficialBailianCatalogProvider(target.provider) && route.supported && route.kind === 'asr';
+  return (
+    isOfficialBailianCatalogProvider(target.provider) &&
+    route.supported &&
+    (route.kind === 'asr' || route.kind === 'asr-filetrans')
+  );
 }
 
 export function acceptsBailianTts(target: { provider: ProviderRow; modelId: string }): boolean {
@@ -82,7 +93,7 @@ export function acceptsBailianTts(target: { provider: ProviderRow; modelId: stri
   return (
     isOfficialBailianCatalogProvider(target.provider) &&
     route.supported &&
-    (route.kind === 'qwen-tts' || route.kind === 'legacy-tts')
+    (route.kind === 'qwen-tts' || route.kind === 'ws-tts')
   );
 }
 
@@ -98,7 +109,7 @@ export function acceptsBailianMultimodalAudio(target: { provider: ProviderRow; m
 
 export function acceptsBailianSpeechSynthesizer(target: { provider: ProviderRow; modelId: string }): boolean {
   const route = resolveBailianAudioRoute(target.modelId);
-  return isOfficialBailianCatalogProvider(target.provider) && route.supported && route.kind === 'legacy-tts';
+  return isOfficialBailianCatalogProvider(target.provider) && route.supported && route.kind === 'ws-tts';
 }
 
 /** 被拒时给客户端的说明：说清是服务商不对，还是这个模型走不了 HTTP。 */
@@ -235,6 +246,8 @@ export interface BailianTtsOptions {
   sampleRate?: number;
   /** Qwen-TTS 专用：如 Chinese / English。 */
   languageType?: string;
+  /** WebSocket 连接注入，测试用。 */
+  connect?: (url: string, apiKey: string) => import('./tts-websocket.ts').WebSocketLike;
   volume?: number;
   rate?: number;
   pitch?: number;
@@ -264,16 +277,37 @@ const URL_CONTENT_TYPES: Record<string, string> = {
   pcm: 'audio/L16',
 };
 
+/** WebSocket 直接给字节，没有 URL 可推断类型，按请求的格式定。 */
+const WS_CONTENT_TYPES: Record<string, string> = {
+  wav: 'audio/wav',
+  mp3: 'audio/mpeg',
+  pcm: 'audio/L16',
+};
+
 function contentTypeFromUrl(url: string): string | undefined {
   const ext = new URL(url).pathname.split('.').pop()?.toLowerCase();
   return ext ? URL_CONTENT_TYPES[ext] : undefined;
 }
 
-/** 音色默认值按族分——两族的音色表互不通用，串了会被上游拒。 */
-const DEFAULT_VOICE: Record<'qwen-tts' | 'legacy-tts', string> = {
-  'qwen-tts': 'Cherry',
-  'legacy-tts': 'longxiaochun_v3',
-};
+/**
+ * 音色默认值。
+ *
+ * **音色表按模型版本分，串了会被拒**——上游用 `Engine return error code: 418`
+ * 表示「这个音色不属于这个模型」。实测：cosyvoice-v2 只认 `*_v2`，
+ * cosyvoice-v3-flash 认 `longanhuan` 这类无后缀名，两边互换都 418。
+ *
+ * Sambert 没有 voice 参数（模型名本身就是音色），所以不在表里。
+ */
+function defaultVoiceFor(modelId: string): string | undefined {
+  const lower = modelId.toLowerCase();
+  if (lower.startsWith('sambert')) return undefined;
+  if (lower.startsWith('cosyvoice')) {
+    // v1/v2 用带 _v2 后缀的一套，v3 之后用无后缀的一套。
+    return /cosyvoice-v[12]\b/.test(lower) ? 'longxiaochun_v2' : 'longanhuan';
+  }
+  if (lower.includes('qwen-audio')) return 'longanlingxi';
+  return 'Cherry';
+}
 
 export async function callBailianTts(
   provider: ProviderRow,
@@ -283,39 +317,46 @@ export async function callBailianTts(
 ): Promise<BailianTtsResponse> {
   const route = resolveBailianAudioRoute(options.model);
   if (!route.supported) throw new UpstreamError(400, `模型 "${options.model}" 不可用：${route.reason}`);
-  const kind = route.kind === 'asr' ? 'qwen-tts' : route.kind;
-  const voice = options.voice ?? DEFAULT_VOICE[kind];
+  const voice = options.voice ?? defaultVoiceFor(options.model);
 
-  const { url, body } =
-    kind === 'qwen-tts'
-      ? {
-          url: getBailianMultimodalEndpoint(provider.workspaceId),
-          body: {
-            model: options.model,
-            input: {
-              text: options.text,
-              voice,
-              ...(options.languageType ? { language_type: options.languageType } : {}),
-            },
-          },
-        }
-      : {
-          url: getBailianSpeechSynthesizerEndpoint(provider.workspaceId),
-          body: {
-            model: options.model,
-            input: {
-              text: options.text,
-              voice,
-              format: options.format ?? 'wav',
-              sample_rate: options.sampleRate ?? 24000,
-              ...(options.volume !== undefined ? { volume: options.volume } : {}),
-              ...(options.rate !== undefined ? { rate: options.rate } : {}),
-              ...(options.pitch !== undefined ? { pitch: options.pitch } : {}),
-            },
-          },
-        };
+  // 只能走 WebSocket 的三族：直接拿到音频字节，没有中间的下载 URL。
+  if (route.kind === 'ws-tts') {
+    const result = await synthesizeOverWebSocket(provider.workspaceId, apiKey, {
+      model: options.model,
+      text: options.text,
+      voice,
+      format: options.format === 'opus' ? 'mp3' : options.format,
+      sampleRate: options.sampleRate,
+      volume: options.volume,
+      rate: options.rate,
+      pitch: options.pitch,
+      signal: options.signal,
+      connect: options.connect,
+    });
+    return {
+      audioBuffer: result.audio,
+      contentType: WS_CONTENT_TYPES[options.format === 'opus' ? 'mp3' : (options.format ?? 'mp3')],
+      characters: result.characters,
+      requestId: result.requestId,
+      raw: { via: 'websocket', bytes: result.audio.length },
+    };
+  }
 
-  const json = await post(url, apiKey, body, 'TTS', options.signal, fetchImpl);
+  const json = await post(
+    getBailianMultimodalEndpoint(provider.workspaceId),
+    apiKey,
+    {
+      model: options.model,
+      input: {
+        text: options.text,
+        voice,
+        ...(options.languageType ? { language_type: options.languageType } : {}),
+      },
+    },
+    'TTS',
+    options.signal,
+    fetchImpl,
+  );
   const audioUrl = json.output?.audio?.url;
   const characters = json.usage?.characters;
 
@@ -355,6 +396,14 @@ export async function tryHandleBailianSpecialChat(
   }
 
   const messages = Array.isArray(rawBody.messages) ? rawBody.messages : [];
+
+  // 录音文件转写只收公网 URL，对话入口拿不到可靠的 URL，明确拒绝而不是硬凑。
+  if (route.kind === 'asr-filetrans') {
+    throw new UpstreamError(
+      400,
+      `模型 "${modelId}" 是录音文件转写模型，只接受公网可访问的音频 URL；请改用 POST /v1/audio/transcriptions 并传 file_url 字段。`,
+    );
+  }
 
   if (route.kind === 'asr') {
     let audioDataUriOrUrl = '';

@@ -16,6 +16,7 @@ import {
   callBailianAsr,
   callBailianTts,
 } from '../lib/vendors/bailian/audio.ts';
+import { streamingModeFor } from '../lib/vendors/bailian/tts-websocket.ts';
 
 test('bailianCatalogUrl serializes query parameters correctly according to official docs', () => {
   const filter: BailianCatalogFilterOptions = {
@@ -94,31 +95,35 @@ test('dashscope audio endpoints calculate workspace domain or fallback domain co
 
 // 以下契约于 2026-09-20 用真实密钥逐条实测，详见 docs/vendor-apis/bailian.md。
 
-test('audio models route to the endpoint their family actually uses', () => {
-  // Qwen-TTS 在多模态生成端点上；发到 SpeechSynthesizer 会被回 url error。
+test('audio models route to the endpoint and protocol their family actually uses', () => {
+  // Qwen-TTS 只有 HTTP：WebSocket 上查无此模型（Model not found）。
   for (const id of ['qwen-tts', 'qwen-tts-latest', 'qwen3-tts-flash', 'qwen3-tts-instruct-flash']) {
     assert.deepEqual(resolveBailianAudioRoute(id), { supported: true, kind: 'qwen-tts' }, id);
   }
-  // CosyVoice / Sambert 才在 SpeechSynthesizer。
-  for (const id of ['cosyvoice-v3.5-flash', 'cosyvoice-v3.5-plus', 'sambert-zhichu-v1']) {
-    assert.deepEqual(resolveBailianAudioRoute(id), { supported: true, kind: 'legacy-tts' }, id);
+  // 这三族反过来只有 WebSocket：HTTP 端点回 does not support http call。
+  for (const id of ['cosyvoice-v2', 'cosyvoice-v3.5-flash', 'sambert-zhichu-v1', 'qwen-audio-3.0-tts-flash']) {
+    assert.deepEqual(resolveBailianAudioRoute(id), { supported: true, kind: 'ws-tts' }, id);
   }
   assert.deepEqual(resolveBailianAudioRoute('qwen3-asr-flash-2026-02-10'), { supported: true, kind: 'asr' });
+  assert.deepEqual(resolveBailianAudioRoute('qwen3-asr-flash-filetrans'), { supported: true, kind: 'asr-filetrans' });
+  // qwen-audio-*-asr-* 名字里同时有 audio 和 tts 之外的关键词，不能被 ws-tts 抢走。
+  assert.deepEqual(resolveBailianAudioRoute('qwen-audio-3.0-asr-flash'), { supported: true, kind: 'asr' });
 });
 
-test('models that HTTP cannot serve are refused locally with a reason', () => {
-  // 实测回 `current user api does not support http call`，没必要白跑一趟上游。
+test('realtime models are refused locally with a reason', () => {
+  // 实测：实时模型在同步推理的 WebSocket 端点上也是 Model not found，它们用另一套实时协议。
   const realtime = resolveBailianAudioRoute('qwen3-tts-flash-realtime');
   assert.equal(realtime.supported, false);
   assert.match(realtime.supported === false ? realtime.reason : '', /WebSocket/);
-
-  // 录音文件转写是另一套异步接口。
-  const filetrans = resolveBailianAudioRoute('qwen3-asr-flash-filetrans');
-  assert.equal(filetrans.supported, false);
-  assert.match(filetrans.supported === false ? filetrans.reason : '', /异步/);
-
-  // realtime 判定优先于 asr/tts 归类，否则会被当成普通模型发出去。
   assert.equal(resolveBailianAudioRoute('qwen3-asr-flash-realtime-2026-02-10').supported, false);
+});
+
+test('streaming mode differs by family, and getting it wrong is what upstream rejects', () => {
+  // Sambert 不支持流式输入：文本必须随 run-task 一次发完，用 duplex 会得到
+  // Request text is invalid!
+  assert.equal(streamingModeFor('sambert-zhichu-v1'), 'out');
+  assert.equal(streamingModeFor('cosyvoice-v2'), 'duplex');
+  assert.equal(streamingModeFor('qwen-audio-3.0-tts-flash'), 'duplex');
 });
 
 test('ASR sends content[].audio, not the OpenAI input_audio shape', async () => {
@@ -153,10 +158,10 @@ test('ASR sends content[].audio, not the OpenAI input_audio shape', async () => 
   assert.equal(result.seconds, 2);
 });
 
-test('Qwen-TTS and CosyVoice get different endpoints, bodies and default voices', async () => {
+test('Qwen-TTS goes over HTTP with its own voice table', async () => {
   const calls: any[] = [];
   const fetchImpl = (async (url: string, init?: any) => {
-    // 音频下载那一跳也带 init（里面只有 signal），所以按 method 区分，不能只看 init 有没有。
+    // 音频下载那一跳也带 init（里面只有 signal），所以按 method 区分。
     if (init?.method !== 'POST') {
       return new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'Content-Type': 'audio/wav' } });
     }
@@ -167,18 +172,63 @@ test('Qwen-TTS and CosyVoice get different endpoints, bodies and default voices'
     );
   }) as unknown as typeof fetch;
 
-  const provider = { workspaceId: 'ws-test' } as never;
-  await callBailianTts(provider, 'sk-test', { model: 'qwen3-tts-flash', text: '你好' }, fetchImpl);
-  await callBailianTts(provider, 'sk-test', { model: 'cosyvoice-v3.5-flash', text: '你好' }, fetchImpl);
+  await callBailianTts({ workspaceId: 'ws-test' } as never, 'sk-test', { model: 'qwen3-tts-flash', text: '你好' }, fetchImpl);
 
   assert.match(calls[0].url, /multimodal-generation\/generation$/);
-  // Cherry 是 Qwen-TTS 的音色；传 CosyVoice 的 longxiaochun_v3 会被回 Invalid voice specified。
+  // Cherry 是 Qwen-TTS 的音色；传 CosyVoice 的 longxiaochun_v2 会被回 418。
   assert.equal(calls[0].body.input.voice, 'Cherry');
   assert.equal(calls[0].body.input.format, undefined, 'Qwen-TTS 的请求体不收 format');
+});
 
-  assert.match(calls[1].url, /audio\/tts\/SpeechSynthesizer$/);
-  assert.equal(calls[1].body.input.voice, 'longxiaochun_v3');
-  assert.equal(calls[1].body.input.format, 'wav');
+test('WebSocket-only families synthesize over the socket, with per-version voices', async () => {
+  const sent: any[] = [];
+  const connect = () => {
+    const listeners: Record<string, ((e: any) => void)[]> = {};
+    const socket = {
+      send: (data: string) => {
+        const msg = JSON.parse(data);
+        sent.push(msg);
+        if (msg.header.action === 'run-task') {
+          queueMicrotask(() => listeners.message?.forEach((f) => f({ data: JSON.stringify({ header: { event: 'task-started' } }) })));
+        }
+        if (msg.header.action === 'finish-task' || (msg.header.action === 'run-task' && msg.header.streaming === 'out')) {
+          queueMicrotask(() => {
+            listeners.message?.forEach((f) => f({ data: new Uint8Array([9, 9, 9]).buffer }));
+            listeners.message?.forEach((f) =>
+              f({ data: JSON.stringify({ header: { event: 'task-finished' }, payload: { usage: { characters: 4 } } }) }),
+            );
+          });
+        }
+      },
+      close: () => {},
+      addEventListener: (type: string, fn: (e: any) => void) => {
+        (listeners[type] ??= []).push(fn);
+        if (type === 'open') queueMicrotask(() => fn({}));
+      },
+    };
+    return socket as never;
+  };
+
+  const provider = { workspaceId: 'ws-test' } as never;
+  const cosy = await callBailianTts(provider, 'sk-test', { model: 'cosyvoice-v2', text: '你好', connect });
+  assert.equal(cosy.audioBuffer?.length, 3);
+  assert.equal(cosy.characters, 4);
+  // v1/v2 用 _v2 后缀那套音色，v3 起用无后缀那套；互换会被回 418。
+  assert.equal(sent[0].payload.parameters.voice, 'longxiaochun_v2');
+  assert.equal(sent[0].header.streaming, 'duplex');
+
+  sent.length = 0;
+  await callBailianTts(provider, 'sk-test', { model: 'cosyvoice-v3-flash', text: '你好', connect });
+  assert.equal(sent[0].payload.parameters.voice, 'longanhuan');
+
+  sent.length = 0;
+  await callBailianTts(provider, 'sk-test', { model: 'sambert-zhichu-v1', text: '你好', connect });
+  assert.equal(sent[0].header.streaming, 'out');
+  // Sambert 没有 voice 参数——模型名本身就是音色。
+  assert.equal(sent[0].payload.parameters.voice, undefined);
+  // 文本必须随 run-task 一次发完，不能等 continue-task。
+  assert.equal(sent[0].payload.input.text, '你好');
+  assert.ok(!sent.some((m) => m.header.action === 'continue-task'));
 });
 
 test('TTS reports the audio type it actually received, not the one requested', async () => {

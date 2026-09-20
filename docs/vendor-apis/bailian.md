@@ -103,55 +103,114 @@
 
 ## 语音接口（2026-09-20 用真实密钥逐族实测）
 
-**端点按模型族分，不能混用。** 打错端点上游回 `url error, please check url`。
-本项目的路由在 `lib/vendors/bailian/audio.ts` 的 `resolveBailianAudioRoute`。
+**四族，四套协议，没有交集。** 判错了族上游会直接拒：走错 HTTP 端点回
+`url error, please check url`，把只有 WebSocket 的模型发去 HTTP 回
+`current user api does not support http call`，把只有 HTTP 的模型发去 WebSocket 回
+`Model not found`。本项目的路由在 `lib/vendors/bailian/audio.ts` 的
+`resolveBailianAudioRoute`。
 
-| 模型族 | 端点 | 请求体 | 实测 |
+| 族 | 模型 | 协议与端点 | 状态 |
 |---|---|---|---|
-| **Qwen-TTS**：`qwen-tts`、`qwen-tts-latest`、`qwen3-tts-flash`、`qwen3-tts-instruct-flash` | `/api/v1/services/aigc/multimodal-generation/generation` | `{model, input:{text, voice, language_type?}}` | ✅ 已跑通 |
-| **同步 ASR**：`qwen3-asr-flash` | 同上 | `{model, input:{messages:[{role,content:[{audio}]}]}}` | ✅ 已跑通 |
-| **CosyVoice / Sambert** | `/api/v1/services/audio/tts/SpeechSynthesizer` | `{model, input:{text, voice, format, sample_rate}}` | ❌ 见下 |
+| **Qwen-TTS** | `qwen-tts`、`qwen-tts-latest`、`qwen3-tts-flash`、`qwen3-tts-instruct-flash` | HTTP `POST /api/v1/services/aigc/multimodal-generation/generation` | ✅ 已跑通 |
+| **同步 ASR** | `qwen3-asr-flash` | 同上 | ✅ 已跑通 |
+| **WebSocket TTS** | `sambert-*`、`cosyvoice-*`、`qwen-audio-*-tts` | `wss://{ws}.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference` | ✅ 已跑通（v3.5 除外） |
+| **录音文件转写** | `*-filetrans` | HTTP 异步提交 + 轮询 | ✅ 已跑通 |
 
-### 两个反直觉的点
+### Qwen-TTS（HTTP）
 
-1. **Qwen-TTS 不在 `SpeechSynthesizer` 上**，而在多模态生成端点上——和 ASR 同一个端点。
-   这是此前实现全线失败的根因。
-2. **音色表不通用。** 给 Qwen-TTS 传 CosyVoice 的 `longxiaochun_v3` 会被拒：
-   `Invalid voice specified, the requested voice does not exist or is not licensed for use`。
-   实测可用的默认值：Qwen-TTS → `Cherry`；CosyVoice → `longxiaochun_v3`。
-
-### ASR 的请求体（踩过的坑）
-
-正确形状是 `input.messages[].content[].audio`，**不是** OpenAI 的
-`{type:'input_audio', input_audio:{data}}`。后者发到这个端点会被拒：
-
-```
-Input should be a valid string: input.messages.0.content.str
-  & Input should be a valid string: input.messages.0.content.list[union[str,…
+```json
+{ "model": "qwen3-tts-flash",
+  "input": { "text": "…", "voice": "Cherry", "language_type": "Chinese" } }
 ```
 
-那个形状属于 `/compatible-mode/v1/chat/completions`，两条路都能用但请求体不同，别混。
+响应 `output.audio.url`（24 小时有效），`usage.characters`。
+请求体**不收 `format`**，实测固定返回 WAV——所以响应头要按实际拿到的音频定，不能照抄
+客户端请求的 `response_format`。
 
-音频来源 **base64 data URI 与公网 URL 都实测可用**。响应在
+### 同步 ASR（HTTP）
+
+```json
+{ "model": "qwen3-asr-flash",
+  "input": { "messages": [{ "role": "user", "content": [{ "audio": "<data URI 或公网 URL>" }] }] } }
+```
+
+**不是** OpenAI 的 `{type:'input_audio', input_audio:{data}}`——那个形状属于
+`/compatible-mode/v1/chat/completions`，发到这个端点会被拒：
+`Input should be a valid string: input.messages.0.content.str`。
+
+base64 data URI 与公网 URL 都实测可用。响应在
 `output.choices[0].message.content[0].text`；无语音内容时 `content` 是空数组。
 
-端到端验证：用 `qwen3-tts-flash` 合成「模型中心语音链路验收通过」，下载后喂给
-`qwen3-asr-flash`，原样读回，文字完全一致。
+### WebSocket TTS
 
-### HTTP 走不通的几类（已本地拦截，不再白跑上游）
+握手时带 `Authorization: Bearer {key}`。消息序列：
 
-| 模型 | 上游回应 | 本项目处理 |
+```json
+// run-task
+{ "header": { "action": "run-task", "task_id": "<uuid>", "streaming": "duplex" },
+  "payload": { "task_group": "audio", "task": "tts", "function": "SpeechSynthesizer",
+    "model": "cosyvoice-v2",
+    "parameters": { "text_type": "PlainText", "voice": "longxiaochun_v2",
+                    "format": "mp3", "sample_rate": 22050 },
+    "input": {} } }
+// task-started 之后：continue-task 送文本，再 finish-task 收尾
+```
+
+音频从**二进制帧**回来，控制事件是 JSON：`task-started` / `result-generated` /
+`task-finished` / `task-failed`。`finish-task` 不能省，否则尾部合成不出来。
+
+**Sambert 是例外**：`streaming` 用 `"out"` 而不是 `"duplex"`，不支持流式输入，
+文本必须随 run-task 一次发完，**也没有 `voice` 参数**——模型名本身就是音色。
+用错模式的表现是 `Request text is invalid!`。
+
+**音色表按模型版本分，互换必被拒。** 上游用 `Engine return error code: 418` 表示
+「这个音色不属于这个模型」。实测：
+
+| 模型 | 可用音色 | 结果 |
 |---|---|---|
-| `*-realtime`（如 `qwen3-tts-flash-realtime`） | `current user api does not support http call` | 本地 400，说明只有 WebSocket |
-| `*-filetrans` | —— | 本地 400；录音文件转写走 `/api/v1/services/audio/asr/transcription` 的异步提交+轮询，未实现 |
-| `sambert-*` | `current user api does not support http call` | 放行到上游，原样回传其错误 |
-| `cosyvoice-v3.5-*` | `[cosyvoice:]Engine return error code: 418` | 放行到上游，原样回传其错误 |
-| `qwen-audio-3.0-asr-flash` | `400 {}`（空错误体） | 放行到上游，原样回传其错误 |
+| `cosyvoice-v2` | `longxiaochun_v2` | ✅ |
+| `cosyvoice-v2` | `longxiaochun_v3` / `Cherry` | ❌ 418 |
+| `cosyvoice-v3-flash` | `longanhuan`、`longanyang`、`longanhuan_v3`、`longfeifei_v3`、`longhuhu_v3`、`longxiaochun_v3` | ✅ 全部可用 |
+| `cosyvoice-v3.5-flash/plus` | 上述全部 + `Cherry` + 不传 | ❌ 全部 418 |
+| `sambert-*` | 不传 | ✅ |
+| `qwen-audio-3.0-tts-flash/plus` | `longanlingxi` | ✅ |
 
-> **未核实**：CosyVoice 的 418 与 `qwen-audio-3.0-asr-flash` 的空 400 是什么原因。
-> 端点是官方文档指定的那个（发到别处会回 `url error`，这条已排除），换音色、换
-> `cosyvoice-v3.5-plus`、把参数挪进 `parameters` 都试过，报错不变。疑似模型未开通
-> 或该 workspace 无权限，但**没有证据**，别照猜去改。
+`cosyvoice-v3.5` 系列的模型简介写着「对**声音克隆和声音设计**的语音合成效果进行
+全面升级」，而所有预置音色都 418——**推断**它需要先创建克隆音色再用其 ID 作 voice。
+**未核实**：没有实际创建过克隆音色验证。网关在 418 时会把这条推断作为提示附在错误里。
+
+`qwen-audio-3.1-tts-flash` 回 `Engine error [411]: TTS speak operation failed`，
+**未核实**原因。
+
+### 录音文件转写（异步）
+
+```
+POST /api/v1/services/audio/asr/transcription
+     X-DashScope-Async: enable          ← 缺这个头会被当同步调用
+     { "model": "qwen3-asr-flash-filetrans", "input": { "file_url": "…" } }
+  → { "output": { "task_id": "…" } }
+
+GET  /api/v1/tasks/{task_id}
+  → { "output": { "task_status": "SUCCEEDED",
+                  "result": { "transcription_url": "…" } } }
+
+GET  {transcription_url}   ← 文本在这里，不在轮询响应里
+  → { "transcripts": [{ "channel_id": 0, "text": "…", "sentences": [...] }] }
+```
+
+`task_status` 取值 `SUCCEEDED` / `FAILED` / 运行中。结果 URL 24 小时有效。
+**只接受公网可访问的 URL，不收 base64**——这是接口本身的限制。网关没有对象存储
+替客户端上传，所以 `/v1/audio/transcriptions` 对这类模型要求传 `file_url` 字段
+而不是 `file`。
+
+### 仍然不可用的
+
+| 模型 | 上游回应 | 处理 |
+|---|---|---|
+| `*-realtime` | WebSocket 端点上 `Model not found` | 本地 400；它们用另一套实时协议，网关未实现 |
+| `cosyvoice-v3.5-*` | `418` | 放行到上游，附上音色不匹配的提示 |
+| `qwen-audio-3.1-tts-flash` | `Engine error [411]` | 放行到上游，原样回传 |
+| `qwen-audio-3.0-asr-flash` | `400 {}`（空错误体） | 放行到上游，原样回传 |
 
 ### 计价口径：语音不是按 token 计价
 
@@ -164,7 +223,7 @@ Input should be a valid string: input.messages.0.content.str
 | `qwen-tts` | `text_input_token` ¥1.6/百万 + `qwen_tts_multi_output_token` ¥10/百万 |
 
 `models` 的扁平价列是「每百万 tokens」口径，装不下前两种，所以为空；阶梯原文完整
-保存在 `pricing_tiers_json` 里。上游在响应里给的是 `usage.characters`（TTS）与
+保存在 `pricing_tiers_json` 里。上游给的是 `usage.characters`（TTS）与
 `usage.seconds` / `audio_tokens`（ASR），都不是扁平列能直接相乘的东西，因此日志的
 `usage` 留空、成本显示「—」，而不是编一个对不上账的数字。
 
