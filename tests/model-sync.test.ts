@@ -20,8 +20,13 @@ function database() {
       alias TEXT, display_name TEXT, enabled INTEGER NOT NULL DEFAULT 1,
       input_price REAL, output_price REAL, cache_read_price REAL, cache_write_price REAL,
       pricing_source TEXT, pricing_source_ref TEXT, pricing_synced_at INTEGER,
+      pricing_tiers_json TEXT, pricing_currency TEXT,
       context_window INTEGER, synced INTEGER NOT NULL DEFAULT 0,
+      capabilities_json TEXT, reasoning_json TEXT,
       UNIQUE(provider_id, model_id)
+    );
+    CREATE TABLE route_aliases (
+      id TEXT PRIMARY KEY, alias TEXT, targets TEXT, enabled INTEGER NOT NULL DEFAULT 1
     );
   `);
   sqlite.prepare(`INSERT INTO providers
@@ -412,5 +417,263 @@ test('provider model insertion and endpoint catalog replacement roll back togeth
   assert.equal((sqlite.prepare('SELECT COUNT(*) AS n FROM models').get() as { n: number }).n, 0);
   assert.deepEqual(sqlite.prepare('SELECT model_id FROM provider_endpoint_models WHERE endpoint_id = ?').all(legacyId), [{ model_id: 'old-model' }]);
   assert.deepEqual(sqlite.prepare('SELECT model_catalog_complete, models_observed_at FROM provider_endpoints WHERE id = ?').get(legacyId), { model_catalog_complete: 1, models_observed_at: 101 });
+  sqlite.close();
+});
+
+test('Bailian official prices are kept verbatim without inventing a USD unit', async () => {
+  const { sqlite } = database();
+  const prices = [
+    { type: 'input_token', range_name: 'Default', price: 2 },
+    { type: 'input_token', range_name: '32k<Input<=128k', price: 3 },
+    { type: 'output_token', range_name: 'Default', price: 8 },
+    // 未识别的计费项必须原样留存，不得映射也不得丢弃。
+    { type: 'image_number', range_name: 'Default', price: 0.02 },
+  ];
+  const fetchImpl = (async () => Response.json({
+    success: true,
+    output: {
+      total: 1,
+      page_no: 1,
+      page_size: 20,
+      models: [{
+        model: 'qwen3-max',
+        name: '通义千问3-Max',
+        description: '旗舰文本模型',
+        provider: 'qwen',
+        inference_provider: 'aliyun-bailian',
+        published_time: '2026-01-01',
+        capabilities: ['TG', 'Reasoning'],
+        features: ['function-calling'],
+        inference_metadata: { request_modality: ['Text', 'Image'], response_modality: ['Text'] },
+        model_info: {
+          context_window: 131072,
+          max_input_tokens: 129024,
+          max_output_tokens: 32768,
+          max_reasoning_tokens: 16384,
+        },
+        prices,
+      }],
+    },
+    request_id: 'request-prices',
+  })) as typeof fetch;
+
+  await syncProviderModels(bailianProvider as any, 'key', dependencies(sqlite, fetchImpl));
+
+  const row = sqlite.prepare(`SELECT input_price, output_price, pricing_source, pricing_currency,
+    pricing_tiers_json, capabilities_json FROM models WHERE model_id = 'qwen3-max'`).get() as Record<string, unknown>;
+
+  // 全部阶梯与非 Token 项原样保留。
+  assert.deepEqual(JSON.parse(String(row.pricing_tiers_json)), prices);
+  assert.equal(row.pricing_source, 'aliyun-modelstudio');
+  // 官方响应没有币种，也没说明单价的计量单位，所以扁平的「美元/百万 token」列必须留空。
+  assert.equal(row.pricing_currency, null);
+  assert.equal(row.input_price, null);
+  assert.equal(row.output_price, null);
+
+  const caps = JSON.parse(String(row.capabilities_json));
+  assert.deepEqual(caps.modalities, ['Text', 'Image']);
+  assert.deepEqual(caps.responseModalities, ['Text']);
+  assert.equal(caps.maxInputTokens, 129024);
+  assert.equal(caps.maxOutputTokens, 32768);
+  assert.equal(caps.maxReasoningTokens, 16384);
+  assert.equal(caps.description, '旗舰文本模型');
+  assert.equal(caps.inferenceProvider, 'aliyun-bailian');
+  sqlite.close();
+});
+
+test('Bailian real-shape prices land as per-million CNY unit prices', async () => {
+  const { sqlite } = database();
+  // 2026-09-19 用真实密钥核对过的结构：档位 → 计费项两层，带 price_unit 与 time_band。
+  const prices = [{
+    range_name: 'Default',
+    prices: [
+      { type: 'input_token', price: '2.1', price_unit: '每百万tokens', price_name: '输入', time_band: 'standard' },
+      { type: 'output_token', price: '8.4', price_unit: '每百万tokens', price_name: '输出', time_band: 'standard' },
+      { type: 'input_token_cache', price: '0.42', price_unit: '每百万tokens', price_name: '输入（缓存命中）', time_band: 'standard' },
+      { type: 'input_token', price: '1.05', price_unit: '每百万tokens', price_name: '输入', time_band: 'discount' },
+    ],
+  }];
+  const fetchImpl = (async () => Response.json({
+    success: true,
+    output: { total: 1, page_no: 1, page_size: 20, models: [{ model: 'MiniMax-M2.1', name: 'MiniMax-M2.1', prices }] },
+    request_id: 'r',
+  })) as typeof fetch;
+
+  await syncProviderModels(bailianProvider as any, 'key', dependencies(sqlite, fetchImpl));
+
+  const row = sqlite.prepare(`SELECT input_price, output_price, cache_read_price, pricing_currency,
+    pricing_source, pricing_tiers_json FROM models WHERE model_id = 'MiniMax-M2.1'`).get() as Record<string, unknown>;
+  assert.equal(row.input_price, 2.1);
+  assert.equal(row.output_price, 8.4);
+  assert.equal(row.cache_read_price, 0.42);   // input_token_cache 是官方的缓存读取 type
+  assert.equal(row.pricing_currency, 'CNY');
+  assert.equal(row.pricing_source, 'aliyun-modelstudio');
+  // 优惠时段单价不能当常价。
+  assert.notEqual(row.input_price, 1.05);
+  // 原始阶梯仍然逐字留存。
+  assert.deepEqual(JSON.parse(String(row.pricing_tiers_json)), prices);
+  sqlite.close();
+});
+
+test('Bailian multi-band pricing keeps every tier and refuses a flat unit price', async () => {
+  const { sqlite } = database();
+  const prices = [
+    { range_name: 'Default', prices: [{ type: 'input_token', price: '2', price_unit: '每百万tokens', time_band: 'standard' }] },
+    { range_name: '32k<Input<=128k', prices: [{ type: 'input_token', price: '4', price_unit: '每百万tokens', time_band: 'standard' }] },
+  ];
+  const fetchImpl = (async () => Response.json({
+    success: true,
+    output: { total: 1, page_no: 1, page_size: 20, models: [{ model: 'qwen-long', name: 'qwen-long', prices }] },
+    request_id: 'r',
+  })) as typeof fetch;
+
+  await syncProviderModels(bailianProvider as any, 'key', dependencies(sqlite, fetchImpl));
+
+  const row = sqlite.prepare("SELECT input_price, pricing_tiers_json FROM models WHERE model_id = 'qwen-long'").get() as Record<string, unknown>;
+  // 一次请求落在哪一档取决于实际用量，取任一档冒充固定单价都是错的。
+  assert.equal(row.input_price, null);
+  assert.deepEqual(JSON.parse(String(row.pricing_tiers_json)), prices);
+  sqlite.close();
+});
+
+test('filtered sync prunes to the filter result but protects manual and aliased models', async () => {
+  const { sqlite } = database();
+  const seed = sqlite.prepare(
+    "INSERT INTO models (id, provider_id, model_id, enabled, synced) VALUES (?, 'provider-1', ?, 1, ?)",
+  );
+  seed.run('keep-upstream', 'deepseek-r1', 1);   // 在筛选结果里
+  seed.run('drop-me', 'qwen3-max', 1);           // 已同步但不在筛选结果里 → 删
+  seed.run('manual-row', 'my-custom-model', 0);  // 手动添加 → 保留
+  seed.run('aliased-row', 'qwen3-plus', 1);      // 被别名引用 → 保留
+  sqlite.prepare("INSERT INTO route_aliases (id, alias, targets) VALUES ('a1', 'best', ?)")
+    .run(JSON.stringify([{ provider_id: 'provider-1', model_id: 'qwen3-plus' }]));
+
+  const fetchImpl = (async () => Response.json({
+    success: true,
+    output: { total: 1, page_no: 1, page_size: 20, models: [{ model: 'deepseek-r1', name: 'DeepSeek R1' }] },
+    request_id: 'r',
+  })) as typeof fetch;
+
+  const result = await syncProviderModels(
+    bailianProvider as any, 'key', dependencies(sqlite, fetchImpl),
+    { providers: ['deepseek'] }, { prune: true },
+  );
+
+  assert.equal(result.removed, 1);
+  assert.equal(result.kept_manual, 1);
+  assert.equal(result.kept_referenced, 1);
+  assert.deepEqual(
+    sqlite.prepare('SELECT model_id FROM models ORDER BY model_id').all().map((r: any) => r.model_id),
+    ['deepseek-r1', 'my-custom-model', 'qwen3-plus'],
+  );
+  sqlite.close();
+});
+
+test('sync without prune never deletes, it only counts', async () => {
+  const { sqlite } = database();
+  sqlite.prepare("INSERT INTO models (id, provider_id, model_id, enabled, synced) VALUES ('x', 'provider-1', 'qwen3-max', 1, 1)").run();
+  const fetchImpl = (async () => Response.json({
+    success: true,
+    output: { total: 1, page_no: 1, page_size: 20, models: [{ model: 'deepseek-r1', name: 'DeepSeek R1' }] },
+    request_id: 'r',
+  })) as typeof fetch;
+
+  const result = await syncProviderModels(bailianProvider as any, 'key', dependencies(sqlite, fetchImpl));
+
+  assert.equal(result.removed, 0);
+  assert.equal(result.removed_not_in_upstream, 1);
+  assert.equal((sqlite.prepare("SELECT COUNT(*) n FROM models WHERE model_id = 'qwen3-max'").get() as any).n, 1);
+  sqlite.close();
+});
+
+test('an unparseable route alias aborts the prune instead of deleting blindly', async () => {
+  const { sqlite } = database();
+  sqlite.prepare("INSERT INTO models (id, provider_id, model_id, enabled, synced) VALUES ('x', 'provider-1', 'qwen3-max', 1, 1)").run();
+  sqlite.prepare("INSERT INTO route_aliases (id, alias, targets) VALUES ('bad', 'broken', 'not json')").run();
+  const fetchImpl = (async () => Response.json({
+    success: true,
+    output: { total: 1, page_no: 1, page_size: 20, models: [{ model: 'deepseek-r1', name: 'DeepSeek R1' }] },
+    request_id: 'r',
+  })) as typeof fetch;
+
+  await assert.rejects(
+    syncProviderModels(bailianProvider as any, 'key', dependencies(sqlite, fetchImpl), {}, { prune: true }),
+    /路由别名/,
+  );
+  // 事务回滚，什么都没动。
+  assert.equal((sqlite.prepare("SELECT COUNT(*) n FROM models WHERE model_id = 'qwen3-max'").get() as any).n, 1);
+  sqlite.close();
+});
+
+test('syncing refreshes bundled pricing on existing models but never touches manual or subscription rows', async () => {
+  const { sqlite } = database();
+  const seed = sqlite.prepare(
+    `INSERT INTO models (id, provider_id, model_id, enabled, synced, input_price, output_price, pricing_source)
+     VALUES (?, 'provider-1', ?, 1, 1, ?, ?, ?)`,
+  );
+  seed.run('stale', 'model-a', 1, 2, 'cc-switch-global');   // 旧价 → 应被刷新
+  seed.run('fresh', 'model-b', null, null, null);           // 无来源 → 应被写入
+  seed.run('mine', 'model-c', 9, 9, 'manual');              // 手填 → 不许动
+  seed.run('sub', 'model-d', 5, 5, 'subscription');         // 订阅 → 不许动
+
+  const fetchImpl = (async () => Response.json({
+    data: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }, { id: 'model-d' }],
+    has_more: false,
+  })) as typeof fetch;
+  const deps = dependencies(sqlite, fetchImpl);
+  deps.lookupPricing = () => ({ input: 7, output: 8, cacheRead: 0.7, cacheWrite: null, source: 'cc-switch-provider' });
+
+  const result = await syncProviderModels(provider as any, 'key', deps);
+
+  assert.equal(result.added, 0);
+  assert.equal(result.repriced, 2);
+  assert.deepEqual(
+    sqlite.prepare('SELECT model_id, input_price, output_price, pricing_source FROM models ORDER BY model_id').all(),
+    [
+      { model_id: 'model-a', input_price: 7, output_price: 8, pricing_source: 'cc-switch-provider' },
+      { model_id: 'model-b', input_price: 7, output_price: 8, pricing_source: 'cc-switch-provider' },
+      { model_id: 'model-c', input_price: 9, output_price: 9, pricing_source: 'manual' },
+      { model_id: 'model-d', input_price: 5, output_price: 5, pricing_source: 'subscription' },
+    ],
+  );
+  sqlite.close();
+});
+
+test('a bundled-price miss clears the cc-switch rows it owns, matching boot-time behaviour', async () => {
+  const { sqlite } = database();
+  sqlite.prepare(
+    `INSERT INTO models (id, provider_id, model_id, enabled, synced, input_price, pricing_source)
+     VALUES ('gone', 'provider-1', 'model-a', 1, 1, 3, 'cc-switch-global')`,
+  ).run();
+  const fetchImpl = (async () => Response.json({ data: [{ id: 'model-a' }], has_more: false })) as typeof fetch;
+  const deps = dependencies(sqlite, fetchImpl);
+  deps.lookupPricing = () => null;
+
+  await syncProviderModels(provider as any, 'key', deps);
+
+  const row = sqlite.prepare("SELECT input_price, pricing_source FROM models WHERE id = 'gone'").get() as Record<string, unknown>;
+  assert.equal(row.input_price, null);
+  assert.equal(row.pricing_source, null);
+  sqlite.close();
+});
+
+test('an official catalog corrects a stale context window but leaves the display label alone', async () => {
+  const { sqlite } = database();
+  sqlite.prepare(`INSERT INTO models (id, provider_id, model_id, display_name, context_window, enabled, synced)
+    VALUES ('stale', 'provider-1', 'k3', '我改过的名字', 256000, 1, 1)`).run();
+  sqlite.prepare("UPDATE providers SET base_url='https://api.kimi.com/coding/v1' WHERE id='provider-1'").run();
+  sqlite.prepare("UPDATE provider_endpoints SET base_url='https://api.kimi.com/coding/v1' WHERE provider_id='provider-1' AND is_default=1").run();
+
+  const fetchImpl = (async () => Response.json({
+    data: [{ id: 'k3', display_name: 'K3', context_length: 1048576, supports_dynamic_tools: true }],
+  })) as typeof fetch;
+
+  await syncProviderModels(provider as any, 'key', dependencies(sqlite, fetchImpl));
+
+  const row = sqlite.prepare("SELECT display_name, context_window FROM models WHERE id = 'stale'").get() as Record<string, unknown>;
+  // 上下文长度是事实，跟上游走
+  assert.equal(row.context_window, 1048576);
+  // 展示名是标签，用户改过就不动
+  assert.equal(row.display_name, '我改过的名字');
   sqlite.close();
 });

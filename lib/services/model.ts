@@ -6,6 +6,7 @@ import { getProviderSubscriptionId, withDefaultProviderEndpoint, type ProviderRo
 import { CC_SWITCH_PRICING_SOURCE_REF, lookupBundledPricing } from './model-pricing';
 import { syncProviderModels, type SyncResult } from './model-sync';
 import { addManualModelsToCompleteCatalog } from '@/lib/subscriptions/store';
+import type { BailianCatalogFilterOptions } from './bailian-catalog';
 import { resolveModelCapabilities, type ModelCapabilityTag } from './model-capabilities';
 
 export type { SyncResult } from './model-sync';
@@ -217,13 +218,24 @@ export async function testProviderConnection(provider: ProviderRow, apiKey: stri
  * 新模型插入（synced=1）；已有 synced=1 但上游消失的不删除（保留 enabled 状态，仅报告数量）；
  * 手动添加的（synced=0）不动。
  */
-export async function syncModels(provider: ProviderRow, apiKey: string): Promise<SyncResult> {
-  return syncProviderModels(provider, apiKey, {
-    sqlite,
-    fetch,
-    lookupPricing: lookupBundledPricing,
-    randomId: crypto.randomUUID,
-    pricingSourceRef: CC_SWITCH_PRICING_SOURCE_REF,
-    now: Date.now,
-  });
+export async function syncModels(
+  provider: ProviderRow,
+  apiKey: string,
+  filter?: BailianCatalogFilterOptions,
+  options?: { prune?: boolean },
+): Promise<SyncResult> {
+  return syncProviderModels(
+    provider,
+    apiKey,
+    {
+      sqlite,
+      fetch,
+      lookupPricing: lookupBundledPricing,
+      randomId: crypto.randomUUID,
+      pricingSourceRef: CC_SWITCH_PRICING_SOURCE_REF,
+      now: Date.now,
+    },
+    filter,
+    options,
+  );
 }
