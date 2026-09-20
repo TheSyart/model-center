@@ -1,3 +1,4 @@
+import { bailianAsrFamily } from './audio.ts';
 import { UpstreamError } from '../../upstream-error.ts';
 
 /**
@@ -15,12 +16,30 @@ import { UpstreamError } from '../../upstream-error.ts';
 const DEFAULT_POLL_INTERVAL_MS = 1_500;
 const DEFAULT_TIMEOUT_MS = 300_000;
 
+/**
+ * 两族的输入字段名不一样，传错就失败，**且错误信息看不出是字段名的问题**：
+ *
+ * | 模型 | 字段 | 传错时上游的回应 |
+ * |---|---|---|
+ * | `qwen3-asr-flash-filetrans` | `input.file_url`（单数字符串） | `InvalidParameter.MalformedURL` |
+ * | `qwen-audio-3.0-asr-flash-filetrans` | `input.file_urls`（复数数组） | `InvalidParameter.ParseError` |
+ *
+ * 2026-09-20 实测，两边互换均失败、按本表则均成功。
+ */
+export function buildFiletransInput(model: string, fileUrl: string): Record<string, unknown> {
+  return bailianAsrFamily(model) === 'qwen3' ? { file_url: fileUrl } : { file_urls: [fileUrl] };
+}
+
 export interface BailianFiletransOptions {
   model: string;
   /** 公网可访问的音频地址。 */
   fileUrl: string;
   /** 只转写指定声道，缺省全部。 */
   channelIds?: number[];
+  /** 热词：词 → 权重（1-5）。qwen-audio / fun-asr 族支持。 */
+  vocabulary?: Record<string, number>;
+  vocabularyId?: string;
+  languageHints?: string[];
   signal?: AbortSignal;
   pollIntervalMs?: number;
   timeoutMs?: number;
@@ -81,8 +100,13 @@ export async function callBailianFiletrans(
     },
     body: JSON.stringify({
       model: options.model,
-      input: { file_url: options.fileUrl },
-      ...(options.channelIds?.length ? { parameters: { channel_id: options.channelIds } } : {}),
+      input: buildFiletransInput(options.model, options.fileUrl),
+      parameters: {
+        ...(options.channelIds?.length ? { channel_id: options.channelIds } : {}),
+        ...(options.vocabulary ? { vocabulary: options.vocabulary } : {}),
+        ...(options.vocabularyId ? { vocabulary_id: options.vocabularyId } : {}),
+        ...(options.languageHints?.length ? { language_hints: options.languageHints } : {}),
+      },
     }),
     signal: options.signal,
   });

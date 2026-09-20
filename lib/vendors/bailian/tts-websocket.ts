@@ -69,6 +69,7 @@ export function streamingModeFor(modelId: string): BailianTtsStreamingMode {
  *
  * 依据都来自实测或官方模型简介，不猜：
  *  - 418 实测是「音色不属于这个模型」（cosyvoice-v2 只认 `*_v2`，v3 起只认无后缀，互换必 418）；
+ *  - 411 是 qwen-audio-*-tts 表达同一件事的方式，2026-09-20 拿 20 个候选音色逐个实打；
  *  - vc / vd 两族的官方简介明写要用专门服务复刻或设计出来的声音。
  */
 export function ttsFailureHint(model: string, voice: string | undefined, upstreamMessage: string): string {
@@ -81,6 +82,15 @@ export function ttsFailureHint(model: string, voice: string | undefined, upstrea
   // 官方简介原文：「可对 qwen3-voice-design 服务设计的声音进行高保真实时语音合成」
   if (/-vd-|-vd$/.test(lower)) {
     return '（该模型只合成 qwen3-voice-design 服务设计出来的声音，必须把设计音色的 ID 作为 voice 传入，预置音色不适用。）';
+  }
+
+  // qwen-audio-*-tts 用 411 表示同一件事，但连「不传 voice」都会被 411 拒，
+  // 所以必须点名唯一可用的那个音色，否则调用方无从下手。
+  if (/\b411\b/.test(upstreamMessage) && lower.includes('qwen-audio')) {
+    if (lower.includes('3.1')) {
+      return '（411 表示音色不被该模型接受。qwen-audio-3.1-tts-flash 实测拒绝全部 20 个预置音色，包括不传——推断它只接受 voice-enrollment 复刻出来的音色，需先创建克隆音色再把其 ID 作为 voice 传入。）';
+    }
+    return `（411 表示音色不被该模型接受。${model} 实测只接受 longanlingxi，连不传 voice 都会被拒，当前传的是 ${voice ?? '（未指定）'}。）`;
   }
 
   if (!/\b418\b/.test(upstreamMessage)) return '';

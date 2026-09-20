@@ -6,6 +6,7 @@ import { withRawCapture } from '@/lib/raw-capture/capture';
 import { normalizeRequestSource } from '@/lib/services/usage-metrics';
 import {
   acceptsBailianAsr,
+  audioFormatFromName,
   bailianAudioRejectMessage,
   callBailianAsr,
   resolveBailianAudioRoute,
@@ -45,7 +46,6 @@ async function handlePost(req: NextRequest): Promise<Response> {
    * 网关没有对象存储能替客户端上传，所以由客户端直接给地址。
    */
   const fileUrl = (formData.get('file_url') as string | null)?.trim();
-
   const route = resolveBailianAudioRoute(model);
   const isFiletrans = route.supported && route.kind === 'asr-filetrans';
   const file = formData.get('file');
@@ -92,6 +92,7 @@ async function handlePost(req: NextRequest): Promise<Response> {
         const result = await callBailianFiletrans(target.provider, apiKey, {
           model: target.modelId,
           fileUrl: fileUrl!,
+          languageHints: language ? [language] : undefined,
           signal,
         });
         return { response: NextResponse.json({ text: result.text, transcripts: result.transcripts }) };
@@ -100,13 +101,17 @@ async function handlePost(req: NextRequest): Promise<Response> {
       // 只有确认要发给百炼之后才把文件读进内存。
       const blob = file as Blob;
       const buffer = Buffer.from(await blob.arrayBuffer());
-      const audioDataUri = `data:${blob.type || 'audio/wav'};base64,${buffer.toString('base64')}`;
+      const mime = blob.type || 'audio/wav';
+      const audioDataUri = `data:${mime};base64,${buffer.toString('base64')}`;
 
       const asr = await callBailianAsr(target.provider, apiKey, {
         model: target.modelId,
         audioDataUriOrUrl: audioDataUri,
         languageHints: language ? [language] : undefined,
-        contextMessages: prompt ? [{ role: 'user', text: prompt }] : undefined,
+        // 角色必须是 system——user 会被上游以 InvalidParameter 拒掉，
+        // 这正是 OpenAI 标准的 prompt 字段此前在网关上 400 的原因。
+        contextMessages: prompt ? [{ role: 'system', text: prompt }] : undefined,
+        format: audioFormatFromName(mime, file instanceof File ? file.name : undefined),
         signal,
       });
 

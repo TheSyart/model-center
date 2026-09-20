@@ -15,7 +15,13 @@ import {
   getBailianSpeechSynthesizerEndpoint,
   callBailianAsr,
   callBailianTts,
+  bailianAsrFamily,
+  buildBailianAsrParameters,
+  extractBailianAsrText,
+  audioFormatFromName,
+  supportsBailianVocabulary,
 } from '../lib/vendors/bailian/audio.ts';
+import { buildFiletransInput } from '../lib/vendors/bailian/asr-filetrans.ts';
 import { streamingModeFor, ttsFailureHint } from '../lib/vendors/bailian/tts-websocket.ts';
 
 test('bailianCatalogUrl serializes query parameters correctly according to official docs', () => {
@@ -297,4 +303,97 @@ test('a 418 explains the voice table is per model version', () => {
   );
   // 与音色无关的报错不要硬塞提示。
   assert.equal(ttsFailureHint('cosyvoice-v2', 'longxiaochun_v2', 'some unrelated failure'), '');
+});
+
+test('ASR always sends a parameters object, and the two families get different ones', () => {
+  // 少了 parameters.format，workspace 专有域名回的是空的 `400 {}`——
+  // 看不出任何线索，公共域名才说 `UNSUPPORTED_FORMAT format is empty`。
+  assert.equal(bailianAsrFamily('qwen3-asr-flash'), 'qwen3');
+  assert.equal(bailianAsrFamily('qwen-audio-3.0-asr-flash'), 'vocabulary');
+  assert.equal(bailianAsrFamily('fun-asr'), 'vocabulary');
+  // 路由层看到的是带服务商前缀的名字——漏剥前缀会把 qwen3 误判成支持热词。
+  assert.equal(bailianAsrFamily('bailian/qwen3-asr-flash'), 'qwen3');
+  assert.equal(supportsBailianVocabulary('bailian/qwen3-asr-flash'), false);
+  assert.equal(supportsBailianVocabulary('bailian/qwen-audio-3.0-asr-flash'), true);
+
+  const vocabParams = buildBailianAsrParameters({
+    model: 'qwen-audio-3.0-asr-flash',
+    audioDataUriOrUrl: 'data:audio/wav;base64,AA',
+    vocabulary: { 小单: 5 },
+    languageHints: ['zh', 'en'],
+  });
+  assert.equal(vocabParams.format, 'wav', 'format 必填，缺省也得给');
+  assert.deepEqual(vocabParams.vocabulary, { 小单: 5 });
+  assert.deepEqual(vocabParams.language_hints, ['zh', 'en'], '复数键，且不只取第一个');
+  assert.equal('asr_options' in vocabParams, false);
+
+  const qwen3Params = buildBailianAsrParameters({
+    model: 'qwen3-asr-flash',
+    audioDataUriOrUrl: 'data:audio/wav;base64,AA',
+    vocabulary: { 小单: 5 },
+    languageHints: ['zh'],
+  });
+  // qwen3-asr 官方规格「热词=否」，实测传了也不生效，所以根本不往上发。
+  assert.equal('vocabulary' in qwen3Params, false);
+  assert.deepEqual(qwen3Params.asr_options, { enable_lid: true, language: 'zh' });
+});
+
+test('ASR accepts all three response shapes upstream actually returns', () => {
+  assert.equal(extractBailianAsrText({ output: { choices: [{ message: { content: [{ text: '甲' }, { text: '乙' }] } }] } }), '甲乙');
+  assert.equal(extractBailianAsrText({ output: { choices: [{ message: { content: '整串' } }] } }), '整串');
+  assert.equal(extractBailianAsrText({ output: { sentence: { text: '分句' } } }), '分句');
+  assert.equal(extractBailianAsrText({ output: { text: '平铺' } }), '平铺');
+  assert.equal(extractBailianAsrText({ output: { choices: [{ message: { content: [] } }] } }), '');
+});
+
+test('the ASR context turn is a system message, because user is rejected upstream', async () => {
+  let captured: any;
+  const fetchImpl = (async (_url: string, init: any) => {
+    captured = JSON.parse(init.body);
+    return new Response(JSON.stringify({ output: { text: '好' } }), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  await callBailianAsr(
+    { workspaceId: null } as never,
+    'sk-test',
+    {
+      model: 'qwen3-asr-flash',
+      audioDataUriOrUrl: 'data:audio/wav;base64,AA',
+      contextMessages: [{ role: 'system', text: '小单' }],
+    },
+    fetchImpl,
+  );
+
+  // user 角色会被上游拒：`The dedicated task 'asr' ... does not support this input.`
+  assert.equal(captured.input.messages[0].role, 'system');
+  assert.deepEqual(captured.input.messages[0].content, [{ text: '小单' }]);
+});
+
+test('audio format is inferred from mime or filename, and unknown stays unknown', () => {
+  assert.equal(audioFormatFromName('audio/wav'), 'wav');
+  assert.equal(audioFormatFromName('audio/mpeg'), 'mp3');
+  assert.equal(audioFormatFromName('audio/L16'), 'pcm');
+  assert.equal(audioFormatFromName('application/octet-stream', 'clip.m4a'), 'm4a');
+  // 编一个上游不认识的格式串比让调用方决定缺省更糟。
+  assert.equal(audioFormatFromName('application/octet-stream', 'clip.bin'), undefined);
+});
+
+test('filetrans uses a different input field per family, and swapping them fails upstream', () => {
+  assert.deepEqual(buildFiletransInput('qwen3-asr-flash-filetrans', 'https://x/a.wav'), {
+    file_url: 'https://x/a.wav',
+  });
+  // 传单数给这一族，上游回的是 InvalidParameter.ParseError——看不出是字段名的问题。
+  assert.deepEqual(buildFiletransInput('qwen-audio-3.0-asr-flash-filetrans', 'https://x/a.wav'), {
+    file_urls: ['https://x/a.wav'],
+  });
+});
+
+test('a 411 names the one voice qwen-audio actually accepts', () => {
+  const hint = ttsFailureHint('qwen-audio-3.0-tts-flash', 'Cherry', '[cosyvoice:]Engine error [411]');
+  assert.match(hint, /longanlingxi/);
+  assert.match(hint, /Cherry/);
+  // 3.1 实测 20 个候选音色全拒、连不传都拒，提示要指向复刻音色而不是某个预置音色。
+  const hint31 = ttsFailureHint('qwen-audio-3.1-tts-flash', undefined, '[cosyvoice:]Engine error [411]');
+  assert.match(hint31, /voice-enrollment|克隆/);
+  assert.equal(ttsFailureHint('cosyvoice-v3-flash', 'longanhuan', 'some other failure'), '');
 });

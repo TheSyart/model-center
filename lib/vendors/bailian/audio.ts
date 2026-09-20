@@ -173,14 +173,105 @@ async function post(
 
 // ---------- ASR ----------
 
+/**
+ * ASR 分两套参数体系，**不能混用**（2026-09-20 实测）：
+ *
+ *  - `qwen3-asr-*`：`parameters.asr_options`，**不支持热词**。官方规格表里这一族
+ *    「热词」就是否。实测把 `vocabulary` 传给它不报错、也不生效。
+ *  - 其余（`qwen-audio-3.x-asr-*`、`fun-asr`、`paraformer`、`sensevoice`）：
+ *    `parameters.vocabulary`（词→权重）且 **`parameters.format` 是必填的**。
+ *
+ * 少了 `format` 的后果极具迷惑性：workspace 专有域名返回**空的** `400 {}`，
+ * 公共域名才会说出真正的原因 `UNSUPPORTED_FORMAT format is empty`。
+ */
+export type BailianAsrFamily = 'qwen3' | 'vocabulary';
+
+export function bailianAsrFamily(modelId: string): BailianAsrFamily {
+  // 路由层拿到的是 `bailian/qwen3-asr-flash` 这种带服务商前缀的名字，
+  // 厂商层拿到的是解析后的裸模型名。两边都会调这个函数，所以先剥前缀。
+  const bare = modelId.toLowerCase().split('/').pop() ?? '';
+  return bare.startsWith('qwen3-') ? 'qwen3' : 'vocabulary';
+}
+
+export function supportsBailianVocabulary(modelId: string): boolean {
+  return bailianAsrFamily(modelId) === 'vocabulary';
+}
+
+/**
+ * 从 MIME 类型或文件名推断上游要的容器格式串。
+ *
+ * 只认上游支持的那几个；认不出来就返回 undefined，由调用方决定缺省——
+ * 编一个上游不认识的格式串比给缺省值更糟。
+ */
+export function audioFormatFromName(mime: string | undefined, fileName?: string): string | undefined {
+  const probe = `${mime ?? ''} ${fileName ?? ''}`.toLowerCase();
+  const table: Array<[RegExp, string]> = [
+    [/\bwav\b|x-wav|wave/, 'wav'],
+    [/mpeg|\bmp3\b/, 'mp3'],
+    [/\bm4a\b|mp4a/, 'm4a'],
+    [/\baac\b/, 'aac'],
+    [/\bogg\b/, 'ogg'],
+    [/\bopus\b/, 'opus'],
+    [/\bflac\b/, 'flac'],
+    [/\bamr\b/, 'amr'],
+    [/\bwebm\b/, 'webm'],
+    [/\bpcm\b|audio\/l16/, 'pcm'],
+  ];
+  for (const [pattern, format] of table) {
+    if (pattern.test(probe)) return format;
+  }
+  return undefined;
+}
+
 export interface BailianAsrOptions {
   model: string;
   /** base64 data URI 或公网可访问的 URL，两者实测都可用。 */
   audioDataUriOrUrl: string;
   languageHints?: string[];
-  contextMessages?: Array<{ role: 'user' | 'assistant'; text: string }>;
+  /**
+   * 上下文消息。角色必须是 `system`——`user` 会被上游拒：
+   * `The dedicated task 'asr' corresponding to the current service does not support this input.`
+   */
+  contextMessages?: Array<{ role: 'system'; text: string }>;
+  /** 热词：词 → 权重（1-5，50 为超权重）。只有 vocabulary 族认。 */
+  vocabulary?: Record<string, number>;
+  /** 预先在控制台建好的热词表 ID。同样只有 vocabulary 族认。 */
+  vocabularyId?: string;
+  /** 音频容器格式（wav/mp3/…）。vocabulary 族**必填**，见上面的注释。 */
+  format?: string;
+  sampleRate?: number;
   /** 客户端断连与超时；不传就既不会中止也没有上限。 */
   signal?: AbortSignal;
+}
+
+/** 请求体的 `parameters`。抽成纯函数是为了能直接断言两族的差异。 */
+export function buildBailianAsrParameters(options: BailianAsrOptions): Record<string, unknown> {
+  if (bailianAsrFamily(options.model) === 'qwen3') {
+    const asrOptions: Record<string, unknown> = { enable_lid: true };
+    if (options.languageHints?.length) asrOptions.language = options.languageHints[0];
+    return { asr_options: asrOptions };
+  }
+  return {
+    // 缺省 wav：客户端没说格式时，multipart 上传的绝大多数是 wav，
+    // 而**不传这个键一定失败**，所以宁可给个缺省也不能省略。
+    format: options.format ?? 'wav',
+    ...(options.sampleRate ? { sample_rate: options.sampleRate } : {}),
+    ...(options.vocabulary ? { vocabulary: options.vocabulary } : {}),
+    ...(options.vocabularyId ? { vocabulary_id: options.vocabularyId } : {}),
+    ...(options.languageHints?.length ? { language_hints: options.languageHints } : {}),
+  };
+}
+
+/** 上游的识别结果有三种形状，逐个兜。 */
+export function extractBailianAsrText(json: Record<string, any>): string {
+  const content = json.output?.choices?.[0]?.message?.content;
+  if (Array.isArray(content)) {
+    return content.map((part: any) => (typeof part?.text === 'string' ? part.text : '')).join('');
+  }
+  if (typeof content === 'string') return content;
+  if (typeof json.output?.sentence?.text === 'string') return json.output.sentence.text;
+  if (typeof json.output?.text === 'string') return json.output.text;
+  return '';
 }
 
 export interface BailianAsrResponse {
@@ -198,6 +289,8 @@ export interface BailianAsrResponse {
  * `{type:'input_audio', input_audio:{data}}`。后者发到这个端点会被拒：
  * `Input should be a valid string: input.messages.0.content.str`。
  * 那个形状属于 /compatible-mode/v1/chat/completions，两边别混。
+ *
+ * `parameters` 由 buildBailianAsrParameters 按模型族生成，且**永远要发**。
  */
 export async function callBailianAsr(
   provider: ProviderRow,
@@ -211,12 +304,13 @@ export async function callBailianAsr(
   }
   messages.push({ role: 'user', content: [{ audio: options.audioDataUriOrUrl }] });
 
-  const body: Record<string, unknown> = { model: options.model, input: { messages } };
-  if (options.languageHints?.length) {
-    body.parameters = { asr_options: { language: options.languageHints[0], enable_lid: true } };
-  }
+  // parameters 永远要发：vocabulary 族少了它就是那个空的 400。
+  const body: Record<string, unknown> = {
+    model: options.model,
+    input: { messages },
+    parameters: buildBailianAsrParameters(options),
+  };
 
-  // qwen3-tts-vc / -vd 走 HTTP，失败时也要给出「需要自建音色」的提示。
   const json = await post(
     getBailianMultimodalEndpoint(provider.workspaceId),
     apiKey,
@@ -226,15 +320,7 @@ export async function callBailianAsr(
     fetchImpl,
   );
 
-  // output.choices[0].message.content 是数组；无语音内容时上游返回空数组。
-  const content = json.output?.choices?.[0]?.message?.content;
-  const text = Array.isArray(content)
-    ? content.map((part: any) => (typeof part?.text === 'string' ? part.text : '')).join('')
-    : typeof content === 'string'
-      ? content
-      : '';
-
-  return { text, seconds: json.usage?.seconds, requestId: json.request_id, raw: json };
+  return { text: extractBailianAsrText(json), seconds: json.usage?.seconds, requestId: json.request_id, raw: json };
 }
 
 // ---------- TTS ----------
@@ -306,6 +392,8 @@ function defaultVoiceFor(modelId: string): string | undefined {
     // v1/v2 用带 _v2 后缀的一套，v3 之后用无后缀的一套。
     return /cosyvoice-v[12]\b/.test(lower) ? 'longxiaochun_v2' : 'longanhuan';
   }
+  // qwen-audio-*-tts 只认 longanlingxi：2026-09-20 拿 20 个候选音色逐个实打，
+  // 3.0-flash 与 3.0-plus 只有它不被 411 拒，连「不传 voice」都会被拒。
   if (lower.includes('qwen-audio')) return 'longanlingxi';
   return 'Cherry';
 }
@@ -418,7 +506,9 @@ export async function tryHandleBailianSpecialChat(
 
   if (route.kind === 'asr') {
     let audioDataUriOrUrl = '';
-    const contextMsgs: Array<{ role: 'user' | 'assistant'; text: string }> = [];
+    // 上游只接受 system 角色的上下文，user/assistant 会被 InvalidParameter 拒，
+    // 所以对话入口的文字一律折叠成一条 system 背景文本。
+    const contextTexts: string[] = [];
 
     for (const msg of messages) {
       if (Array.isArray(msg.content)) {
@@ -434,7 +524,7 @@ export async function tryHandleBailianSpecialChat(
             if (part.text.startsWith('data:audio/') || part.text.startsWith('http://') || part.text.startsWith('https://')) {
               audioDataUriOrUrl = part.text.trim();
             } else {
-              contextMsgs.push({ role: msg.role === 'assistant' ? 'assistant' : 'user', text: part.text });
+              contextTexts.push(part.text);
             }
           }
         }
@@ -443,7 +533,7 @@ export async function tryHandleBailianSpecialChat(
         if (text.startsWith('data:audio/') || text.startsWith('http://') || text.startsWith('https://')) {
           audioDataUriOrUrl = text;
         } else {
-          contextMsgs.push({ role: msg.role === 'assistant' ? 'assistant' : 'user', text });
+          contextTexts.push(text);
         }
       }
     }
@@ -457,7 +547,7 @@ export async function tryHandleBailianSpecialChat(
     const asr = await callBailianAsr(provider, apiKey, {
       model: modelId,
       audioDataUriOrUrl,
-      contextMessages: contextMsgs,
+      contextMessages: contextTexts.length > 0 ? [{ role: 'system', text: contextTexts.join('\n') }] : undefined,
       signal,
     });
     return { text: asr.text, seconds: asr.seconds };
