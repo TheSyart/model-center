@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getProvider, readProviderApiKey, rejectSubscriptionProviderAction } from '@/lib/services/provider';
 import { syncModels } from '@/lib/services/model';
-import type { BailianCatalogFilterOptions } from '@/lib/services/bailian-catalog';
+import type { BailianCatalogFilterOptions } from '@/lib/vendors/bailian/catalog';
 
 // POST /api/admin/providers/:id/sync-models：拉取上游模型列表并合并入库（F4）
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {

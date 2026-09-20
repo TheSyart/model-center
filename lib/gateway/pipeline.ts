@@ -9,7 +9,6 @@ import { GatewayError, protocolNotImplemented } from './errors';
 import { fetchUpstream } from './forward';
 import type { FetchFailure } from './forward';
 import { writeRequestLog } from './logger';
-import type { UsageInfo } from './logger';
 import { observeReadableStream } from './stream-observer';
 import { resolveModel } from './router';
 import { extractReasoning, planReasoning } from './reasoning';
@@ -35,15 +34,15 @@ import {
   observeResponsesUsageFromSSE,
   responsesUsageFromJson,
 } from '@/lib/protocols/responses';
-import { normalizeOpenAIUsage } from '@/lib/services/usage-metrics';
+import { normalizeOpenAIUsage, type UsageInfo } from '@/lib/services/usage-metrics';
 import { sqlite } from '@/lib/db';
 import { listProviderEndpointModelObservations, listProviderEndpoints } from '@/lib/services/provider-endpoint';
-import { isOfficialBailianCatalogProvider } from '@/lib/services/bailian-catalog';
+import { isOfficialBailianCatalogProvider } from '@/lib/vendors/bailian/catalog';
 import {
   isBailianAsrModel,
   isBailianTtsModel,
   tryHandleBailianSpecialChat,
-} from '@/lib/services/dashscope-audio';
+} from '@/lib/vendors/bailian/audio';
 
 type Json = Record<string, any>;
 

@@ -17,7 +17,7 @@ vi.mock('@/lib/services/model', () => ({
   testProviderConnection: vi.fn(async () => ({ ok: true })),
   syncModels: vi.fn(async () => ({ added: 1 })),
 }));
-vi.mock('@/lib/services/balance', () => ({
+vi.mock('@/lib/vendors/balance', () => ({
   queryBalanceWithSnapshot: vi.fn(async () => ({
     supported: true,
     summary: 'balance',
@@ -28,7 +28,7 @@ vi.mock('@/lib/presets', () => ({ getPreset: () => undefined }));
 import { sqlite } from '@/lib/db';
 import { encrypt } from '@/lib/crypto';
 import { testProviderConnection, syncModels } from '@/lib/services/model';
-import { queryBalanceWithSnapshot } from '@/lib/services/balance';
+import { queryBalanceWithSnapshot } from '@/lib/vendors/balance';
 import { GET as key } from '@/app/api/admin/providers/[id]/key/route';
 import { POST as connection } from '@/app/api/admin/providers/[id]/test/route';
 import { POST as sync } from '@/app/api/admin/providers/[id]/sync-models/route';

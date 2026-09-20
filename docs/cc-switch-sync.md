@@ -44,7 +44,7 @@
 | Universal | `src/config/universalProviderPresets.ts` | 通用模板；无可执行 Base URL 的模板进入排除账本 |
 | 模型定价 | `src-tauri/src/database/schema.rs` | `lib/pricing/cc-switch.ts`，四档美元/百万 Token 单价 |
 | 图标 | `src/icons/extracted/`、`src/icons/extracted/index.ts` | `public/logos/`，保留真实扩展名 |
-| 余额 | `src-tauri/src/services/balance.rs` | manifest 能力清单及 `lib/services/balance-provider.ts`/`balance.ts` |
+| 余额 | `src-tauri/src/services/balance.rs` | manifest 能力清单及 `lib/presets/balance-provider.ts` / `lib/vendors/balance.ts` |
 | Coding Plan | `src/config/codingPlanProviders.ts`、后端 `coding_plan.rs` | manifest 能力清单及本项目套餐适配器 |
 
 生成目录有两层，二者都必须保留：
@@ -283,7 +283,7 @@ TopN 分组不是全量明细，不能用分组金额之和替代 `totalAmount`�
 1. **先核实契约。** 重读本节和官方资料，解决账单 Host/鉴权/复杂参数编码、`selectType` 差异、价格币种与缓存计费项等未决问题。没有证据的字段保持未知，不编造可运行地址或价格。
 2. **显式分离数据源。** 用 `presetKey` 和已审查身份表识别百炼，兼容 `bailian-openai`、`qwen-coder-openai`、`bailian-responses`、`bailian-anthropic`、`bailian-for-coding-openai`、`bailian-for-coding-anthropic` 等旧 slug；禁止仅按 `qwen` 字符串或相似域名归类。已有供应商 ID、Key、端点、模型启停和路由不自动改写。
 3. **实现官方适配器。** 在现有模型同步服务之外区分官方目录地址、调用端点与账单地址；按配置的地域/空间获取所有页并保存完整元数据。账单凭据与模型 API Key 的复用必须有官方依据，所有凭据仅在服务端处理。
-4. **迁移自动定价选择。** 同步修改 `lib/services/model-pricing.ts`、相关迁移、模型管理 API、恢复自动定价与导入导出行为，保证百炼不再命中 `cc-switch-provider/cc-switch-global` 回退；保留其他供应商使用的全局 Qwen/DeepSeek 等定价，不能按模型名前缀整批删除。官方适配器生效前不提前删除当前兼容数据。
+4. **迁移自动定价选择。** 同步修改 `lib/pricing/bundled.ts`、相关迁移、模型管理 API、恢复自动定价与导入导出行为，保证百炼不再命中 `cc-switch-provider/cc-switch-global` 回退；保留其他供应商使用的全局 Qwen/DeepSeek 等定价，不能按模型名前缀整批删除。官方适配器生效前不提前删除当前兼容数据。
 5. **保留完整覆盖账本。** CC Switch 原始百炼记录仍需审计留存；未来生成时从运行时 CC Switch 供应商输出中明确排除，用既有 `excluded` 状态和可追溯原因（建议 `official-source:aliyun-modelstudio`）记录每条原始记录。保证 included/merged/excluded 唯一归属，不静默跳过、不重复生成同一厂商卡片。历史快照和新基线分别保留，先补测试再更新数量断言。
 6. **记录官方快照。** 保存来源 URL、契约版本（若有）、抓取时间、内容校验值、行数及不含秘密的筛选范围。私有账单、真实 Key/Workspace 标识和原始账户数据不要提交 Git；fixture 使用合成数据。官方同步失败时保留上一次成功结果并标记过期/失败，不能清空为零或悄悄回退 CC Switch。
 7. **验证后更新文档状态。** 至少覆盖模型多页/重复页/异常页、非 TG 模型、跨区域同名模型、四档缺价、零价、非 Token 计费、阶梯/币种、手动价保护、账单单维度和 TopN、空维度、`zeroFilter=false`、两套 `selectType` 的确认结果、鉴权失败以及既有 slug/端点不变性。再运行同步 `--check`、`npm test`、TypeScript 检查、生产构建和 `git diff --check`，最后将“待实现/待核实”逐项更新为有证据的状态。

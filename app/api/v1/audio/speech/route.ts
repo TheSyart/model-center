@@ -8,7 +8,7 @@ import {
   acceptsBailianTts,
   bailianAudioRejectMessage,
   callBailianTts,
-} from '@/lib/services/dashscope-audio';
+} from '@/lib/vendors/bailian/audio';
 
 const FORMATS = ['wav', 'mp3', 'opus', 'pcm'] as const;
 type SpeechFormat = (typeof FORMATS)[number];

@@ -15,7 +15,7 @@
 
 > 官方原文：「API keys from domestic (`platform.kimi.com`) and international (`platform.kimi.ai`) platforms are completely separate; mixing them produces 401 errors.」
 
-**本项目现状**：`lib/services/balance.ts` 的 `kimi` 解析器按 `${base}/users/me/balance` 拼接，而用户配置的 Kimi 服务商 base 是 `https://api.kimi.com/coding/v1`，拼出来是 `https://api.kimi.com/coding/v1/users/me/balance`——与官方文档的 `https://api.moonshot.cn/v1/users/me/balance` 不是同一个主机。**尚未用真实密钥验证哪个对**，改之前需要先验证。
+**本项目现状**：`lib/vendors/balance.ts` 的 `kimi` 解析器按 `${base}/users/me/balance` 拼接，而用户配置的 Kimi 服务商 base 是 `https://api.kimi.com/coding/v1`，拼出来是 `https://api.kimi.com/coding/v1/users/me/balance`——与官方文档的 `https://api.moonshot.cn/v1/users/me/balance` 不是同一个主机。**尚未用真实密钥验证哪个对**，改之前需要先验证。
 
 ## 工具接口
 
@@ -110,7 +110,7 @@
 
 ### 本项目的落地
 
-`lib/services/kimi-catalog.ts`，按 Base URL 主机判定（`api.moonshot.cn` / `api.moonshot.ai` / `api.kimi.com` / `api.kimi.ai`），不按 slug。
+`lib/vendors/kimi/catalog.ts`，按 Base URL 主机判定（`api.moonshot.cn` / `api.moonshot.ai` / `api.kimi.com` / `api.kimi.ai`），不按 slug。
 
 映射：
 - `supports_image_in` → `vision`；`supports_dynamic_tools` → `tools`；`supports_reasoning` → `reasoning`

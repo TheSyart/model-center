@@ -1,4 +1,4 @@
-import { isReasoningEffort, type ModelReasoning, type ReasoningEffort } from '../gateway/reasoning.ts';
+import { isReasoningEffort, type ModelReasoning, type ReasoningEffort } from '../../gateway/reasoning.ts';
 
 /**
  * Kimi / 月之暗面模型目录。

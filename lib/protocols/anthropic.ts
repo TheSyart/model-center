@@ -8,7 +8,7 @@
 import { encodeSSE, generatorToStream, observeSSEStream, parseSSE, deferred } from './sse';
 import { applyAnthropicReasoning, stripRejectedClaudeSampling } from './reasoning-emit';
 import type { ReasoningIntent } from '@/lib/gateway/reasoning';
-import type { UsageInfo } from '@/lib/gateway/logger';
+import type { UsageInfo } from '@/lib/services/usage-metrics';
 import { normalizeAnthropicUsage, normalizeOpenAIUsage, toPublicUsage } from '@/lib/services/usage-metrics';
 
 type Json = Record<string, any>;

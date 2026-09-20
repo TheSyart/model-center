@@ -6,7 +6,7 @@ import { CC_SWITCH_PRESETS } from './cc-switch.ts';
 import { LEGACY_PRESETS } from './legacy.ts';
 import { CATEGORY_LABELS } from './types.ts';
 import type { PresetCategory, ProviderPreset } from './types.ts';
-import { detectCcSwitchBalanceProvider } from '../services/balance-provider.ts';
+import { detectCcSwitchBalanceProvider } from './balance-provider.ts';
 
 function canonicalUrl(value: string): string {
   return value.trim().replace(/\/+$/, '').toLowerCase();

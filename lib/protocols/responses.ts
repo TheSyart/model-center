@@ -9,7 +9,7 @@
 import { encodeSSE, generatorToStream, observeSSEStream, parseSSE, deferred } from './sse';
 import { applyResponsesReasoning } from './reasoning-emit';
 import type { ReasoningIntent } from '@/lib/gateway/reasoning';
-import type { UsageInfo } from '@/lib/gateway/logger';
+import type { UsageInfo } from '@/lib/services/usage-metrics';
 import { normalizeResponsesUsage, toPublicUsage } from '@/lib/services/usage-metrics';
 
 type Json = Record<string, any>;

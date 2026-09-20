@@ -89,7 +89,7 @@ export const EXACT_MODEL_SPECS: Record<string, ExactModelSpec> = {
 
   // Kimi 的四条已删除：api.kimi.com/coding/v1/models 提供活的能力目录，
   // 手工字典与它冲突（实测 kimi-for-coding-highspeed 不支持工具调用、k3 上下文是 1M
-  // 而非字典里的 256k）。见 lib/services/kimi-catalog.ts。
+  // 而非字典里的 256k）。见 lib/vendors/kimi/catalog.ts。
 
   // OpenAI
   'gpt-4o': {

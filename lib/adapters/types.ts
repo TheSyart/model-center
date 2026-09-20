@@ -1,6 +1,6 @@
 import type { ProviderRow } from '@/lib/services/provider';
 import type { Protocol } from '@/lib/services/provider';
-import type { UsageInfo } from '@/lib/gateway/logger';
+import type { UsageInfo } from '@/lib/services/usage-metrics';
 import type { ReasoningIntent } from '@/lib/gateway/reasoning';
 
 type Json = Record<string, any>;

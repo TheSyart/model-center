@@ -6,7 +6,7 @@ import {
   formatToolBilling,
   type ProviderTool,
   type ProviderToolCatalog,
-} from '@/lib/presets/provider-tools';
+} from '@/lib/vendors/tools';
 
 export const dynamic = 'force-dynamic';
 

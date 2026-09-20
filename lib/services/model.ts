@@ -6,7 +6,7 @@ import { getProviderSubscriptionId, withDefaultProviderEndpoint, type ProviderRo
 import { CC_SWITCH_PRICING_SOURCE_REF, lookupBundledPricing } from '../pricing/bundled.ts';
 import { syncProviderModels, type SyncResult } from './model-sync';
 import { addManualModelsToCompleteCatalog } from '@/lib/subscriptions/store';
-import type { BailianCatalogFilterOptions } from './bailian-catalog';
+import type { BailianCatalogFilterOptions } from '../vendors/bailian/catalog.ts';
 import { resolveModelCapabilities, type ModelCapabilityTag } from './model-capabilities';
 
 export type { SyncResult } from './model-sync';

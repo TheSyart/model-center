@@ -17,7 +17,7 @@ import {
   BAILIAN_PROVIDERS,
   BAILIAN_CAPABILITIES,
   type BailianCatalogFilterOptions,
-} from '@/lib/services/bailian-catalog';
+} from '@/lib/vendors/bailian/catalog';
 import type { ModelCapabilityTag } from '@/lib/services/model-capabilities';
 
 export interface ModelItem {

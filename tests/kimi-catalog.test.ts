@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { isKimiCatalogProvider, parseKimiModelPage } from '../lib/services/kimi-catalog.ts';
+import { isKimiCatalogProvider, parseKimiModelPage } from '../lib/vendors/kimi/catalog.ts';
 
 // 2026-09-19 从 api.kimi.com/coding/v1/models 实测抓到的结构。
 const live = {

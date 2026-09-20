@@ -2,8 +2,8 @@ import crypto from 'node:crypto';
 import { db, schema } from '@/lib/db';
 import { getPreset } from '@/lib/presets';
 import { formatQuotaSummary, queryCodingPlan, type QuotaTier } from './coding-plan';
-import { withDefaultProviderEndpoint, type ProviderRow } from './provider';
-import { detectCcSwitchBalanceProvider, type CcSwitchBalanceProvider } from './balance-provider';
+import { withDefaultProviderEndpoint, type ProviderRow } from '../services/provider';
+import { detectCcSwitchBalanceProvider, type CcSwitchBalanceProvider } from '@/lib/presets/balance-provider';
 
 /** §8 余额查询统一抽象。 */
 export interface BalanceResult {

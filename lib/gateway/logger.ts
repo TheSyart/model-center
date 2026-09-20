@@ -5,8 +5,6 @@ import { maybePurgeExpiredLogs } from '@/lib/services/log';
 import { detectRequestClient, effectiveTokenTotal, normalizeRequestSource, type UsageInfo } from '@/lib/services/usage-metrics';
 import { calculateRequestCost } from '@/lib/services/pricing';
 
-export type { UsageInfo } from '@/lib/services/usage-metrics';
-
 export interface RequestLogFields {
   ts: number;
   providerId: string | null;

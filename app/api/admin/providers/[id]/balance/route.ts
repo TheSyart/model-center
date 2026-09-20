@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { queryBalanceWithSnapshot } from '@/lib/services/balance';
+import { queryBalanceWithSnapshot } from '@/lib/vendors/balance';
 import { getProvider, readProviderApiKey, rejectSubscriptionProviderAction } from '@/lib/services/provider';
 
 // GET /api/admin/providers/:id/balance：查询余额（实时 + 写快照，§8）

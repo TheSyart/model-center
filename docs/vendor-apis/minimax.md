@@ -47,7 +47,7 @@ MCP 指南：https://platform.minimax.cn/docs/guides/mcp-guide
 
 ## 套餐额度
 
-**有**，已实现于 `lib/services/coding-plan.ts` 的 `queryMinimax`：
+**有**，已实现于 `lib/vendors/coding-plan.ts` 的 `queryMinimax`：
 `GET {origin}/v1/api/openplatform/coding_plan/remains`，`Authorization: Bearer`。
 注意响应里给的是**剩余量**，本项目转成已用百分比（`100 - remain`）；周额度仅在 `current_weekly_status === 1` 时有效。
 

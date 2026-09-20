@@ -81,7 +81,7 @@
 - **余额：无公开接口。** 已查过智谱官方文档、`one-api`、`new-api`、`cc-switch` 四处实现，均无智谱余额解析器。
 - **Coding Plan 额度：有**，`GET {origin}/api/monitor/usage/quota/limit`。
   注意鉴权头是 `Authorization: {apiKey}`，**不带 `Bearer` 前缀**，另需 `Accept-Language: en-US,en`。
-  已实现于 `lib/services/coding-plan.ts` 的 `queryZhipu`。
+  已实现于 `lib/vendors/coding-plan.ts` 的 `queryZhipu`。
 
 ## 模型列表
 

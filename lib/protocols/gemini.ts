@@ -6,7 +6,7 @@
 import { encodeSSE, generatorToStream, parseSSE, deferred } from './sse';
 import { applyGeminiReasoning } from './reasoning-emit';
 import type { ReasoningIntent } from '@/lib/gateway/reasoning';
-import type { UsageInfo } from '@/lib/gateway/logger';
+import type { UsageInfo } from '@/lib/services/usage-metrics';
 import { normalizeGeminiUsage, toPublicUsage } from '@/lib/services/usage-metrics';
 
 type Json = Record<string, any>;

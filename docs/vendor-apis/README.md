@@ -25,10 +25,10 @@
 
 | 资料 | 落地在 |
 |---|---|
-| 工具目录与计费 | `lib/presets/provider-tools.ts` → `/tools` 页面 |
-| 百炼模型目录与官方价格 | `lib/services/bailian-catalog.ts`、`lib/services/model-sync.ts` |
-| 余额查询 | `lib/services/balance.ts`、`lib/services/balance-provider.ts` |
-| 套餐额度 | `lib/services/coding-plan.ts` |
+| 工具目录与计费 | `lib/vendors/tools.ts` → `/tools` 页面 |
+| 百炼模型目录与官方价格 | `lib/vendors/bailian/catalog.ts`、`lib/services/model-sync.ts` |
+| 余额查询 | `lib/vendors/balance.ts`、`lib/presets/balance-provider.ts` |
+| 套餐额度 | `lib/vendors/coding-plan.ts` |
 | 模型能力 | `lib/services/model-capabilities.ts` |
 
 ## 维护约定

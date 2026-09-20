@@ -1,5 +1,5 @@
-import { isOfficialBailianCatalogProvider, normalizeBailianWorkspaceId } from './bailian-catalog.ts';
-import type { ProviderRow } from './provider.ts';
+import { isOfficialBailianCatalogProvider, normalizeBailianWorkspaceId } from './catalog.ts';
+import type { ProviderRow } from '../../services/provider.ts';
 
 export function isBailianAsrModel(modelId: string): boolean {
   const lower = modelId.toLowerCase();

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 // Node 22 strip-types 直接执行测试时要求显式 .ts 扩展名；生产代码仍使用项目默认解析规则。
-import { formatQuotaSummary, type QuotaTier } from '../lib/services/coding-plan.ts';
+import { formatQuotaSummary, type QuotaTier } from '../lib/vendors/coding-plan.ts';
 
 test('formats the five-hour and seven-day windows in canonical order', () => {
   const tiers: QuotaTier[] = [

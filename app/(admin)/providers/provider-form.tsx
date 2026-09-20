@@ -19,7 +19,7 @@ import {
 import type { ProviderProtocol } from '@/lib/presets/types';
 import type { ProviderFormState } from './provider-types';
 import PresetCardGrid from './preset-card-grid';
-import { isOfficialBailianCatalogProvider } from '@/lib/services/bailian-catalog';
+import { isOfficialBailianCatalogProvider } from '@/lib/vendors/bailian/catalog';
 
 export interface ProviderFormProps {
   value: ProviderFormState;

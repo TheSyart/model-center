@@ -8,7 +8,7 @@ import {
   acceptsBailianAsr,
   bailianAudioRejectMessage,
   callBailianAsr,
-} from '@/lib/services/dashscope-audio';
+} from '@/lib/vendors/bailian/audio';
 
 /**
  * 网关自身的内存护栏，不是上游的限制。

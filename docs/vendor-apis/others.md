@@ -40,7 +40,7 @@
 ### 已支持（7 家）
 
 DeepSeek、StepFun、SiliconFlow 中国站、SiliconFlow 国际站、OpenRouter、Novita —— 这 6 家来自 cc-switch 固定快照；Kimi 是本项目自加。
-实现见 `lib/services/balance.ts` 的 `BUILTIN_PARSERS`。
+实现见 `lib/vendors/balance.ts` 的 `BUILTIN_PARSERS`。
 
 > **上游没有新增。** cc-switch `main`（`06082e18`）的 `detect_provider` 仍然只有那 6 家；`one-api`/`new-api` 相比之下只多一个 Moonshot，而我们已经有了。
 
@@ -74,4 +74,4 @@ PPIO 与 Novita 是同一套产品（模型目录字节级同构、错误信封�
 
 已实现 5 家：Kimi、智谱（个人版 / 团队版同 Base URL 无法自动区分）、MiniMax 国内站、MiniMax 国际站、ZenMux。
 明确拒绝 1 家：**火山方舟**——需控制面 AK/SK 签名，与推理 Key 是两套凭据。
-见 `lib/services/coding-plan.ts`。
+见 `lib/vendors/coding-plan.ts`。

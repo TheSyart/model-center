@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { detectCcSwitchBalanceProvider } from '../lib/services/balance-provider.ts';
+import { detectCcSwitchBalanceProvider } from '../lib/presets/balance-provider.ts';
 
 test('detects every CC Switch built-in balance provider from protocol variants', () => {
   assert.equal(detectCcSwitchBalanceProvider('https://api.deepseek.com/anthropic'), 'deepseek');

@@ -4,10 +4,10 @@ import {
   bailianCatalogUrl,
   isOfficialBailianCatalogProvider,
   type BailianCatalogFilterOptions,
-} from './bailian-catalog.ts';
+} from '../vendors/bailian/catalog.ts';
 import { getEnabledDefaultEndpoint, replaceEndpointModelCatalogInTransaction } from './provider-endpoint.ts';
 import { CC_SWITCH_OWNED_PRICING_SOURCES } from '../db/pricing-migration.ts';
-import { isKimiCatalogProvider, parseKimiModelPage } from './kimi-catalog.ts';
+import { isKimiCatalogProvider, parseKimiModelPage } from '../vendors/kimi/catalog.ts';
 
 export interface SyncProviderRow {
   id: string;

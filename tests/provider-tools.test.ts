@@ -5,7 +5,7 @@ import {
   PROVIDER_TOOL_CATALOGS,
   formatToolBilling,
   toolCatalogFor,
-} from '../lib/presets/provider-tools.ts';
+} from '../lib/vendors/tools.ts';
 import { PROVIDER_PRESETS } from '../lib/presets/index.ts';
 
 test('every catalog entry carries a doc link and a verification date', () => {

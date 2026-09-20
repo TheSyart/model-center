@@ -6,7 +6,7 @@ import { getPreset } from '@/lib/presets';
 import { EndpointValidationError, listProviderEndpoints, replaceProviderEndpoints } from '@/lib/services/provider-endpoint';
 import { resolveEndpointSetForPatch } from '@/lib/services/provider-endpoint-request';
 import { getProvider, serializeProvider, validateBaseUrl, providerAuthPolicy, ProviderAuthError, rejectSubscriptionProviderAction } from '@/lib/services/provider';
-import { isOfficialBailianCatalogProvider, normalizeBailianWorkspaceId } from '@/lib/services/bailian-catalog';
+import { isOfficialBailianCatalogProvider, normalizeBailianWorkspaceId } from '@/lib/vendors/bailian/catalog';
 
 interface PatchBody {
   name?: string;

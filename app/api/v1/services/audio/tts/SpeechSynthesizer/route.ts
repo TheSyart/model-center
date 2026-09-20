@@ -6,7 +6,7 @@ import {
   acceptsBailianTts,
   bailianAudioRejectMessage,
   getBailianTtsEndpoint,
-} from '@/lib/services/dashscope-audio';
+} from '@/lib/vendors/bailian/audio';
 
 // DashScope 原生语音合成，路径与阿里云官方一致。
 function handlePost(req: NextRequest): Promise<Response> {

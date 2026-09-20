@@ -17,7 +17,7 @@ import type { ModelItem } from './model-table';
 import ProviderForm from './provider-form';
 import type { ProviderFormState, ProviderView } from './provider-types';
 import { createCustomFormEndpoints, protocolDisplayName, validateFormEndpoints } from '@/lib/services/provider-form';
-import { isOfficialBailianCatalogProvider } from '@/lib/services/bailian-catalog';
+import { isOfficialBailianCatalogProvider } from '@/lib/vendors/bailian/catalog';
 
 const EMPTY_FORM: ProviderFormState = { id: null, preset_key: null, slug: '', name: '', api_key: '', workspace_id: '', remark: '', endpoints: createCustomFormEndpoints() };
 

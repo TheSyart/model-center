@@ -5,9 +5,9 @@ import {
   BAILIAN_PROVIDERS,
   BAILIAN_CAPABILITIES,
   type BailianCatalogFilterOptions,
-} from '../lib/services/bailian-catalog.ts';
+} from '../lib/vendors/bailian/catalog.ts';
 import { resolveModelCapabilities } from '../lib/services/model-capabilities.ts';
-import { isBailianAsrModel, isBailianTtsModel, getBailianAsrEndpoint, getBailianTtsEndpoint } from '../lib/services/dashscope-audio.ts';
+import { isBailianAsrModel, isBailianTtsModel, getBailianAsrEndpoint, getBailianTtsEndpoint } from '../lib/vendors/bailian/audio.ts';
 
 test('bailianCatalogUrl serializes query parameters correctly according to official docs', () => {
   const filter: BailianCatalogFilterOptions = {
