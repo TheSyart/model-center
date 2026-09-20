@@ -4,8 +4,10 @@ import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { isOAuthOnlyPreset } from '@/lib/subscriptions/catalog';
 import { getPreset, PROVIDER_PRESETS } from '@/lib/presets';
+import { isReputablePreset } from '@/lib/presets/reputable';
 import { filterProviderPresets, protocolDisplayName } from '@/lib/services/provider-form';
 import { cardCls, inputCls } from '@/components/ui/styles';
+import { Checkbox } from '@/components/ui/checkbox';
 
 export interface PresetCardGridProps {
   selectedPresetKey: string | null;
@@ -22,13 +24,28 @@ function PresetLogo({ slug, name, logo }: { slug: string; name: string; logo?: s
 
 export default function PresetCardGrid({ selectedPresetKey, onSelectPreset }: PresetCardGridProps) {
   const [query, setQuery] = useState('');
-  const presets = useMemo(() => filterProviderPresets(PROVIDER_PRESETS.filter(preset => !isOAuthOnlyPreset(preset)), query), [query]);
+  const [reputableOnly, setReputableOnly] = useState(true);
+  const presets = useMemo(() => {
+    let list = PROVIDER_PRESETS.filter((preset) => !isOAuthOnlyPreset(preset));
+    if (reputableOnly) {
+      list = list.filter(isReputablePreset);
+    }
+    return filterProviderPresets(list, query);
+  }, [query, reputableOnly]);
   const selected = selectedPresetKey ? getPreset(selectedPresetKey) : undefined;
 
   return (
     <fieldset className="min-w-0">
-      <legend className="text-sm font-medium text-foreground">选择服务商预设</legend>
-      <p className="mt-1 text-sm text-muted-foreground">选择预设后只需填写 API Key；授权登录请前往<Link href="/subscriptions" className="text-primary underline underline-offset-2">订阅账号</Link>。</p>
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <div>
+          <legend className="text-sm font-medium text-foreground">选择服务商预设</legend>
+          <p className="mt-1 text-sm text-muted-foreground">选择预设后只需填写 API Key；授权登录请前往<Link href="/subscriptions" className="text-primary underline underline-offset-2">订阅账号</Link>。</p>
+        </div>
+        <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+          <Checkbox checked={reputableOnly} onCheckedChange={(v) => setReputableOnly(v === true)} />
+          仅显示国内外正规厂商（已过滤杂牌中转）
+        </label>
+      </div>
       <label className="mt-3 block">
         <span className="sr-only">搜索服务商预设</span>
         <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称、slug 或旧版 slug" className={`w-full ${inputCls}`} />
