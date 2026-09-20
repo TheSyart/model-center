@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { calculateRequestCost, resolveModelPricing } from '../lib/services/pricing.ts';
-import { lookupBundledPricing, lookupPricingFromCatalog } from '../lib/services/model-pricing.ts';
+import { lookupBundledPricing, lookupPricingFromCatalog } from '../lib/pricing/bundled.ts';
 
 test('calculates four-class cost when cache metrics are observed', () => {
   assert.equal(calculateRequestCost({

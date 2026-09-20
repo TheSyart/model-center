@@ -1,6 +1,13 @@
+/**
+ * cc-switch 打包快照里的模型定价查询。
+ *
+ * 放在 lib/pricing/ 而不是 lib/services/：它只读打包进来的 JSON，不碰数据库、
+ * 不依赖任何领域服务。原本落在 services 下，导致最底层的 lib/db 为了拿这个函数
+ * 反过来 import 业务层。
+ */
 import catalog from '../presets/cc-switch-catalog.json' with { type: 'json' };
 import manifest from '../presets/cc-switch-manifest.json' with { type: 'json' };
-import { CC_SWITCH_PRICING } from '../pricing/cc-switch.ts';
+import { CC_SWITCH_PRICING } from './cc-switch.ts';
 import type { ModelPricingRow } from '../../scripts/cc-switch-sync-lib.ts';
 import type { BundledPricing } from '../db/pricing-migration.ts';
 

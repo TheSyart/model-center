@@ -3,7 +3,7 @@ import { asc, eq } from 'drizzle-orm';
 import { db, schema, sqlite } from '@/lib/db';
 import type { models } from '@/lib/db/schema';
 import { getProviderSubscriptionId, withDefaultProviderEndpoint, type ProviderRow } from './provider';
-import { CC_SWITCH_PRICING_SOURCE_REF, lookupBundledPricing } from './model-pricing';
+import { CC_SWITCH_PRICING_SOURCE_REF, lookupBundledPricing } from '../pricing/bundled.ts';
 import { syncProviderModels, type SyncResult } from './model-sync';
 import { addManualModelsToCompleteCatalog } from '@/lib/subscriptions/store';
 import type { BailianCatalogFilterOptions } from './bailian-catalog';

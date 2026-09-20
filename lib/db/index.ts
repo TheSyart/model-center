@@ -5,15 +5,8 @@ import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { encrypt } from '@/lib/crypto';
 import * as schema from './schema';
-import { migrateUsageSchema } from './usage-migration';
-import { migrateModelPricingSchema } from './pricing-migration';
-import { migrateModelReasoningSchema } from './model-reasoning-migration';
-import { migrateModelCapabilitiesSchema } from './capabilities-migration';
-import { migrateProviderEndpointSchema } from './provider-endpoint-migration';
-import { migrateProviderCatalogSchema } from './provider-catalog-migration';
-import { lookupBundledPricing } from '@/lib/services/model-pricing';
-import ccSwitchManifest from '@/lib/presets/cc-switch-manifest.json';
-import { migrateSubscriptionSchema } from '@/lib/subscriptions/store';
+// 迁移链的组装在 bootstrap.ts —— 本文件只负责开库与建表，不认识任何业务模块。
+import { runMigrations } from './bootstrap';
 
 // 数据目录：默认 <cwd>/data，可用 MODEL_CENTER_DB_DIR 覆盖（测试/多实例隔离用）
 const DB_DIR = process.env.MODEL_CENTER_DB_DIR || path.join(process.cwd(), 'data');
@@ -184,13 +177,7 @@ function migrate(sqlite: Database.Database) {
     sqlite.prepare('DELETE FROM settings WHERE key = ?').run('gateway_key');
   }
 
-  migrateUsageSchema(sqlite);
-  migrateModelPricingSchema(sqlite, lookupBundledPricing, ccSwitchManifest.commit);
-  migrateModelReasoningSchema(sqlite);
-  migrateModelCapabilitiesSchema(sqlite);
-  migrateProviderCatalogSchema(sqlite);
-  migrateProviderEndpointSchema(sqlite);
-  migrateSubscriptionSchema(sqlite);
+  runMigrations(sqlite);
 }
 
 function createClient() {
