@@ -314,14 +314,21 @@ export function openBailianTtsStream(
         if (typeof n === 'number') characters = n;
         // 等在途分片入列再收口，否则尾音会丢。
         void pending.then(() => {
+          if (chunkCount === 0) {
+            /**
+             * 上游报告成功却一个字节都没给。实测最常见的原因是**音色还没部署完**
+             * （query_voice 的 status 还是 DEPLOYING），这时合成会安静地返回空。
+             * 不把它变成错误，客户端就会拿到一个 200 的空音频，什么也听不出来。
+             */
+            fail(
+              502,
+              '百炼 TTS 失败：上游报告合成完成，却没有返回任何音频。' +
+                '若用的是自定义音色，多半是它还没部署完（查询音色状态应为 OK 而不是 DEPLOYING）。',
+            );
+            return;
+          }
           push.close();
           settle('finished');
-          // 一个字节音频都没有也算成功结束，交给调用方判空。
-          if (!opened) {
-            opened = true;
-            clearTimers();
-            resolveOpen({ chunks: push.chunks, completion: completion.promise, firstChunkMs: Date.now() - startedAt });
-          }
         });
       } else if (kind === 'task-failed') {
         const code = message?.header?.error_code ?? 'unknown';

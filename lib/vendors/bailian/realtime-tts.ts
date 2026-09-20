@@ -181,13 +181,6 @@ export function openBailianRealtimeTtsStream(
       resolveOpen({ chunks: push.chunks, completion: completion.promise, firstChunkMs: Date.now() - startedAt });
     };
 
-    const openEmpty = () => {
-      if (opened) return;
-      opened = true;
-      clearTimers();
-      resolveOpen({ chunks: push.chunks, completion: completion.promise, firstChunkMs: Date.now() - startedAt });
-    };
-
     firstTimer = setTimeout(
       () => fail(504, `百炼实时 TTS 失败：${timeoutMs}ms 内没有返回任何音频`),
       timeoutMs,
@@ -254,9 +247,13 @@ export function openBailianRealtimeTtsStream(
         }
       } else if (type === 'session.finished') {
         // 只有它才是终点。response.audio.done 是每一轮的，不是会话的。
+        if (chunkCount === 0) {
+          // 报告成功却没给音频：一个 200 的空音频比一个错误更难排查。
+          fail(502, '百炼实时 TTS 失败：会话正常结束，却没有返回任何音频。');
+          return;
+        }
         push.close();
         settle('finished');
-        openEmpty();
       } else if (type === 'error') {
         const code = message?.error?.code;
         const text = message?.error?.message ?? '（上游未给出原因）';

@@ -14,6 +14,7 @@ export const RAW_CAPTURE_ENTRY_PATHS = {
   'security-lab-anthropic': '/security-lab/v1/messages',
   'audio-speech': '/v1/audio/speech',
   'audio-transcriptions': '/v1/audio/transcriptions',
+  'audio-voices': '/v1/audio/voices',
   'dashscope-asr': '/v1/services/aigc/multimodal-generation/generation',
   'dashscope-tts': '/v1/services/audio/tts/SpeechSynthesizer',
 } as const;

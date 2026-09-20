@@ -24,6 +24,7 @@ const protocolLabels: Record<RawCaptureRecord['entryProtocol'], string> = {
   'security-lab-anthropic': 'Security Lab',
   'audio-speech': '语音合成',
   'audio-transcriptions': '语音识别',
+  'audio-voices': '音色定制',
   'dashscope-asr': 'DashScope ASR',
   'dashscope-tts': 'DashScope TTS',
 };

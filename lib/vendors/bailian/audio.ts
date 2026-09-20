@@ -122,6 +122,30 @@ export function acceptsBailianSpeechSynthesizer(target: { provider: ProviderRow;
   return isOfficialBailianCatalogProvider(target.provider) && route.supported && route.kind === 'ws-tts';
 }
 
+/**
+ * 自定义音色的准入：服务商要在百炼官方目录下，模型要是个语音合成模型。
+ *
+ * 音色是**绑在目标合成模型上**的，所以这里判定的是那个模型，而不是某个
+ * 「音色服务」——上游也确实按目标模型分流到两套字段名不同的 API。
+ */
+export function acceptsBailianVoiceCustomization(target: { provider: ProviderRow; modelId: string }): boolean {
+  const route = resolveBailianAudioRoute(target.modelId);
+  return (
+    isOfficialBailianCatalogProvider(target.provider) &&
+    route.supported &&
+    (route.kind === 'qwen-tts' || route.kind === 'ws-tts' || route.kind === 'realtime-tts')
+  );
+}
+
+export function bailianVoiceRejectMessage(modelId: string, provider: ProviderRow): string {
+  if (!isOfficialBailianCatalogProvider(provider)) {
+    return `模型 "${modelId}"（服务商 ${provider.slug}）不在百炼官方目录下；音色接口只转发百炼 DashScope。`;
+  }
+  const route = resolveBailianAudioRoute(modelId);
+  if (!route.supported) return `模型 "${modelId}" 不可用：${route.reason}。`;
+  return `模型 "${modelId}" 不是语音合成模型，音色只能绑定在合成模型上。`;
+}
+
 /** 被拒时给客户端的说明：说清是服务商不对，还是这个模型走不了 HTTP。 */
 export function bailianAudioRejectMessage(
   kind: 'ASR' | 'TTS',

@@ -233,3 +233,13 @@ test('completion always settles, whatever the socket does', async () => {
     assert.equal(raced, 'settled', `${name}: completion 悬挂会让日志的 after() 永久挂住`);
   }
 });
+
+test('a "successful" synthesis with zero audio becomes an error, not an empty 200', async () => {
+  // 实测：自定义音色还在 DEPLOYING 时，上游会回 task-finished 却一个字节都不给。
+  // 放过去，客户端拿到的就是一个 200 的空音频，什么也听不出来、也无从排查。
+  const { connect } = fakeSocket((h) => h.event('task-finished', { usage: { characters: 4 } }));
+  await assert.rejects(
+    () => open(connect),
+    (e: unknown) => isUpstreamError(e) && (e as any).status === 502 && /DEPLOYING/.test((e as any).message),
+  );
+});
