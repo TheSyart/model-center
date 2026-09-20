@@ -256,7 +256,12 @@ GET  {transcription_url}   ← 文本在这里，不在轮询响应里
 ### 音色表按模型版本分，互换必被拒
 
 上游用 `Engine return error code: 418`（cosyvoice 系）或 `Engine error [411]`
-（qwen-audio 系）表示「这个音色不属于这个模型」。实测：
+（qwen-audio 系）表示「这个音色不属于这个模型」。**这两个错误信息极具误导性**——
+看着像服务端故障，实际是参数不匹配，网关会把可用音色名附在错误后面。
+
+命名规律：`qwen3-tts-*` 用英文名（`Cherry`、`Ethan`、`Serena`、`Dylan`），
+`qwen-audio-*-tts` 与 `cosyvoice-*` 用「龙」字辈（`long*` / `loong*`），
+但两者的「龙」字辈**也不通用**，且带不带 `_v3.6` 后缀是两套。实测：
 
 | 模型 | 可用音色 | 结果 |
 |---|---|---|
@@ -265,8 +270,11 @@ GET  {transcription_url}   ← 文本在这里，不在轮询响应里
 | `cosyvoice-v3-flash` | `longanhuan`、`longanyang`、`*_v3` 那一套 | ✅ |
 | `cosyvoice-v3.5-flash/plus` | 全部预置音色 + 不传 | ❌ 418，**只收克隆音色** |
 | `sambert-*` | 不传 | ✅ |
-| `qwen-audio-3.0-tts-flash/plus` | **只有 `longanlingxi`**（20 个候选逐个实打），连不传都被拒 | ✅ |
+| `qwen-audio-3.0-tts-flash` | `longanlingxi`、`longanhuan_v3.6`、`longpaopao_v3.6`、`longjielidou_v3.6`、`loongmary` | ✅ |
+| `qwen-audio-3.0-tts-plus` | 只有 `longanlingxi`、`longanhuan_v3.6`（flash 能用的另三个在 plus 上 411） | ✅ |
+| `qwen-audio-3.0-tts-*` | 不传 voice | ❌ 411，这一族必须显式指定 |
 | `qwen-audio-3.1-tts-flash` | 全部预置音色 + 不传 | ❌ 411，**只收克隆音色** |
+| `cosyvoice-v3-flash` | `longanhuan_v3.6`（qwen-audio 那一套） | ❌ 418，两族音色不通用 |
 | `qwen3-tts-*` | `Cherry`、`Ethan`、`Serena`、`Dylan` 等 | ✅ |
 
 `cosyvoice-v3.5-*` 与 `qwen-audio-3.1-tts-flash` 的「只收克隆音色」**已实际验证**：

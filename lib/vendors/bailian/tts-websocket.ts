@@ -82,12 +82,18 @@ export function ttsFailureHint(model: string, voice: string | undefined, upstrea
   }
 
   // qwen-audio-*-tts 用 411 表示同一件事，但连「不传 voice」都会被 411 拒，
-  // 所以必须点名唯一可用的那个音色，否则调用方无从下手。
+  // 所以必须给出实测可用的音色名，否则调用方无从下手。
   if (/\b411\b/.test(upstreamMessage) && lower.includes('qwen-audio')) {
     if (lower.includes('3.1')) {
-      return '（411 表示音色不被该模型接受。qwen-audio-3.1-tts-flash 实测拒绝全部 20 个预置音色，包括不传——推断它只接受 voice-enrollment 复刻出来的音色，需先创建克隆音色再把其 ID 作为 voice 传入。）';
+      return '（411 表示音色不被该模型接受。qwen-audio-3.1-tts-flash 实测拒绝所有预置音色，包括不传——它只接受 voice-enrollment 复刻出来的音色，用克隆音色已验证可出音，请先创建克隆音色再把其 ID 作为 voice 传入。）';
     }
-    return `（411 表示音色不被该模型接受。${model} 实测只接受 longanlingxi，连不传 voice 都会被拒，当前传的是 ${voice ?? '（未指定）'}。）`;
+    const usable = lower.includes('plus')
+      ? 'longanlingxi、longanhuan_v3.6'
+      : 'longanlingxi、longanhuan_v3.6、longpaopao_v3.6、longjielidou_v3.6、loongmary';
+    return (
+      `（411 表示音色不被该模型接受——它是 CosyVoice 系，不认 Cherry 这类 Qwen-TTS 系的英文名。` +
+      `${model} 实测可用：${usable}；当前传的是 ${voice ?? '（未指定，该模型不传也会被拒）'}。）`
+    );
   }
 
   if (!/\b418\b/.test(upstreamMessage)) return '';

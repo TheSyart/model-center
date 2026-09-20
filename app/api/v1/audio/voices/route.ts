@@ -92,6 +92,66 @@ async function handleGet(req: NextRequest): Promise<Response> {
   });
 }
 
+/**
+ * 两种请求体都收。
+ *
+ * 复刻要上传样本，只能走 multipart；设计只有几个字符串字段，JSON 更顺手，
+ * 而且调用方本来就是从一个表单页面发过来的。强行只认一种会把设计这条路
+ * 逼成一个没有文件的 multipart，没有道理。
+ */
+async function readVoiceInput(
+  req: NextRequest,
+): Promise<{ fields: Record<string, string | undefined>; file: Blob | null } | { error: Response }> {
+  const contentType = req.headers.get('content-type') ?? '';
+  const pick = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+
+  if (contentType.includes('application/json')) {
+    let body: Record<string, unknown>;
+    try {
+      body = await req.json();
+    } catch {
+      return { error: openaiErrorResponse(400, '请求体不是合法 JSON', { code: 'invalid_json' }) };
+    }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return { error: openaiErrorResponse(400, '请求体必须是 JSON 对象', { code: 'invalid_json' }) };
+    }
+    return {
+      file: null,
+      fields: {
+        model: pick(body.model),
+        name: pick(body.name),
+        audio_url: pick(body.audio_url),
+        prompt: pick(body.prompt),
+        preview_text: pick(body.preview_text),
+        language: pick(body.language),
+      },
+    };
+  }
+
+  let form: FormData;
+  try {
+    form = await req.formData();
+  } catch {
+    return {
+      error: openaiErrorResponse(400, '请求体既不是 JSON 也不是合法的 multipart/form-data', {
+        code: 'invalid_request_body',
+      }),
+    };
+  }
+  const raw = form.get('file');
+  return {
+    file: raw instanceof Blob ? raw : null,
+    fields: {
+      model: pick(form.get('model')),
+      name: pick(form.get('name')),
+      audio_url: pick(form.get('audio_url')),
+      prompt: pick(form.get('prompt')),
+      preview_text: pick(form.get('preview_text')),
+      language: pick(form.get('language')),
+    },
+  };
+}
+
 // POST /api/v1/audio/voices —— 带 file/audio_url 是复刻，带 prompt 是设计。
 async function handlePost(req: NextRequest): Promise<Response> {
   const auth = checkGatewayAuth(req);
@@ -99,29 +159,25 @@ async function handlePost(req: NextRequest): Promise<Response> {
     return openaiErrorResponse(401, auth.message, { type: 'authentication_error', code: auth.code });
   }
 
-  let form: FormData;
-  try {
-    form = await req.formData();
-  } catch {
-    return openaiErrorResponse(400, '请求体不是合法的 multipart/form-data', { code: 'invalid_form_data' });
-  }
+  const parsed = await readVoiceInput(req);
+  if ('error' in parsed) return parsed.error;
+  const { fields, file } = parsed;
 
-  const model = (form.get('model') as string | null)?.trim();
+  const model = fields.model;
   if (!model) return openaiErrorResponse(400, '缺少必需的模型参数 (model)', { param: 'model' });
 
-  const name = (form.get('name') as string | null)?.trim();
+  const name = fields.name;
   if (!name) return openaiErrorResponse(400, '缺少音色名 (name)', { param: 'name' });
   if (!NAME_PATTERN.test(name)) {
     return openaiErrorResponse(400, '音色名只能是 1-20 位小写字母或数字', { param: 'name', code: 'invalid_voice_name' });
   }
 
-  const file = form.get('file');
-  const audioUrl = (form.get('audio_url') as string | null)?.trim();
-  const prompt = (form.get('prompt') as string | null)?.trim();
-  const previewText = (form.get('preview_text') as string | null)?.trim();
-  const language = (form.get('language') as string | null)?.trim();
+  const audioUrl = fields.audio_url;
+  const prompt = fields.prompt;
+  const previewText = fields.preview_text;
+  const language = fields.language;
 
-  const hasSample = Boolean(audioUrl) || file instanceof Blob;
+  const hasSample = Boolean(audioUrl) || file !== null;
   if (!hasSample && !prompt) {
     return openaiErrorResponse(
       400,
@@ -141,7 +197,7 @@ async function handlePost(req: NextRequest): Promise<Response> {
       { param: 'preview_text', code: 'preview_text_too_short' },
     );
   }
-  if (file instanceof Blob && file.size > MAX_SAMPLE_BYTES) {
+  if (file && file.size > MAX_SAMPLE_BYTES) {
     return openaiErrorResponse(
       413,
       `样本音频 ${(file.size / 1024 / 1024).toFixed(1)}MB 超出上限 ${MAX_SAMPLE_BYTES / 1024 / 1024}MB`,
@@ -161,7 +217,7 @@ async function handlePost(req: NextRequest): Promise<Response> {
     execute: async ({ target, apiKey, signal }) => {
       let sampleUrl = audioUrl;
 
-      if (!sampleUrl && file instanceof Blob) {
+      if (!sampleUrl && file) {
         if (needsOssUpload(target.modelId)) {
           /**
            * 这一族的上游只收地址，不收 base64。网关没有对象存储，所以借百炼自己的：

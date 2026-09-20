@@ -410,10 +410,17 @@ test('filetrans uses a different input field per family, and swapping them fails
   });
 });
 
-test('a 411 names the one voice qwen-audio actually accepts', () => {
+test('a 411 names the voices qwen-audio actually accepts', () => {
   const hint = ttsFailureHint('qwen-audio-3.0-tts-flash', 'Cherry', '[cosyvoice:]Engine error [411]');
+  // 这一族是 CosyVoice 系，不认 Cherry 这类 Qwen-TTS 系的英文名。
   assert.match(hint, /longanlingxi/);
+  assert.match(hint, /longanhuan_v3\.6/);
+  assert.match(hint, /loongmary/);
   assert.match(hint, /Cherry/);
+  // plus 比 flash 少三个，别把 flash 的表原样报给 plus。
+  const plusHint = ttsFailureHint('qwen-audio-3.0-tts-plus', 'loongmary', '[cosyvoice:]Engine error [411]');
+  assert.match(plusHint, /longanhuan_v3\.6/);
+  assert.equal(/loongmary、|、loongmary/.test(plusHint.split('当前传的是')[0]), false);
   // 3.1 实测 20 个候选音色全拒、连不传都拒，提示要指向复刻音色而不是某个预置音色。
   const hint31 = ttsFailureHint('qwen-audio-3.1-tts-flash', undefined, '[cosyvoice:]Engine error [411]');
   assert.match(hint31, /voice-enrollment|克隆/);
