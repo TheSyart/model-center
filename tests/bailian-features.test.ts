@@ -20,6 +20,7 @@ import {
   extractBailianAsrText,
   audioFormatFromName,
   supportsBailianVocabulary,
+  realtimeSiblingFor,
 } from '../lib/vendors/bailian/audio.ts';
 import { buildFiletransInput } from '../lib/vendors/bailian/asr-filetrans.ts';
 import { streamingModeFor, ttsFailureHint } from '../lib/vendors/bailian/tts-websocket.ts';
@@ -116,12 +117,32 @@ test('audio models route to the endpoint and protocol their family actually uses
   assert.deepEqual(resolveBailianAudioRoute('qwen-audio-3.0-asr-flash'), { supported: true, kind: 'asr' });
 });
 
-test('realtime models are refused locally with a reason', () => {
-  // 实测：实时模型在同步推理的 WebSocket 端点上也是 Model not found，它们用另一套实时协议。
-  const realtime = resolveBailianAudioRoute('qwen3-tts-flash-realtime');
-  assert.equal(realtime.supported, false);
-  assert.match(realtime.supported === false ? realtime.reason : '', /WebSocket/);
-  assert.equal(resolveBailianAudioRoute('qwen3-asr-flash-realtime-2026-02-10').supported, false);
+test('realtime TTS gets its own protocol; realtime ASR is still refused locally', () => {
+  // 实时 TTS 走协议 B（/api-ws/v1/realtime），与协议 A 互不相通：
+  // 实测 qwen3-tts-flash-realtime 在协议 A 上是 Model not found。
+  assert.deepEqual(resolveBailianAudioRoute('qwen3-tts-flash-realtime'), {
+    supported: true,
+    kind: 'realtime-tts',
+  });
+  assert.deepEqual(resolveBailianAudioRoute('qwen3-tts-instruct-flash-realtime'), {
+    supported: true,
+    kind: 'realtime-tts',
+  });
+
+  // 实时 ASR 要求客户端边推音频边收文字，一问一答的 HTTP 面承载不了。
+  const asr = resolveBailianAudioRoute('qwen3-asr-flash-realtime-2026-02-10');
+  assert.equal(asr.supported, false);
+  assert.match(asr.supported === false ? asr.reason : '', /双向/);
+});
+
+test('the realtime sibling is offered as a hint, never substituted silently', () => {
+  assert.equal(realtimeSiblingFor('qwen3-tts-flash'), 'qwen3-tts-flash-realtime');
+  assert.equal(realtimeSiblingFor('bailian/qwen3-tts-instruct-flash'), 'qwen3-tts-instruct-flash-realtime');
+  // 已经是实时模型的没有兄弟。
+  assert.equal(realtimeSiblingFor('qwen3-tts-flash-realtime'), undefined);
+  // cosyvoice / sambert 实测没有 -realtime 兄弟，别凭名字编一个出来。
+  assert.equal(realtimeSiblingFor('cosyvoice-v3-flash'), undefined);
+  assert.equal(realtimeSiblingFor('sambert-zhichu-v1'), undefined);
 });
 
 test('streaming mode differs by family, and getting it wrong is what upstream rejects', () => {

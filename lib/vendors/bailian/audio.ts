@@ -1,6 +1,7 @@
 import { isOfficialBailianCatalogProvider, normalizeBailianWorkspaceId } from './catalog.ts';
 import type { ProviderRow } from '../../services/provider.ts';
 import { UpstreamError } from '../../upstream-error.ts';
+import { openBailianRealtimeTtsStream } from './realtime-tts.ts';
 import {
   openBailianTtsStream,
   synthesizeOverWebSocket,
@@ -49,8 +50,10 @@ export function isBailianTtsModel(modelId: string): boolean {
 export type BailianAudioKind =
   /** qwen-tts / qwen3-tts-*：HTTP 多模态生成端点。WebSocket 上查无此模型。 */
   | 'qwen-tts'
-  /** sambert / cosyvoice / qwen-audio-*-tts：只能 WebSocket，HTTP 端点会拒。 */
+  /** sambert / cosyvoice / qwen-audio-*-tts：只能 WebSocket（协议 A），HTTP 端点会拒。 */
   | 'ws-tts'
+  /** qwen3-tts-*-realtime：只能 WebSocket（协议 B），与协议 A 互不相通。 */
+  | 'realtime-tts'
   /** 同步语音识别：HTTP 多模态生成端点。 */
   | 'asr'
   /** 录音文件转写：HTTP 异步提交 + 轮询。 */
@@ -63,10 +66,12 @@ export type BailianAudioRoute =
 export function resolveBailianAudioRoute(modelId: string): BailianAudioRoute {
   const lower = modelId.toLowerCase();
 
-  // 实测：qwen3-tts-flash-realtime 回 `current user api does not support http call`。
-  // 实时模型本就是流式协议，HTTP 一问一答这条路给不了，先挡在本地而不是白跑一趟上游。
   if (lower.includes('realtime')) {
-    return { supported: false, reason: '实时语音模型只提供 WebSocket 接口，网关的 HTTP 面无法承载' };
+    // 实时 TTS 走协议 B（/api-ws/v1/realtime），网关把它整形成 HTTP 流式下发。
+    if (isBailianTtsModel(modelId)) return { supported: true, kind: 'realtime-tts' };
+    // 实时 ASR / omni 是另一套双向协议：客户端要边推音频边收文字，
+    // 一问一答的 HTTP 面承载不了，挡在本地而不是白跑一趟上游。
+    return { supported: false, reason: '实时语音识别只提供双向 WebSocket 接口，网关的 HTTP 面无法承载' };
   }
 
   if (lower.includes('filetrans')) return { supported: true, kind: 'asr-filetrans' };
@@ -98,7 +103,7 @@ export function acceptsBailianTts(target: { provider: ProviderRow; modelId: stri
   return (
     isOfficialBailianCatalogProvider(target.provider) &&
     route.supported &&
-    (route.kind === 'qwen-tts' || route.kind === 'ws-tts')
+    (route.kind === 'qwen-tts' || route.kind === 'ws-tts' || route.kind === 'realtime-tts')
   );
 }
 
@@ -338,6 +343,8 @@ export interface BailianTtsOptions {
   sampleRate?: number;
   /** Qwen-TTS 专用：如 Chinese / English。 */
   languageType?: string;
+  /** 仅 instruct 系模型生效。 */
+  instructions?: string;
   /** WebSocket 连接注入，测试用。 */
   connect?: (url: string, apiKey: string) => import('./tts-websocket.ts').WebSocketLike;
   volume?: number;
@@ -376,6 +383,12 @@ const WS_CONTENT_TYPES: Record<string, string> = {
   pcm: 'audio/L16',
 };
 
+/** 协议 B 比协议 A 多支持 opus。 */
+const REALTIME_CONTENT_TYPES: Record<string, string> = {
+  ...WS_CONTENT_TYPES,
+  opus: 'audio/opus',
+};
+
 function contentTypeFromUrl(url: string): string | undefined {
   const ext = new URL(url).pathname.split('.').pop()?.toLowerCase();
   return ext ? URL_CONTENT_TYPES[ext] : undefined;
@@ -412,6 +425,22 @@ export async function callBailianTts(
   const route = resolveBailianAudioRoute(options.model);
   if (!route.supported) throw new UpstreamError(400, `模型 "${options.model}" 不可用：${route.reason}`);
   const voice = options.voice ?? defaultVoiceFor(options.model);
+
+  // 实时模型没有非流式接口。客户端要整包就替它读到底——这是个流，读完就是整包。
+  if (route.kind === 'realtime-tts') {
+    const stream = await openBailianTtsAudioStream(provider, apiKey, options);
+    const parts: Buffer[] = [];
+    for await (const chunk of stream.chunks) parts.push(Buffer.from(chunk));
+    const done = await stream.completion;
+    const audio = Buffer.concat(parts);
+    return {
+      audioBuffer: audio,
+      contentType: stream.contentType,
+      characters: done.characters,
+      requestId: done.requestId,
+      raw: { via: 'realtime-websocket', bytes: audio.length, reason: done.reason },
+    };
+  }
 
   // 只能走 WebSocket 的三族：直接拿到音频字节，没有中间的下载 URL。
   if (route.kind === 'ws-tts') {
@@ -607,11 +636,37 @@ export async function openBailianTtsAudioStream(
 ): Promise<BailianTtsStreamHandle> {
   const route = resolveBailianAudioRoute(options.model);
   if (!route.supported) throw new UpstreamError(400, `模型 "${options.model}" 不可用：${route.reason}`);
-  if (route.kind !== 'ws-tts') {
+  if (route.kind !== 'ws-tts' && route.kind !== 'realtime-tts') {
     throw new UpstreamError(400, `模型 "${options.model}" 没有增量音频源，无法流式`);
   }
 
   const voice = options.voice ?? defaultVoiceFor(options.model);
+
+  if (route.kind === 'realtime-tts') {
+    const responseFormat = options.format === 'opus' ? 'opus' : (options.format ?? 'mp3');
+    const stream = await openBailianRealtimeTtsStream(provider.workspaceId, apiKey, {
+      model: options.model,
+      text: options.text,
+      voice,
+      responseFormat,
+      sampleRate: options.sampleRate,
+      speechRate: options.rate,
+      volume: options.volume,
+      pitchRate: options.pitch,
+      instructions: options.instructions,
+      languageType: options.languageType,
+      signal: options.signal,
+      connect: options.connect,
+      maxBufferedBytes: options.maxBufferedBytes,
+      idleTimeoutMs: options.idleTimeoutMs,
+    });
+    return {
+      chunks: stream.chunks,
+      completion: stream.completion,
+      contentType: REALTIME_CONTENT_TYPES[responseFormat] ?? 'application/octet-stream',
+      voice,
+    };
+  }
   const format = options.format === 'opus' ? 'mp3' : (options.format ?? 'mp3');
   const stream = await openBailianTtsStream(provider.workspaceId, apiKey, {
     model: options.model,
@@ -636,8 +691,24 @@ export async function openBailianTtsAudioStream(
   };
 }
 
+/**
+ * 对应的实时模型 ID，没有就返回 undefined。
+ *
+ * **只作为提示给出，绝不隐式替换。** 百炼的自定义音色绑定创建时的 target_model，
+ * 把 qwen3-tts-flash 悄悄换成 qwen3-tts-flash-realtime 会让调用方已复刻的音色
+ * 全部失效——换族的代价必须由调用方自己决定。
+ */
+export function realtimeSiblingFor(modelId: string): string | undefined {
+  const bare = modelId.split('/').pop() ?? '';
+  const lower = bare.toLowerCase();
+  if (lower.includes('realtime')) return undefined;
+  // 实测只有 qwen3-tts-* 这一族有 -realtime 兄弟；cosyvoice / sambert 没有。
+  if (!/^qwen3-tts-/.test(lower)) return undefined;
+  return `${bare}-realtime`;
+}
+
 /** 这个模型有没有增量音频源。没有就只能缓冲之后再整块发。 */
 export function canStreamBailianTts(modelId: string): boolean {
   const route = resolveBailianAudioRoute(modelId);
-  return route.supported && route.kind === 'ws-tts';
+  return route.supported && (route.kind === 'ws-tts' || route.kind === 'realtime-tts');
 }

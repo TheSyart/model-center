@@ -14,6 +14,7 @@ import {
   callBailianTts,
   canStreamBailianTts,
   openBailianTtsAudioStream,
+  realtimeSiblingFor,
 } from '@/lib/vendors/bailian/audio';
 import type { BailianWsTtsCompletion } from '@/lib/vendors/bailian/tts-websocket';
 
@@ -152,7 +153,16 @@ async function handlePost(req: NextRequest): Promise<Response> {
       ...(streamFormat === 'sse' ? SSE_HEADERS : audioStreamHeaders(contentType)),
       'X-Model-Center-Upstream-Model': target.modelId,
     };
-    if (buffered) headers['X-Model-Center-Stream'] = 'buffered';
+    if (buffered) {
+      headers['X-Model-Center-Stream'] = 'buffered';
+      const sibling = realtimeSiblingFor(target.modelId);
+      if (sibling) {
+        // 只提示，不替换：自定义音色绑定 target_model，换族会让已复刻的音色失效，
+        // 这个代价得由调用方自己决定。
+        headers['X-Model-Center-Stream-Hint'] =
+          `${sibling} streams incrementally; switching model family invalidates cloned voices`;
+      }
+    }
 
     return {
       response: new Response(observed.stream, { status: 200, headers }),

@@ -1,8 +1,10 @@
 import crypto from 'node:crypto';
-import { WebSocket } from 'undici';
 import { createPushStream } from '../../protocols/push-stream.ts';
 import { deferred } from '../../protocols/sse.ts';
 import { UpstreamError } from '../../upstream-error.ts';
+import { bailianWsHost, connectBailianWs, type WebSocketLike } from './ws-transport.ts';
+
+export type { WebSocketLike };
 
 /**
  * 百炼 WebSocket 语音合成。
@@ -44,17 +46,8 @@ export interface BailianWsTtsResult {
   requestId?: string;
 }
 
-/** 只取我们用到的那部分 WebSocket 接口，便于测试替身实现。 */
-export interface WebSocketLike {
-  send(data: string): void;
-  close(): void;
-  addEventListener(type: 'open' | 'message' | 'error' | 'close', listener: (event: any) => void): void;
-}
-
 export function bailianTtsWebSocketUrl(workspaceId: string | null | undefined): string {
-  const ws = workspaceId?.trim();
-  const host = ws ? `${ws}.cn-beijing.maas.aliyuncs.com` : 'dashscope.aliyuncs.com';
-  return `wss://${host}/api-ws/v1/inference`;
+  return `wss://${bailianWsHost(workspaceId)}/api-ws/v1/inference`;
 }
 
 /**
@@ -263,7 +256,7 @@ export function openBailianTtsStream(
     try {
       socket = options.connect
         ? options.connect(url, apiKey)
-        : (new WebSocket(url, { headers: { Authorization: `Bearer ${apiKey}` } } as never) as WebSocketLike);
+        : connectBailianWs(url, apiKey);
     } catch (e) {
       fail(502, `百炼 TTS 失败：无法建立 WebSocket 连接（${e instanceof Error ? e.message : String(e)}）`);
       return;
