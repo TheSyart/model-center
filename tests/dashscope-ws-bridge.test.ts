@@ -289,6 +289,24 @@ test('an abnormal upstream close is named in the accounting row', async () => {
   }
 });
 
+test('a client that drops the connection is recorded as a client interruption, not an upstream fault', async () => {
+  const up = await fakeUpstream();
+  const gw = await gateway(up.port);
+  try {
+    const { ws } = await connect(gw.port, '/api-ws/v1/inference', AUTH);
+    await new Promise((r) => setTimeout(r, 20));
+    // 打断时调用方就是直接掐线，上游随后也会关；记账不能把这归到上游头上。
+    ws.terminate();
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(gw.logs.length, 1);
+    assert.match(String(gw.logs[0].error), /客户端中断流/);
+    assert.doesNotMatch(String(gw.logs[0].error), /上游/);
+  } finally {
+    await gw.close();
+    await up.close();
+  }
+});
+
 test('close codes the ws library refuses to send are mapped, not dropped', () => {
   // ws 只肯发 1000、1001–1014（除 1004/1005/1006）、3000–4999。
   assert.equal(relayCloseCode(1000), 1000);

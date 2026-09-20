@@ -12,8 +12,8 @@ import {
  * WebSocket 桥接：客户端 ↔ 网关 ↔ 百炼，两个方向的帧原样互转。
  *
  * 这是透传里唯一要下功夫的一条。Next 的路由处理器永远看不见 `Upgrade` 请求——
- * 它在 Node 层就分流成 `'upgrade'` 事件了——所以这个处理器由 server.ts 直接挂在
- * http.Server 上。它经 instrumentation.ts 发布到 globalThis，因为 server.ts 是
+ * 它在 Node 层就分流成 `'upgrade'` 事件了——所以这个处理器由 server.mts 直接挂在
+ * http.Server 上。它经 instrumentation.ts 发布到 globalThis，因为 server.mts 是
  * Next 之外的普通文件，用不了 `@/` 别名，而鉴权/解密/日志那条链全是别名 import。
  *
  * 所有外部依赖（鉴权、选服务商、连上游、写日志）都注入，这个文件本身只有机制，
@@ -263,8 +263,10 @@ export function createDashScopeUpgradeHandler(deps: BridgeDeps): UpgradeHandler 
         let firstBinaryMs: number | null = null;
         let clientBytes = 0;
         let upstreamBytes = 0;
-        let upstreamCloseNote: string | null = null;
+        let closeNote: string | null = null;
         let closedSides = 0;
+        /** 谁先走的：记账要说清是客户端中断还是上游出事，两者含义完全不同。 */
+        let closedBy: 'client' | 'upstream' | null = null;
 
         const finish = () => {
           closedSides += 1;
@@ -276,7 +278,7 @@ export function createDashScopeUpgradeHandler(deps: BridgeDeps): UpgradeHandler 
             latencyMs: openMs,
             firstTokenMs: firstBinaryMs,
             durationMs: now() - startedAt,
-            error: upstreamCloseNote,
+            error: closeNote,
             clientBytes,
             upstreamBytes,
           });
@@ -305,19 +307,27 @@ export function createDashScopeUpgradeHandler(deps: BridgeDeps): UpgradeHandler 
         });
 
         client.on('close', (code, reason) => {
+          if (closedBy === null) {
+            closedBy = 'client';
+            // 1000/1001 是正常收尾；1006 是直接掐线（打断时就是这么干的），也算中断。
+            if (code !== 1000 && code !== 1001) closeNote = `客户端中断流 (${code})`;
+          }
           closeOther(upstream, code, reason);
           finish();
         });
         upstream.on('close', (code, reason) => {
-          if (code !== 1000 && code !== 1005) {
-            upstreamCloseNote = `上游关闭 ${code}${reason?.length ? ` ${reason.toString('utf8').slice(0, 200)}` : ''}`;
+          if (closedBy === null) {
+            closedBy = 'upstream';
+            if (code !== 1000 && code !== 1005) {
+              closeNote = `上游关闭 ${code}${reason?.length ? ` ${reason.toString('utf8').slice(0, 200)}` : ''}`;
+            }
           }
           closeOther(client, code, reason);
           finish();
         });
         client.on('error', () => closeOther(upstream, 1011, 'client error'));
         upstream.on('error', (err) => {
-          upstreamCloseNote = `上游错误：${err.message}`;
+          if (closedBy === null) closeNote = `上游错误：${err.message}`;
           closeOther(client, 1011, 'upstream error');
         });
       });
