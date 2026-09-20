@@ -43,14 +43,20 @@ export function isBailianTtsModel(modelId: string): boolean {
 }
 
 /**
- * 语音模型分四族，端点、协议、请求体各不相同，且没有交集——
+ * 语音模型按端点与协议分族，请求体各不相同：
  * 把 qwen3-tts-flash 发去 WebSocket 会得到 `Model not found`，
  * 把 sambert 发去 HTTP 会得到 `does not support http call`。
  */
 export type BailianAudioKind =
   /** qwen-tts / qwen3-tts-*：HTTP 多模态生成端点。WebSocket 上查无此模型。 */
   | 'qwen-tts'
-  /** sambert / cosyvoice / qwen-audio-*-tts：只能 WebSocket（协议 A），HTTP 端点会拒。 */
+  /**
+   * sambert / cosyvoice / qwen-audio-*-tts：走 WebSocket（协议 A）。
+   *
+   * 选 WebSocket 的理由是**只有它给增量音频**（首包 2411ms → 565ms），
+   * 不是「HTTP 不行」——2026-09-21 实测 cosyvoice 与 qwen-audio-*-tts 在 HTTP
+   * SpeechSynthesizer 上照样出音，真正只有 WebSocket 的只有 sambert。
+   */
   | 'ws-tts'
   /** qwen3-tts-*-realtime：只能 WebSocket（协议 B），与协议 A 互不相通。 */
   | 'realtime-tts'

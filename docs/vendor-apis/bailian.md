@@ -107,6 +107,14 @@
 见下文每一处「会骗人的地方」。本项目的路由在 `lib/vendors/bailian/audio.ts`
 的 `resolveBailianAudioRoute`。
 
+⚠️ **「只能 WebSocket」这个说法此前写错过，在此更正**（2026-09-21 实打）：
+`cosyvoice-*` 与 `qwen-audio-*-tts` 在 **HTTP SpeechSynthesizer 上也能出音**
+（带对音色即可，实测拿到 31855 / 29348 字节的真音频）。真正只有 WebSocket 的
+**只有 `sambert-*`**，它才回 `current user api does not support http call`。
+
+网关仍然把这三族走 WebSocket，理由不是「HTTP 不行」而是「WebSocket 才有增量音频」——
+首包 2411ms → 565ms 的差距全在这里。HTTP 那条路作为原生透传面保留。
+
 | 族 | 模型 | 协议与端点 | 本项目状态 |
 |---|---|---|---|
 | **Qwen-TTS** | `qwen-tts`、`qwen3-tts-flash`、`qwen3-tts-instruct-flash` | HTTP `POST /api/v1/services/aigc/multimodal-generation/generation` | ✅ 11 个 |
