@@ -2,7 +2,7 @@
 
 文档站：https://help.aliyun.com/zh/model-studio/
 官方 CLI 技能包原件：[`_sources/bailian-cli/`](_sources/bailian-cli/)（用户提供，25 个文件）
-核对日期：2026-09-20（模型目录、价格与**语音接口**已用真实密钥核对；其余为文档核对）
+核对日期：2026-09-21（模型目录、价格、**语音接口**与**原生透传**已用真实密钥核对；其余为文档核对）
 
 ## 鉴权分层——这是百炼最容易踩的坑
 
@@ -380,6 +380,66 @@ WebSocket 合成是边合成边发的，所以它发出的 WAV 头把 RIFF 与 d
 同理走 `qwen-voice-enrollment`。仍然不可用的只有 `sambert-clara-v1`、
 `sambert-hanna-v1`、`sambert-zhishuo-v1` —— `Model not exist.`，
 官方目录列了但服务上没有；其余 41 个 sambert 全部可用。
+
+### 原生透传（2026-09-21 上线）
+
+给已按百炼原生协议写好的调用方开的专线：**网关按原路径转发，只做「认网关 key →
+换百炼 key → 注入 `X-DashScope-WorkSpace` → 记账」**，不改写 model、不改写响应体、
+不改写上游给的 OSS 地址。调用方改两个配置字段（地址、key）就切过来。
+它与 `/v1/audio/*` 并存：那是中转站产品本身（市面中转站做语音都是 OpenAI 形状）。
+
+代码：`lib/passthrough/dashscope.ts`（白名单、请求头策略、选服务商，纯函数）、
+`app/api/v1/[...path]/route.ts`（HTTP catch-all）、`lib/passthrough/ws-bridge.ts`
+（WebSocket 桥接）、`server.mts`（在 http.Server 上接管 Upgrade）。
+
+**只放行 9 条**，其余 `/api/v1/*` 一律 404——整段敞开等于把百炼账号变成开放代理：
+
+| 方法 | 路径 | 谁在用 |
+|---|---|---|
+| POST | `/api/v1/services/aigc/multimodal-generation/generation` | 语音识别、千问图像 |
+| POST | `/api/v1/services/audio/tts/SpeechSynthesizer` | 试听 |
+| POST | `/api/v1/services/audio/tts/customization` | 复刻 / 设计 / 查 / 删 |
+| GET | `/api/v1/uploads` | OSS 直传策略 |
+| POST | `/api/v1/services/aigc/image-generation/generation` | 万相（异步） |
+| GET | `/api/v1/tasks/{id}` | 异步轮询 |
+| POST | `/api/v1/services/audio/asr/transcription` | 录音文件转写 |
+| WS | `/api-ws/v1/inference` | 语音合成流式（协议 A） |
+| WS | `/api-ws/v1/realtime` | 语音合成流式（协议 B，model 在 query） |
+
+**上游走公共域名 + 业务空间头，不走 workspace 专有域名。** 专有域名会把 4xx 的
+错误体吞成空 `{}`（见上文），透传的调用方要的正是原始错误。实测公共域名 + 头：
+HTTP 三条路径 200，WebSocket 出音 119040 字节、首包 352ms。
+
+**请求头策略**：剥掉 `Authorization` / `X-API-Key` / `X-DashScope-WorkSpace`（客户端
+带来的一律不信，否则能指定到别的业务空间）、hop-by-hop、`Content-Length`、
+`Accept-Encoding`（改 identity 让字节原样）、cookie 与代理痕迹；注入我们的 key 与
+workspace；**其余原样透传**——`X-DashScope-Async`、`X-DashScope-OssResourceResolve`、
+`X-DashScope-SSE` 这三个改变上游行为的头全靠这条到达。响应头去 `Content-Encoding` /
+`Content-Length`（fetch 已解码），`text/event-stream` 时加 `X-Accel-Buffering: no`。
+
+**选服务商不走 resolveModel**：`/api/v1/tasks/{id}` 根本没有 model，`voice-enrollment`
+是伪模型不在 `models` 表里。直接挑启用的官方百炼服务商（`pickDashScopeProvider`）。
+
+**WebSocket 为什么要动部署**：Next 的路由处理器永远看不见 `Upgrade` 请求——它在
+Node 层就分流成 http.Server 的 `'upgrade'` 事件；而 Next 自带的 upgrade 处理器对不匹配
+任何路由的路径**既不响应也不关闭**（`router-server.js` 原话："user's custom WS server
+may be listening on the same path"），这就是「带 Upgrade 头会挂住」的根因。所以镜像改跑
+仓库自带的 `server.mts`：程序化启动 Next，同一端口上 `prependListener('upgrade')`，
+`/api-ws/` 走桥接，dev 的 HMR 留给 Next 自挂的监听器，其余立即 404。
+
+桥接三条不能违反的：二进制标志跟着原帧走（PCM 变文本帧设备就不出声）；不缓冲
+（打断靠直接断连，攒包会拖慢它）；**先连上游再完成客户端握手**（百炼拒了要变成
+客户端握手阶段的 HTTP 错误并带回原话，而不是「连上又立刻被关」）。
+
+**硬性不变量**：`/api-ws/**` 永远不能匹配任何 app 路由、`public/` 文件、rewrite、
+redirect 或 middleware——否则 Next 的监听器会在我们完成握手后对活着的 WebSocket 调
+`socket.end()`。明文 `GET /api-ws/v1/inference` 必须是 Next 的 404。
+
+网关实测（dev，本机）：四条 HTTP 透传全部拿到真实上游数据（ASR 带 `vocabulary`
+识别出「小单」）；WebSocket 出音 209760 字节、首包 462ms（其中 104ms 是到百炼的握手，
+因为握手是串行的：先连上游再回 101）；`Upgrade` 未知路径 0.5ms 回 404。
+
+抓包这轮不接：`withRawCapture` 要求一个入口对应一条固定路径，catch-all 不满足。
 
 ### 计价口径：语音不是按 token 计价
 
