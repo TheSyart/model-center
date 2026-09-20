@@ -205,3 +205,24 @@ describe('runModalityRequest', () => {
     expect(log.error).toContain('InvalidParameter');
   });
 });
+
+describe('upstream status handling', () => {
+  test('an upstream 4xx reaches the client as a 4xx, not a gateway 500', async () => {
+    // 用真正会被抛出的类型，而不是等价的替身。
+    const { UpstreamError } = await import('../../lib/upstream-error');
+    const res = await runModalityRequest(
+      baseOptions({
+        requestedModel: 'cosyvoice-v3-tts',
+        execute: async () => {
+          // 上游嫌客户端参数不对：网关没坏，不该报 500。
+          throw new UpstreamError(400, '百炼 TTS 失败 (400): InvalidParameter');
+        },
+      }) as never,
+    );
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.code).toBe('upstream_error');
+    expect(lastLog()?.status).toBe(400);
+    expect(lastLog()?.error).toContain('InvalidParameter');
+  });
+});

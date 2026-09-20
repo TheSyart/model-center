@@ -2,7 +2,7 @@
 
 文档站：https://help.aliyun.com/zh/model-studio/
 官方 CLI 技能包原件：[`_sources/bailian-cli/`](_sources/bailian-cli/)（用户提供，25 个文件）
-核对日期：2026-09-19（模型目录与价格**已用真实密钥核对**，其余为文档核对）
+核对日期：2026-09-20（模型目录、价格与**语音接口**已用真实密钥核对；其余为文档核对）
 
 ## 鉴权分层——这是百炼最容易踩的坑
 
@@ -100,6 +100,34 @@
 `model` / `name` / `description` / `provider`（模型作者）/ `inference_provider`（供给渠道）/ `capabilities[]` / `features[]` / `inference_metadata.{request_modality,response_modality}` / `model_info.{context_window,max_input_tokens,max_output_tokens,max_reasoning_tokens,reasoning_max_input_tokens,reasoning_max_output_tokens}` / `published_time` / `equivalent_snapshot`
 
 本项目把展示类字段与 token 上限一并存进 `models.capabilities_json`。
+
+## 语音接口（本项目的实现是坏的，2026-09-20 实测）
+
+`lib/vendors/bailian/audio.ts` 把**所有** TTS 模型指向 `SpeechSynthesizer`、所有 ASR 模型指向
+`multimodal-generation/generation`。用真实密钥（workspace `llm-a5kyboh5x4q9inqe`）逐族实测，
+**没有一个模型能跑通**：
+
+| 模型族 | 实测样本 | 上游返回 |
+|---|---|---|
+| `qwen-tts` / `qwen3-tts-*` | `qwen-tts`、`qwen3-tts-flash` | `InvalidParameter: url error, please check url` |
+| `sambert-*` | `sambert-zhichu-v1` | `InvalidParameter: current user api does not support http call` |
+| `cosyvoice-*` | `cosyvoice-v3.5-flash` | `InvalidParameter: [cosyvoice:]Engine return error code: 418` |
+| ASR | `qwen3-asr-flash-2026-02-10` | `InternalError.Algo.InvalidParameter: Input should be a valid string: input.messages.0.content…` |
+
+三条不同的结论：
+
+1. **Qwen-TTS 系列的端点不是 `SpeechSynthesizer`。** `url error` 是「这个模型不在这个端点上」，
+   多半应走多模态生成端点，但**未验证**，不要照猜的改。
+2. **Sambert 只支持 WebSocket。** `does not support http call` 说得很直接，HTTP 这条路走不通。
+3. **ASR 的请求体结构不对。** 上游明确指出 `input.messages[0].content` 的类型不符合预期，
+   `callBailianAsr` 构造的多模态 messages 与实际契约有出入。
+
+**未核实**：各族正确的端点与请求体。修之前必须先拿官方文档逐族确认，别按错误信息猜。
+
+参考：https://help.aliyun.com/zh/model-studio/error-code#error-url
+
+> 网关侧的安全性与记账已经是对的（准入守卫、令牌限额、抓包、超时、上游状态码透传、不编造成本），
+> 坏的只是与上游的契约本身。见 `lib/gateway/modality-pipeline.ts`。
 
 ## 模型限流 `GET /api/v1/models/limits`（未实现）
 

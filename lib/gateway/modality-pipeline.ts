@@ -4,6 +4,7 @@ import { GatewayError } from './errors';
 import { writeRequestLog } from './logger';
 import { resolveModel } from './router';
 import type { RouteTarget } from './router';
+import { isUpstreamError } from '@/lib/upstream-error';
 import { checkSpendLimit, SPEND_WINDOW_LABELS } from '@/lib/services/token';
 import type { TokenRow } from '@/lib/services/token';
 
@@ -137,6 +138,11 @@ export async function runModalityRequest(options: ModalityRequestOptions): Promi
     if (e instanceof GatewayError) {
       log(e.status, e.message);
       return options.errorResponse(e.status, e.message, e.code);
+    }
+    // 上游退回的非 2xx 照原样传给客户端：参数写错了是 4xx，不是网关坏了。
+    if (isUpstreamError(e)) {
+      log(e.status, e.message);
+      return options.errorResponse(e.status, e.message, 'upstream_error');
     }
     const aborted = controller.signal.aborted;
     const message = aborted

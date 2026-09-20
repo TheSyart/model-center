@@ -1,6 +1,7 @@
 import { after } from 'next/server';
 import { getAdapter } from '@/lib/adapters';
 import { decrypt } from '@/lib/crypto';
+import { isUpstreamError } from '@/lib/upstream-error';
 import { subscriptionStore, subscriptionLifecycle } from '@/lib/subscriptions/runtime';
 import { subscriptionWireRequest, normalizeSubscriptionResponse } from '@/lib/subscriptions/gateway';
 import type { Credential } from '@/lib/subscriptions/types';
@@ -478,7 +479,10 @@ export async function runGatewayPipeline(input: PipelineInput): Promise<Response
     const err =
       e instanceof GatewayError
         ? e
-        : new GatewayError(500, `网关内部错误: ${e instanceof Error ? e.message : String(e)}`, null, 'server_error');
+        : isUpstreamError(e)
+          // 上游的非 2xx 不是网关故障，保留它的状态码。
+          ? new GatewayError(e.status, e.message, 'upstream_error', e.status >= 500 ? 'api_error' : 'invalid_request_error')
+          : new GatewayError(500, `网关内部错误: ${e instanceof Error ? e.message : String(e)}`, null, 'server_error');
     const durationMs = Date.now() - startedAt;
     after(() => log(activeLogBase, { status: err.status, latencyMs: durationMs, durationMs, usage: null, error: err.message }));
     throw err;

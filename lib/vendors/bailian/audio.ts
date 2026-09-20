@@ -1,4 +1,5 @@
 import { isOfficialBailianCatalogProvider, normalizeBailianWorkspaceId } from './catalog.ts';
+import { UpstreamError } from '../../upstream-error.ts';
 import type { ProviderRow } from '../../services/provider.ts';
 
 export function isBailianAsrModel(modelId: string): boolean {
@@ -138,7 +139,8 @@ export async function callBailianAsr(
 
   if (!res.ok) {
     const errText = (await res.text()).slice(0, 300);
-    throw new Error(`百炼 ASR 失败 (${res.status}): ${errText}`);
+    // 带上上游状态码：客户端请求写错了就该收到 4xx，不能一律兜成网关 500。
+    throw new UpstreamError(res.status, `百炼 ASR 失败 (${res.status}): ${errText}`);
   }
 
   const json = (await res.json()) as Record<string, any>;
@@ -212,7 +214,8 @@ export async function callBailianTts(
 
   if (!res.ok) {
     const errText = (await res.text()).slice(0, 300);
-    throw new Error(`百炼 TTS 失败 (${res.status}): ${errText}`);
+    // 带上上游状态码：客户端请求写错了就该收到 4xx，不能一律兜成网关 500。
+    throw new UpstreamError(res.status, `百炼 TTS 失败 (${res.status}): ${errText}`);
   }
 
   const json = (await res.json()) as Record<string, any>;
