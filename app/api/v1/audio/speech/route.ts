@@ -5,6 +5,7 @@ import { modalityStreamDone, runModalityRequest } from '@/lib/gateway/modality-p
 import { audioChunksToRawStream, audioChunksToSseStream } from '@/lib/gateway/audio-stream';
 import { observeReadableStream } from '@/lib/gateway/stream-observer';
 import { SSE_HEADERS, audioStreamHeaders } from '@/lib/gateway/stream-headers';
+import { backfillWavSizes } from '@/lib/gateway/wav';
 import { withRawCapture } from '@/lib/raw-capture/capture';
 import { normalizeRequestSource } from '@/lib/services/usage-metrics';
 import { UpstreamError } from '@/lib/upstream-error';
@@ -143,7 +144,8 @@ async function handlePost(req: NextRequest): Promise<Response> {
         throw new UpstreamError(502, '百炼 TTS 未能生成音频');
       }
       buffered = true;
-      chunks = singleChunk(tts.audioBuffer);
+      // 这条路也是整包在手，长度同样可以回填。
+      chunks = singleChunk(Buffer.from(backfillWavSizes(new Uint8Array(tts.audioBuffer))));
       completion = Promise.resolve({
         reason: 'finished' as const,
         characters: tts.characters,
@@ -225,11 +227,16 @@ async function handlePost(req: NextRequest): Promise<Response> {
       });
 
       if (tts.audioBuffer) {
+        /**
+         * 上游边合成边发，WAV 头里的长度是 ≈2GB 的占位值。非流式这条路整包都在手上，
+         * 长度完全知道——回填它，免得严格按头部长度读的解析器认为文件被截断。
+         */
+        const audio = Buffer.from(backfillWavSizes(new Uint8Array(tts.audioBuffer)));
         return {
-          response: new Response(new Uint8Array(tts.audioBuffer), {
+          response: new Response(new Uint8Array(audio), {
             headers: {
               'Content-Type': tts.contentType ?? CONTENT_TYPES[format],
-              'Content-Length': String(tts.audioBuffer.byteLength),
+              'Content-Length': String(audio.byteLength),
             },
           }),
         };

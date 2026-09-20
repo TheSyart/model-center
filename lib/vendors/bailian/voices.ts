@@ -27,6 +27,15 @@ import { UpstreamError } from '../../upstream-error.ts';
 
 export type BailianVoiceApi = 'voice-enrollment' | 'qwen-voice-enrollment';
 
+/**
+ * 声音设计的缺省试听文本。
+ *
+ * 上游要求至少 15 个字符（短了回
+ * `preview_text should not be shorter than 15 characters`），
+ * 所以这里给一句足够长、内容中性的。
+ */
+export const DEFAULT_PREVIEW_TEXT = '你好，很高兴认识你，今天天气真不错，我们出去走走吧。';
+
 export interface BailianVoice {
   id: string;
   targetModel?: string;
@@ -42,7 +51,20 @@ export interface BailianVoiceListPage {
   pageIndex?: number;
   pageSize?: number;
   totalCount?: number;
+  /** 上游还有没扫完的页；到达扫描上限时为 true。 */
+  truncated?: boolean;
 }
+
+/**
+ * 按 target_model 过滤时最多向上游翻多少页。
+ *
+ * 上游的 `list_voice` **没有按目标模型过滤的参数**——`prefix` 匹配的是创建时
+ * 给的名字段，不是模型名（实测 `prefix="cosyvoice-v3-flash"` 返回 0 条，
+ * 而 `prefix="bailian"` 命中了 id 里含 `-bailian-` 的那条）。所以只能取回来再筛，
+ * 翻页得有个上限。每页 50，10 页覆盖 500 个音色；账号上限是每模型族 1000。
+ */
+const MAX_FILTER_PAGES = 10;
+const FILTER_PAGE_SIZE = 50;
 
 /**
  * 目标模型决定用哪套 API。
@@ -125,7 +147,11 @@ export interface CreateVoiceOptions {
   audioUrl?: string;
   /** 设计：一句话描述音色。与 audioUrl 二选一。 */
   prompt?: string;
-  /** 设计时的试听文本。 */
+  /**
+   * 设计时的试听文本。**上游要求 voice_prompt 与 preview_text 同时给**，
+   * 只给描述会被回 `provide url, or provide both voice_prompt and preview_text`。
+   * 调用方不给就用 DEFAULT_PREVIEW_TEXT。
+   */
   previewText?: string;
   languageHints?: string[];
   signal?: AbortSignal;
@@ -143,7 +169,14 @@ export async function createBailianVoice(
 
   if (api === 'qwen-voice-enrollment') {
     if (isDesign) {
-      throw new UpstreamError(400, `目标模型 "${options.targetModel}" 的声音设计需要 qwen3-voice-design 服务，本网关未代理。`);
+      // 实测 2026-09-21：vd 系作为 target_model 会被上游回
+      // `preprocess service not found for '…'`，与网关无关。
+      throw new UpstreamError(
+        400,
+        `目标模型 "${options.targetModel}" 不能用于声音设计：上游对 vd 系返回 ` +
+          '`preprocess service not found`，该能力在当前账号/地域未开通。' +
+          '声音设计请把 model 指向 cosyvoice-v3.x 或 qwen-audio-3.x-tts 系列。',
+      );
     }
     const json = await callCustomization(
       provider,
@@ -171,8 +204,10 @@ export async function createBailianVoice(
       target_model: options.targetModel,
       prefix: options.name,
       ...(options.audioUrl ? { url: options.audioUrl } : {}),
-      ...(options.prompt ? { voice_prompt: options.prompt } : {}),
-      ...(options.previewText ? { preview_text: options.previewText } : {}),
+      // voice_prompt 与 preview_text 是一对，上游缺一不可。
+      ...(options.prompt
+        ? { voice_prompt: options.prompt, preview_text: options.previewText || DEFAULT_PREVIEW_TEXT }
+        : {}),
       ...(options.languageHints?.length ? { language_hints: options.languageHints } : {}),
     },
     {
@@ -185,33 +220,90 @@ export async function createBailianVoice(
   return normalize(json.output, options.targetModel);
 }
 
-export async function listBailianVoices(
+async function listOnePage(
   provider: Pick<ProviderRow, 'workspaceId'>,
   apiKey: string,
-  options: { targetModel: string; prefix?: string; pageIndex?: number; pageSize?: number; signal?: AbortSignal },
-  fetchImpl: typeof fetch = fetch,
-): Promise<BailianVoiceListPage> {
-  const api = voiceApiFor(options.targetModel);
+  api: BailianVoiceApi,
+  args: { prefix?: string; pageIndex: number; pageSize: number; signal?: AbortSignal },
+  fetchImpl: typeof fetch,
+): Promise<{ voices: BailianVoice[]; raw: Record<string, any> }> {
   const json = await callCustomization(
     provider,
     apiKey,
     api,
     {
       action: api === 'qwen-voice-enrollment' ? 'list' : 'list_voice',
-      ...(options.prefix ? { prefix: options.prefix } : {}),
-      page_index: options.pageIndex ?? 0,
-      page_size: options.pageSize ?? 20,
+      ...(args.prefix ? { prefix: args.prefix } : {}),
+      page_index: args.pageIndex,
+      page_size: args.pageSize,
     },
-    { signal: options.signal },
+    { signal: args.signal },
     fetchImpl,
   );
   const out = json.output ?? {};
   const list = Array.isArray(out.voice_list) ? out.voice_list : [];
+  return { voices: list.map((v: any) => normalize(v)), raw: out };
+}
+
+export async function listBailianVoices(
+  provider: Pick<ProviderRow, 'workspaceId'>,
+  apiKey: string,
+  options: {
+    targetModel: string;
+    prefix?: string;
+    pageIndex?: number;
+    pageSize?: number;
+    /** 关掉按目标模型的过滤，列出账号下这一套 API 的全部音色。 */
+    includeAllModels?: boolean;
+    signal?: AbortSignal;
+  },
+  fetchImpl: typeof fetch = fetch,
+): Promise<BailianVoiceListPage> {
+  const api = voiceApiFor(options.targetModel);
+  const pageIndex = options.pageIndex ?? 0;
+  const pageSize = options.pageSize ?? 20;
+
+  if (options.includeAllModels) {
+    const { voices, raw } = await listOnePage(
+      provider, apiKey, api,
+      { prefix: options.prefix, pageIndex, pageSize, signal: options.signal },
+      fetchImpl,
+    );
+    return { voices, pageIndex: raw.page_index, pageSize: raw.page_size, totalCount: raw.total_count };
+  }
+
+  /**
+   * 上游不支持按 target_model 过滤，只能取回来自己筛。
+   *
+   * 不筛的后果不是「多几条」——调用方会拿到一批**绑在别的模型上、根本用不了**的
+   * 音色，而且要到合成时才收到 400。所以宁可多翻几页。
+   */
+  const bare = options.targetModel.split('/').pop() ?? options.targetModel;
+  const matched: BailianVoice[] = [];
+  let truncated = false;
+
+  for (let page = 0; page < MAX_FILTER_PAGES; page += 1) {
+    const { voices } = await listOnePage(
+      provider, apiKey, api,
+      { prefix: options.prefix, pageIndex: page, pageSize: FILTER_PAGE_SIZE, signal: options.signal },
+      fetchImpl,
+    );
+    for (const voice of voices) {
+      // qwen-voice-enrollment 的列举不回 target_model，那一套本来就只服务 vc 一族。
+      if (!voice.targetModel || voice.targetModel === bare) matched.push({ ...voice, targetModel: voice.targetModel ?? bare });
+    }
+    if (voices.length < FILTER_PAGE_SIZE) break;
+    if (page === MAX_FILTER_PAGES - 1) truncated = true;
+  }
+
+  const start = pageIndex * pageSize;
   return {
-    voices: list.map((v: any) => normalize(v)),
-    pageIndex: out.page_index,
-    pageSize: out.page_size,
-    totalCount: out.total_count,
+    voices: matched.slice(start, start + pageSize),
+    pageIndex,
+    pageSize,
+    // 过滤之后的条数，不是上游那个包含所有模型的总数。
+    totalCount: matched.length,
+    truncated,
   };
 }
 

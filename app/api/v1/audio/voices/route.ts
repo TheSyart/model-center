@@ -77,6 +77,8 @@ async function handleGet(req: NextRequest): Promise<Response> {
         prefix: params.get('prefix')?.trim() || undefined,
         pageIndex: Number(params.get('page_index') ?? 0) || 0,
         pageSize: Number(params.get('page_size') ?? 20) || 20,
+        // 缺省只列能用于这个模型的音色。要看账号下全部，显式传 all_models=true。
+        includeAllModels: params.get('all_models') === 'true',
         signal,
       });
       return {
@@ -86,6 +88,7 @@ async function handleGet(req: NextRequest): Promise<Response> {
           page_index: page.pageIndex ?? null,
           page_size: page.pageSize ?? null,
           total_count: page.totalCount ?? null,
+          ...(page.truncated ? { truncated: true } : {}),
         }),
       };
     },
@@ -190,6 +193,7 @@ async function handlePost(req: NextRequest): Promise<Response> {
       code: 'ambiguous_voice_source',
     });
   }
+  // 不传 preview_text 由厂商层补一句缺省的；传了就得够长。
   if (prompt && previewText && previewText.length < MIN_PREVIEW_TEXT) {
     return openaiErrorResponse(
       400,

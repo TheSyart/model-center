@@ -308,10 +308,25 @@ GET  {transcription_url}   ← 文本在这里，不在轮询响应里
 
 **声音设计**走同一个 `create_voice`，把 `url` 换成 `voice_prompt` + `preview_text`，
 另带 `parameters: { sample_rate, response_format }`，返回里有 base64 试听音频。
-`preview_text` **至少 15 字**，短了回
-`preview_text should not be shorter than 15 characters`。
-`qwen3-tts-vd-*` 作为 target_model 在本账号上是
-`preprocess service not found`（**未核实**是区域限制还是要单独开通）。
+
+**这两个字段是一对，缺一不可**：只给 `voice_prompt` 会被回
+`provide url, or provide both voice_prompt and preview_text`。`preview_text`
+还**至少 15 字**，短了回 `preview_text should not be shorter than 15 characters`。
+实测可用的目标模型：`cosyvoice-v3.x`、`qwen-audio-3.x-tts`（生成的 ID 里带 `-vd-`）。
+`qwen3-tts-vd-*` 作为 target_model 回 `preprocess service not found`，该能力在
+本账号/地域未开通。
+
+**列举没有按目标模型过滤的参数。** `list_voice` 的 `prefix` 匹配的是创建时给的
+名字段，不是模型名——实测 `prefix="cosyvoice-v3-flash"` 返回 0 条，而
+`prefix="bailian"` 命中了 ID 里含 `-bailian-` 的那条。想按模型筛只能取回来自己筛。
+
+### WAV 头的长度是占位值
+
+WebSocket 合成是边合成边发的，所以它发出的 WAV 头把 RIFF 与 data 的长度都写成
+`0x7FFFFFFF` 附近的占位值（≈2GB）——发第一个字节时上游自己也不知道总长。
+
+宽容的解析器（ffmpeg 之类）照常播，严格按头部长度读的会认为文件被截断。
+流式下没办法，非流式是整包在手的，网关会回填真实长度（`lib/gateway/wav.ts`）。
 
 配额：每个账号每个模型族最多 1000 个音色；一年不用会被自动删除。
 
