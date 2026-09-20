@@ -17,10 +17,12 @@ ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 \
 COPY --from=build /app/.next/standalone ./
 COPY --from=build /app/.next/static ./.next/static
 COPY --from=build /app/public ./public
+# 自定义服务器不在裁剪产物里：它在 Next 之外接管 WebSocket 的 Upgrade（见 server.mts 头注释）。
+COPY --from=build /app/server.mts ./server.mts
 RUN mkdir -p /app/data /app/.next/cache \
     && chown node:node /app/data && chown -R node:node /app/.next
 USER node
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD ["node", "-e", "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
-CMD ["node", "server.js"]
+CMD ["node", "server.mts"]

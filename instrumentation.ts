@@ -13,8 +13,8 @@ export async function register() {
     setGlobalDispatcher(new Agent({ connect: { ca: [...tls.rootCertificates] } }));
 
     /**
-     * 百炼 WebSocket 透传的桥接处理器发布到 globalThis，由 server.ts 在
-     * http.Server 的 'upgrade' 事件里取用。放这里而不是 server.ts 里 import，
+     * 百炼 WebSocket 透传的桥接处理器发布到 globalThis，由 server.mts 在
+     * http.Server 的 'upgrade' 事件里取用。放这里而不是 server.mts 里 import，
      * 是因为桥接的依赖链（鉴权、解密、日志）全是 `@/` 别名，只有 Next 打包的
      * 代码才解析得了。
      */

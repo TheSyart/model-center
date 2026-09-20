@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "node server.mts",
     "test": "npm run test:core && npm run test:ui",
     "test:core": "node --experimental-strip-types --test tests/*.test.ts",
     "test:ui": "vitest run",
@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit --incremental false",
     "sync:cc-switch": "node --experimental-strip-types scripts/sync-cc-switch.ts",
     "build": "next build",
-    "start": "next start"
+    "start": "NODE_ENV=production node server.mts"
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.1.23",

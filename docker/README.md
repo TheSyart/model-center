@@ -27,3 +27,14 @@ docker compose --env-file /absolute/path/compose.env -f compose.production.yml p
 ```
 
 宿主端口只监听 `127.0.0.1`，公网入口由外部反向代理和认证控制。日志采用 json-file 的 10m × 3 轮转，进程以非 root 用户运行并自动重启。正式迁移前必须通过真实 Linux 镜像构建、容器健康检查、静态资源验证以及数据备份/回滚演练；源码构建成功不等于这些检查已通过。
+
+## 启动命令：`node server.mts`（2026-09-21 起）
+
+镜像不再运行 Next 生成的 `server.js`，而是仓库自带的 `server.mts`（Node 24 原生剥类型，无需编译）。
+它在同一个 3000 端口上多做一件事：接管 WebSocket 的 `Upgrade`，把 `/api-ws/v1/*` 桥到百炼；
+其余 `Upgrade` 请求立即 404（此前会挂住不响应）。HTTP 部分完全交给 Next，行为不变。
+
+`compose.production.yml`、端口、健康检查、环境变量语义都没有变。
+
+反向代理侧需要配合的（放行前缀、转发 upgrade 头、关 buffering、超时 ≥120s）见
+《model网关-Ops协作-百炼透传上线.md》。
