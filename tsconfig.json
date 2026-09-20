@@ -17,6 +17,15 @@
     "plugins": [{ "name": "next" }],
     "paths": { "@/*": ["./*"] }
   },
-  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  // .next-buildcheck 是约定的备用产物目录：dev server 占着 .next 时，
+  // 用 MODEL_CENTER_NEXT_DIST_DIR=.next-buildcheck 跑构建检查互不覆盖（next.config.ts）。
+  // 这里只能写死一个值，换别的目录名这行就失效。
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts",
+    ".next-buildcheck/types/**/*.ts"
+  ],
   "exclude": ["node_modules"]
 }
