@@ -320,6 +320,24 @@ GET  {transcription_url}   ← 文本在这里，不在轮询响应里
 名字段，不是模型名——实测 `prefix="cosyvoice-v3-flash"` 返回 0 条，而
 `prefix="bailian"` 命中了 ID 里含 `-bailian-` 的那条。想按模型筛只能取回来自己筛。
 
+### 音频格式：opus 只有协议 B 能出
+
+| 格式 | 协议 A（`inference`） | 协议 B（`realtime`） | Qwen-TTS（HTTP） |
+|---|---|---|---|
+| `pcm` / `wav` / `mp3` | ✅ | ✅ | — |
+| `opus` | ❌ `Create opus encoder failed: 0!` | ✅ 真 Ogg（`OggS` 魔数），`bit_rate` 生效 | — |
+| 请求体收不收 format | ✅ | ✅ | ❌ 固定返回 WAV |
+
+实测 `bit_rate=64` 得 24281 字节，不传得 47375 字节，确实在调码率。
+
+网关不做静默降级：协议 A 收到 `response_format: opus` 直接 400 并点名
+对应的 `-realtime` 模型（`lib/vendors/bailian/audio.ts` 的 `bailianTtsFormatSupport`）。
+
+**`sample_rate` 两套协议都真的采纳**。实测同一句话走 pcm：
+16000 → 88320 字节、22050 → 121716、24000 → 132480、48000 → 264960，
+换算回时长都是 2.76 秒，严格成正比。裸 pcm 没有头，所以网关把采样率写进
+Content-Type：`audio/L16;rate=22050;channels=1`（RFC 2586）。
+
 ### WAV 头的长度是占位值
 
 WebSocket 合成是边合成边发的，所以它发出的 WAV 头把 RIFF 与 data 的长度都写成

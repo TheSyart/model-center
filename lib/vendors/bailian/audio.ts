@@ -369,6 +369,8 @@ export interface BailianTtsOptions {
   languageType?: string;
   /** 仅 instruct 系模型生效。 */
   instructions?: string;
+  /** opus 码率 kbps（6–510），仅协议 B 生效。 */
+  bitRate?: number;
   /** WebSocket 连接注入，测试用。 */
   connect?: (url: string, apiKey: string) => import('./tts-websocket.ts').WebSocketLike;
   volume?: number;
@@ -400,18 +402,49 @@ const URL_CONTENT_TYPES: Record<string, string> = {
   pcm: 'audio/L16',
 };
 
-/** WebSocket 直接给字节，没有 URL 可推断类型，按请求的格式定。 */
-const WS_CONTENT_TYPES: Record<string, string> = {
-  wav: 'audio/wav',
-  mp3: 'audio/mpeg',
-  pcm: 'audio/L16',
-};
+/**
+ * WebSocket 直接给字节，没有 URL 可推断类型，按请求的格式定。
+ *
+ * `pcm` 是裸采样，**没有任何头**——采样率只能靠 Content-Type 的参数传出去，
+ * 否则调用方只能靠模型型号去猜。RFC 2586 规定 audio/L16 带 rate 与 channels。
+ */
+function wsContentType(format: string, sampleRate: number): string {
+  if (format === 'pcm') return `audio/L16;rate=${sampleRate};channels=1`;
+  if (format === 'wav') return 'audio/wav';
+  if (format === 'mp3') return 'audio/mpeg';
+  if (format === 'opus') return 'audio/opus';
+  return 'application/octet-stream';
+}
 
-/** 协议 B 比协议 A 多支持 opus。 */
-const REALTIME_CONTENT_TYPES: Record<string, string> = {
-  ...WS_CONTENT_TYPES,
-  opus: 'audio/opus',
-};
+/** 协议 A 的缺省采样率；协议 B 是 24000。两边都实测过 sample_rate 会被上游采纳。 */
+const WS_DEFAULT_SAMPLE_RATE = 22050;
+const REALTIME_DEFAULT_SAMPLE_RATE = 24000;
+
+/**
+ * 这个模型能不能出这个格式。
+ *
+ * **opus 只有协议 B（`-realtime`）能出**，实测协议 A 回
+ * `Create opus encoder failed: 0!`，Qwen-TTS 的 HTTP 面则固定返回 WAV。
+ * 此前网关把 opus 静默降级成 mp3——调用方拿到 200 和一段解析不了的数据，
+ * 要到播不出声才发现，这比直接报错糟得多。
+ */
+export function bailianTtsFormatSupport(
+  modelId: string,
+  format: string,
+): { ok: true } | { ok: false; reason: string } {
+  if (format !== 'opus') return { ok: true };
+  const route = resolveBailianAudioRoute(modelId);
+  if (route.supported && route.kind === 'realtime-tts') return { ok: true };
+
+  const sibling = realtimeSiblingFor(modelId);
+  const hint = sibling
+    ? `改用 ${sibling} 可以拿到真正的 Ogg Opus（注意换族会让已复刻的音色失效）`
+    : '该族只能出 pcm / wav / mp3';
+  return {
+    ok: false,
+    reason: `模型 "${modelId}" 不支持 opus：上游对这一族返回 \`Create opus encoder failed\`。${hint}。`,
+  };
+}
 
 function contentTypeFromUrl(url: string): string | undefined {
   const ext = new URL(url).pathname.split('.').pop()?.toLowerCase();
@@ -473,7 +506,7 @@ export async function callBailianTts(
       text: options.text,
       voice,
       format: options.format === 'opus' ? 'mp3' : options.format,
-      sampleRate: options.sampleRate,
+      sampleRate: options.sampleRate ?? WS_DEFAULT_SAMPLE_RATE,
       volume: options.volume,
       rate: options.rate,
       pitch: options.pitch,
@@ -483,7 +516,10 @@ export async function callBailianTts(
     });
     return {
       audioBuffer: result.audio,
-      contentType: WS_CONTENT_TYPES[options.format === 'opus' ? 'mp3' : (options.format ?? 'mp3')],
+      contentType: wsContentType(
+        options.format === 'opus' ? 'mp3' : (options.format ?? 'mp3'),
+        options.sampleRate ?? WS_DEFAULT_SAMPLE_RATE,
+      ),
       characters: result.characters,
       requestId: result.requestId,
       raw: { via: 'websocket', bytes: result.audio.length },
@@ -669,6 +705,8 @@ export interface BailianTtsStreamHandle {
   contentType: string;
   /** 实际用上的音色，供响应头回显——客户端不传时我们会替它选一个。 */
   voice?: string;
+  /** 实际生效的采样率。裸 pcm 没有头，这是唯一能把它传出去的地方。 */
+  sampleRate: number;
 }
 
 /**
@@ -691,13 +729,15 @@ export async function openBailianTtsAudioStream(
   const voice = options.voice ?? defaultVoiceFor(options.model);
 
   if (route.kind === 'realtime-tts') {
-    const responseFormat = options.format === 'opus' ? 'opus' : (options.format ?? 'mp3');
+    const responseFormat = options.format ?? 'mp3';
+    const sampleRate = options.sampleRate ?? REALTIME_DEFAULT_SAMPLE_RATE;
     const stream = await openBailianRealtimeTtsStream(provider.workspaceId, apiKey, {
       model: options.model,
       text: options.text,
       voice,
       responseFormat,
-      sampleRate: options.sampleRate,
+      sampleRate,
+      bitRate: options.bitRate,
       speechRate: options.rate,
       volume: options.volume,
       pitchRate: options.pitch,
@@ -711,17 +751,20 @@ export async function openBailianTtsAudioStream(
     return {
       chunks: stream.chunks,
       completion: stream.completion,
-      contentType: REALTIME_CONTENT_TYPES[responseFormat] ?? 'application/octet-stream',
+      contentType: wsContentType(responseFormat, sampleRate),
       voice,
+      sampleRate,
     };
   }
-  const format = options.format === 'opus' ? 'mp3' : (options.format ?? 'mp3');
+  // 走到这里 opus 已被 bailianTtsFormatSupport 挡掉，协议 A 只剩这三种。
+  const format = (options.format === 'opus' ? 'mp3' : (options.format ?? 'mp3')) as 'wav' | 'mp3' | 'pcm';
+  const sampleRate = options.sampleRate ?? WS_DEFAULT_SAMPLE_RATE;
   const stream = await openBailianTtsStream(provider.workspaceId, apiKey, {
     model: options.model,
     text: options.text,
     voice,
     format,
-    sampleRate: options.sampleRate,
+    sampleRate,
     volume: options.volume,
     rate: options.rate,
     pitch: options.pitch,
@@ -735,8 +778,9 @@ export async function openBailianTtsAudioStream(
   return {
     chunks: stream.chunks,
     completion: stream.completion,
-    contentType: WS_CONTENT_TYPES[format] ?? 'application/octet-stream',
+    contentType: wsContentType(format, sampleRate),
     voice,
+    sampleRate,
   };
 }
 

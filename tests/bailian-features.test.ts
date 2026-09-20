@@ -22,6 +22,7 @@ import {
   supportsBailianVocabulary,
   realtimeSiblingFor,
   normalizeBailianSpeechParams,
+  bailianTtsFormatSupport,
 } from '../lib/vendors/bailian/audio.ts';
 import { buildFiletransInput } from '../lib/vendors/bailian/asr-filetrans.ts';
 import { streamingModeFor, ttsFailureHint } from '../lib/vendors/bailian/tts-websocket.ts';
@@ -440,4 +441,25 @@ test('speech parameters are clamped into the range upstream accepts', () => {
   assert.deepEqual(normalizeBailianSpeechParams({}), { rate: undefined, pitch: undefined, volume: undefined });
   assert.equal(normalizeBailianSpeechParams({ speed: 'fast' }).rate, undefined);
   assert.equal(normalizeBailianSpeechParams({ speed: NaN }).rate, undefined);
+});
+
+test('opus is refused where upstream cannot encode it, instead of silently becoming mp3', () => {
+  // 实测：协议 A 回 `Create opus encoder failed: 0!`，Qwen-TTS 的 HTTP 面固定返回 WAV。
+  // 静默降级最坏——调用方拿到 200 和一段解析不了的数据，要到播不出声才发现。
+  const cosy = bailianTtsFormatSupport('cosyvoice-v3-flash', 'opus');
+  assert.equal(cosy.ok, false);
+  assert.match(cosy.ok === false ? cosy.reason : '', /Create opus encoder failed/);
+
+  const qwen3 = bailianTtsFormatSupport('qwen3-tts-flash', 'opus');
+  assert.equal(qwen3.ok, false);
+  // 有 -realtime 兄弟的就点名它，并把换族的代价说清楚。
+  assert.match(qwen3.ok === false ? qwen3.reason : '', /qwen3-tts-flash-realtime/);
+  assert.match(qwen3.ok === false ? qwen3.reason : '', /音色/);
+
+  // 协议 B 原生支持，实测返回 OggS 魔数。
+  assert.equal(bailianTtsFormatSupport('qwen3-tts-flash-realtime', 'opus').ok, true);
+  // 其余格式一律放行。
+  for (const f of ['wav', 'mp3', 'pcm']) {
+    assert.equal(bailianTtsFormatSupport('cosyvoice-v3-flash', f).ok, true);
+  }
 });

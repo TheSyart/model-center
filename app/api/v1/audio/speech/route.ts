@@ -12,6 +12,7 @@ import { UpstreamError } from '@/lib/upstream-error';
 import {
   acceptsBailianTts,
   bailianAudioRejectMessage,
+  bailianTtsFormatSupport,
   callBailianTts,
   canStreamBailianTts,
   normalizeBailianSpeechParams,
@@ -30,6 +31,7 @@ const CONTENT_TYPES: Record<SpeechFormat, string> = {
   mp3: 'audio/mpeg',
   opus: 'audio/opus',
   // pcm 是裸采样，不是 WAV 容器；按 audio/wav 下发会让客户端当容器去解析。
+  // 真实采样率由厂商层给出（见 openBailianTtsAudioStream），这里只是兜底。
   pcm: 'audio/L16',
 };
 
@@ -84,6 +86,8 @@ async function handlePost(req: NextRequest): Promise<Response> {
   // Qwen-TTS 的 language_type（如 Chinese / English）；其它族忽略。
   const languageType = typeof body.language === 'string' ? body.language.trim() : undefined;
   const sampleRate = typeof body.sample_rate === 'number' ? body.sample_rate : undefined;
+  // opus 码率 kbps，仅 realtime 一族生效。
+  const bitRate = typeof body.bit_rate === 'number' ? body.bit_rate : undefined;
 
   /** 流式分支。到 openBailianTtsAudioStream 解析为止都还能变成 HTTP 4xx。 */
   async function streamSpeech({
@@ -109,6 +113,7 @@ async function handlePost(req: NextRequest): Promise<Response> {
         voice,
         format,
         sampleRate,
+        bitRate,
         rate: speed,
         pitch,
         volume,
@@ -133,6 +138,7 @@ async function handlePost(req: NextRequest): Promise<Response> {
         voice,
         format,
         sampleRate,
+        bitRate,
         rate: speed,
         pitch,
         volume,
@@ -208,6 +214,15 @@ async function handlePost(req: NextRequest): Promise<Response> {
     rejectMessage: (target) => bailianAudioRejectMessage('TTS', target.modelId, target.provider),
     errorResponse: (status, message, code) => openaiErrorResponse(status, message, { code }),
     execute: async ({ target, apiKey, signal, startedAt }) => {
+      /**
+       * 格式支持度在发往上游之前判定。
+       *
+       * 此前 opus 会被静默降级成 mp3——调用方拿到 200 和一段解析不了的数据，
+       * 要到播不出声才发现。明确报错比静默降级好得多。
+       */
+      const support = bailianTtsFormatSupport(target.modelId, format);
+      if (!support.ok) throw new UpstreamError(400, support.reason);
+
       if (streamFormat) {
         return streamSpeech({ target, apiKey, signal, startedAt });
       }
@@ -218,6 +233,7 @@ async function handlePost(req: NextRequest): Promise<Response> {
         voice,
         format,
         sampleRate,
+        bitRate,
         rate: speed,
         pitch,
         volume,
