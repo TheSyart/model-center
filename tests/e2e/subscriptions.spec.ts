@@ -9,7 +9,7 @@ test('subscription login has a real server session, secure cookie and cancellabl
   ).toBeVisible();
   await expect(page.getByText('添加你的第一个订阅账号')).toBeVisible();
   await expect(
-    page.getByRole('button', { name: '登录 GitHub Copilot' })
+    page.getByRole('button', { name: '登录 auth-copilot' })
   ).toBeEnabled();
   await expect(
     page.getByRole('button', { name: 'xAI (Grok)（尚未开放）' })
@@ -32,7 +32,7 @@ test('subscription login has a real server session, secure cookie and cancellabl
       )
       .toBe(true);
   }
-  await page.getByRole('button', { name: '登录 Codex', exact: true }).click();
+  await page.getByRole('button', { name: '登录 auth-codex', exact: true }).click();
   const created = page.waitForResponse(
     (r) =>
       r.url().endsWith('/api/admin/subscriptions/oauth') &&
@@ -68,7 +68,7 @@ test('subscription login has a real server session, secure cookie and cancellabl
     .first()
     .click();
   const dialog = page.getByRole('dialog');
-  for (const name of ['Codex', 'GitHub Copilot', 'xAI (Grok)'])
+  for (const name of ['auth-codex', 'auth-copilot', 'xAI (Grok)'])
     await expect(
       dialog.getByRole('button', {
         name: new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
@@ -202,7 +202,7 @@ test('quota cards and gateway form remain usable on mobile and desktop', async (
   await page.evaluate(() =>
     document.documentElement.setAttribute('data-theme', 'dark')
   );
-  await expect(page.getByRole('button', { name: '登录 Codex', exact: true })).toHaveCSS('background-color', 'rgb(23, 26, 32)');
+  await expect(page.getByRole('button', { name: '登录 auth-codex', exact: true })).toHaveCSS('background-color', 'rgb(23, 26, 32)');
   await page.screenshot({
     path: info.outputPath('subscriptions-dark.png'),
     fullPage: true,
@@ -228,7 +228,7 @@ test('quota cards and gateway form remain usable on mobile and desktop', async (
 
 test('Antigravity creates its own OAuth session without a Gemini project field', async ({ page }) => {
   await page.goto('/subscriptions');
-  await page.getByRole('button', { name: '登录 Antigravity CLI', exact: true }).click();
+  await page.getByRole('button', { name: '登录 auth-antigravity', exact: true }).click();
   await expect(page.getByLabel('Google 项目 ID')).toHaveCount(0);
   const created = page.waitForResponse(r => r.url().endsWith('/api/admin/subscriptions/oauth') && r.request().method() === 'POST');
   await page.getByRole('button', { name: '生成授权链接' }).click();
