@@ -83,6 +83,8 @@ export const models = sqliteTable(
     synced: integer('synced').notNull().default(0),
     // JSON ModelReasoning (lib/gateway/reasoning.ts): levels, variants, legacy names
     reasoningJson: text('reasoning_json'),
+    // JSON ModelCapabilities: vision, tools, reasoning, audio, tts, web_search, etc.
+    capabilitiesJson: text('capabilities_json'),
   },
   (t) => [uniqueIndex('uq_models_provider_model').on(t.providerId, t.modelId)],
 );

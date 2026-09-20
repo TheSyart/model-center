@@ -8,6 +8,7 @@ import * as schema from './schema';
 import { migrateUsageSchema } from './usage-migration';
 import { migrateModelPricingSchema } from './pricing-migration';
 import { migrateModelReasoningSchema } from './model-reasoning-migration';
+import { migrateModelCapabilitiesSchema } from './capabilities-migration';
 import { migrateProviderEndpointSchema } from './provider-endpoint-migration';
 import { migrateProviderCatalogSchema } from './provider-catalog-migration';
 import { lookupBundledPricing } from '@/lib/services/model-pricing';
@@ -77,7 +78,8 @@ CREATE TABLE IF NOT EXISTS models (
   pricing_currency TEXT,
   context_window INTEGER,
   synced        INTEGER NOT NULL DEFAULT 0,
-  reasoning_json TEXT
+  reasoning_json TEXT,
+  capabilities_json TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_models_provider_model ON models(provider_id, model_id);
 CREATE TABLE IF NOT EXISTS route_aliases (
@@ -179,6 +181,7 @@ function migrate(sqlite: Database.Database) {
   migrateUsageSchema(sqlite);
   migrateModelPricingSchema(sqlite, lookupBundledPricing, ccSwitchManifest.commit);
   migrateModelReasoningSchema(sqlite);
+  migrateModelCapabilitiesSchema(sqlite);
   migrateProviderCatalogSchema(sqlite);
   migrateProviderEndpointSchema(sqlite);
   migrateSubscriptionSchema(sqlite);

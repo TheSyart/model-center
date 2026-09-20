@@ -6,6 +6,7 @@ import { getProviderSubscriptionId, withDefaultProviderEndpoint, type ProviderRo
 import { CC_SWITCH_PRICING_SOURCE_REF, lookupBundledPricing } from './model-pricing';
 import { syncProviderModels, type SyncResult } from './model-sync';
 import { addManualModelsToCompleteCatalog } from '@/lib/subscriptions/store';
+import { resolveModelCapabilities, type ModelCapabilityTag } from './model-capabilities';
 
 export type { SyncResult } from './model-sync';
 
@@ -28,6 +29,7 @@ export function serializeModel(m: ModelRow) {
     pricing_synced_at: m.pricingSyncedAt,
     context_window: m.contextWindow,
     synced: m.synced === 1,
+    capabilities: resolveModelCapabilities(m.modelId, m.capabilitiesJson, m.reasoningJson),
   };
 }
 
@@ -100,6 +102,7 @@ export function createModel(input: ModelInput): ModelRow | 'conflict' | 'alias_c
     contextWindow: input.context_window ?? null,
     synced: 0,
     reasoningJson: null,
+    capabilitiesJson: null,
   };
   try {
     db.insert(schema.models).values(row).run();
