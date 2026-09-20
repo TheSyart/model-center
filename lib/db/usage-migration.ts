@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { hasAppliedMigration, markMigrationApplied, runOnce } from './migration-marker.ts';
 
 const REQUEST_LOG_COLUMNS: Array<[string, string]> = [
   ['entry_protocol', 'TEXT'],
@@ -71,6 +72,7 @@ export function migrateUsageSchema(sqlite: Database.Database): void {
       CREATE INDEX IF NOT EXISTS idx_usage_daily_provider_day ON usage_daily(provider_id, day);
       CREATE INDEX IF NOT EXISTS idx_usage_daily_model_day ON usage_daily(model_id, day);
 
+      -- 旧库里这张表由本迁移创建；新库在 CREATE_TABLES_SQL 里就有了，这里保留以兼容升级路径。
       CREATE TABLE IF NOT EXISTS schema_migrations (
         name TEXT PRIMARY KEY,
         applied_at INTEGER NOT NULL
@@ -82,10 +84,7 @@ export function migrateUsageSchema(sqlite: Database.Database): void {
       sqlite.exec('ALTER TABLE usage_daily ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0');
     }
 
-    const migrated = sqlite
-      .prepare("SELECT 1 AS ok FROM schema_migrations WHERE name = 'usage_rollup_v1'")
-      .get() as { ok: number } | undefined;
-    if (!migrated) {
+    if (!hasAppliedMigration(sqlite, 'usage_rollup_v1')) {
       sqlite.exec(`
         INSERT INTO usage_daily (
           id, day, token_id, token_name, token_prefix,
@@ -135,19 +134,13 @@ export function migrateUsageSchema(sqlite: Database.Database): void {
           COALESCE(l.token_id, ''), COALESCE(l.provider_id, ''),
           COALESCE(l.model_id, ''), COALESCE(l.entry_protocol, '');
       `);
-      sqlite.prepare("INSERT INTO schema_migrations (name, applied_at) VALUES ('usage_rollup_v1', ?)").run(Date.now());
+      markMigrationApplied(sqlite, 'usage_rollup_v1');
     }
 
     // CC Switch 四档计价上线后，按产品决策只清空请求/用量历史一次；配置与余额快照不受影响。
-    const reset = sqlite
-      .prepare("SELECT 1 AS ok FROM schema_migrations WHERE name = 'cc_switch_usage_history_reset_v1'")
-      .get() as { ok: number } | undefined;
-    if (!reset) {
+    runOnce(sqlite, 'cc_switch_usage_history_reset_v1', () => {
       sqlite.exec('DELETE FROM request_logs; DELETE FROM usage_daily;');
-      sqlite
-        .prepare("INSERT INTO schema_migrations (name, applied_at) VALUES ('cc_switch_usage_history_reset_v1', ?)")
-        .run(Date.now());
-    }
+    });
   });
   transaction();
 }

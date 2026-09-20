@@ -92,3 +92,61 @@ test('boot-time re-resolution leaves every non-cc-switch source alone', () => {
     sqlite.close();
   }
 });
+
+test('repeated boots stop rewriting rows whose price has not changed', () => {
+  const sqlite = database();
+  const bundled = { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.5, source: 'cc-switch-global' as const };
+  const lookup = (_baseUrl: string, _protocol: string, modelId: string) =>
+    modelId === 'auto-model' ? bundled : null;
+
+  let lookups = 0;
+  const counting: typeof lookup = (baseUrl, protocol, modelId) => {
+    lookups += 1;
+    return lookup(baseUrl, protocol, modelId);
+  };
+
+  migrateModelPricingSchema(sqlite, counting, 'commit-a', 1000);
+  const first = sqlite.prepare("SELECT * FROM models WHERE id = 'auto'").get() as Record<string, unknown>;
+  assert.equal(first.pricing_synced_at, 1000);
+
+  // 第二次启动：打包目录没变，不该产生任何写入。
+  migrateModelPricingSchema(sqlite, counting, 'commit-a', 2000);
+  const second = sqlite.prepare("SELECT * FROM models WHERE id = 'auto'").get() as Record<string, unknown>;
+  assert.equal(
+    second.pricing_synced_at,
+    1000,
+    'pricing_synced_at 被刷新了，说明这一行又被无谓地改写了一次',
+  );
+  assert.equal(lookups, 2, '两次启动各查一行');
+
+  // 价格真的变了才写，并且这时候才更新同步时间。
+  migrateModelPricingSchema(
+    sqlite,
+    () => ({ ...bundled, input: 7 }),
+    'commit-b',
+    3000,
+  );
+  const third = sqlite.prepare("SELECT * FROM models WHERE id = 'auto'").get() as Record<string, unknown>;
+  assert.equal(third.input_price, 7);
+  assert.equal(third.pricing_synced_at, 3000);
+  assert.equal(third.pricing_source_ref, 'commit-b');
+  sqlite.close();
+});
+
+test('a newly synced row with no pricing still gets priced on the next boot', () => {
+  const sqlite = database();
+  const lookup = () => ({ input: 1, output: 2, cacheRead: null, cacheWrite: null, source: 'cc-switch-global' as const });
+
+  migrateModelPricingSchema(sqlite, lookup, 'commit-a', 1000);
+  // 模拟同步流程之后新插进来的一行：还没有任何来源。
+  sqlite
+    .prepare('INSERT INTO models (id, provider_id, model_id, pricing_source) VALUES (?, ?, ?, ?)')
+    .run('fresh', 'p1', 'fresh-model', null);
+
+  migrateModelPricingSchema(sqlite, lookup, 'commit-a', 2000);
+  const fresh = sqlite.prepare("SELECT * FROM models WHERE id = 'fresh'").get() as Record<string, unknown>;
+  // 跳过无变化的行不能退化成"跳过整轮"，否则新行永远等不到定价。
+  assert.equal(fresh.input_price, 1);
+  assert.equal(fresh.pricing_synced_at, 2000);
+  sqlite.close();
+});

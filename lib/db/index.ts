@@ -128,6 +128,12 @@ CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT
 );
+-- 一次性数据迁移的执行标记（lib/db/migration-marker.ts）。
+-- 建在这里而不是某个迁移里面，是为了任何迁移都能用它，不必依赖调用顺序。
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  name       TEXT PRIMARY KEY,
+  applied_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS gateway_tokens (
   id           TEXT PRIMARY KEY,
   name         TEXT NOT NULL,

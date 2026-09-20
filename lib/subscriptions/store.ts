@@ -106,6 +106,10 @@ export function migrateSubscriptionSchema(db: Database.Database) {
  * network sync, so existing rows converge on the next start. Only synced rows are touched.
  * Each fold keeps the variant callable through legacyIds, moves its alias to the base and
  * copies its endpoint catalog entries. Idempotent: folded rows no longer match.
+ *
+ * **故意不用 migration-marker**：它不是一次性数据迁移，而是每次启动都要做的收敛。
+ * 每次厂商模型同步都可能带回新的强度变体行（gemini-3-pro-low 之类），
+ * 落一次标记就等于此后所有新变体都不再折叠。
  */
 export function convergeStoredModelVariants(
   db: Database.Database,

@@ -2,7 +2,10 @@ import type Database from 'better-sqlite3';
 
 /**
  * 将旧 providers.protocol/base_url 投影扩展为规范化端点集合。
- * 迁移不使用 marker：所有 DDL 均幂等，回填只针对完全没有端点的服务商。
+ *
+ * **故意不用 migration-marker**：所有 DDL 均幂等，回填的 WHERE NOT EXISTS 只命中
+ * 完全没有端点的服务商。加上一次性标记反而会出错——任何时候有服务商的端点被删光，
+ * 它需要在下次启动时重新拿到默认端点，标记一旦落下就再也不会补。
  */
 export function migrateProviderEndpointSchema(sqlite: Database.Database, now = Date.now()): void {
   sqlite.transaction(() => {
