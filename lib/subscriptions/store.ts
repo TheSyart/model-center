@@ -381,7 +381,7 @@ export function createSubscriptionStore(
         vendor,
         accountKey,
         credential.email,
-        credential.email ?? `${vendor} 账号`,
+        credential.email ?? `auth-${vendor}`,
         deps.encrypt(JSON.stringify(credential)),
         credential.expiresAt,
         credential.projectId ?? null,
@@ -445,8 +445,8 @@ export function createSubscriptionStore(
       `INSERT INTO providers(id,slug,name,protocol,base_url,api_key_enc,enabled,priority,created_at,updated_at) VALUES(?,?,?,?,?,'',?,0,?,?)`
     ).run(
       providerId,
-      `oauth-${a.vendor}-${a.id.slice(0, 8)}`,
-      `${a.vendor} · ${a.display_name}`,
+      `auth-${a.vendor}-${a.id.slice(0, 8)}`,
+      `auth-${a.vendor} · ${a.display_name}`,
       endpoint.protocol,
       endpoint.base,
       a.enabled,

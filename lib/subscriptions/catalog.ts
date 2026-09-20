@@ -14,15 +14,15 @@ const implemented: {
   vendor: SubscriptionVendor;
   logo?: string;
 }[] = [
-  { presetKey: 'claude-official', name: 'Claude Code', vendor: 'claude' },
-  { presetKey: 'codex', name: 'Codex', vendor: 'codex' },
+  { presetKey: 'claude-official', name: 'auth-claude', vendor: 'claude' },
+  { presetKey: 'codex', name: 'auth-codex', vendor: 'codex' },
   {
     presetKey: 'antigravity',
-    name: 'Antigravity CLI',
+    name: 'auth-antigravity',
     vendor: 'antigravity',
     logo: '/subscriptions/antigravity.svg',
   },
-  { presetKey: 'github-copilot', name: 'GitHub Copilot', vendor: 'copilot' },
+  { presetKey: 'github-copilot', name: 'auth-copilot', vendor: 'copilot' },
 ];
 
 /** Mixed API-key/OAuth providers retain their API-key entry. */

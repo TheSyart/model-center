@@ -653,7 +653,7 @@ test('Copilot device login completes through the poll route and connects every l
   expect(done.status).toBe(200);
   const { account } = await done.json();
   expect(account.vendor).toBe('copilot');
-  expect(account.providerSlug).toMatch(/^oauth-copilot-/);
+  expect(account.providerSlug).toMatch(/^(?:auth|oauth)-copilot-/);
   expect(account.modelCount).toBe(2);
   expect(account.modelsError).toBeNull();
   expect(JSON.stringify(account)).not.toMatch(/ghu_device|copilot-session/);

@@ -85,17 +85,17 @@ describe('subscription accounts UI', () => {
     );
     const user = userEvent.setup();
     expect(
-      screen.getByRole('button', { name: '登录 GitHub Copilot' })
+      screen.getByRole('button', { name: '登录 auth-copilot' })
     ).toBeEnabled();
     expect(
       screen.getByRole('button', { name: 'xAI (Grok)（尚未开放）' })
     ).toBeDisabled();
     expect(
-      screen.getByRole('button', { name: '登录 Codex' }).querySelector('img')
+      screen.getByRole('button', { name: '登录 auth-codex' }).querySelector('img')
     ).toHaveAttribute('src', '/logos/openai.svg');
     expect(screen.queryByRole('button', { name: '登录 Gemini CLI' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '登录 Antigravity CLI' }).querySelector('img')).toHaveAttribute('src', '/subscriptions/antigravity.svg');
-    await user.click(await screen.findByRole('button', { name: '登录 Codex' }));
+    expect(screen.getByRole('button', { name: '登录 auth-antigravity' }).querySelector('img')).toHaveAttribute('src', '/subscriptions/antigravity.svg');
+    await user.click(await screen.findByRole('button', { name: '登录 auth-codex' }));
     await user.click(screen.getByRole('button', { name: '生成授权链接' }));
     expect(
       await screen.findByRole('link', { name: '打开官方授权页' })
@@ -153,7 +153,7 @@ describe('subscription accounts UI', () => {
     vi.stubGlobal('fetch', fetcher);
     render(<SubscriptionsClient catalog={buildSubscriptionCatalog(PROVIDER_PRESETS)} />);
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: '登录 GitHub Copilot' }));
+    await user.click(screen.getByRole('button', { name: '登录 auth-copilot' }));
     await user.click(screen.getByRole('button', { name: '获取设备码' }));
     expect(await screen.findByText('WDJB-MJHT')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: '打开 GitHub 验证页' })).toHaveAttribute(

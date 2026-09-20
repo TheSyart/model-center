@@ -44,11 +44,11 @@ import {
 } from '@/lib/gateway/reasoning';
 
 const names: Record<SubscriptionVendor, string> = {
-  claude: 'Claude Code',
-  codex: 'Codex',
-  gemini: 'Gemini CLI（旧）',
-  antigravity: 'Antigravity CLI',
-  copilot: 'GitHub Copilot',
+  claude: 'auth-claude',
+  codex: 'auth-codex',
+  gemini: 'auth-gemini',
+  antigravity: 'auth-antigravity',
+  copilot: 'auth-copilot',
 };
 const endpoint = '/api/admin/subscriptions';
 const date = (value: number | null) =>
@@ -384,7 +384,7 @@ export default function SubscriptionsClient({
     <div>
       <PageHeader
         heading="订阅账号"
-        description="登录 Claude Code、Codex、Antigravity CLI（反重力）和 GitHub Copilot，集中查看套餐额度；登录后自动拉取账号可用模型并接入 Model Center 网关。"
+        description="登录 auth-claude、auth-codex、auth-antigravity 和 auth-copilot，集中查看套餐额度；登录后自动拉取账号可用模型并接入 Model Center 网关。"
         actions={
           <Button
             variant="outline"
