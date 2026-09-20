@@ -1,7 +1,12 @@
 import { isOfficialBailianCatalogProvider, normalizeBailianWorkspaceId } from './catalog.ts';
 import type { ProviderRow } from '../../services/provider.ts';
 import { UpstreamError } from '../../upstream-error.ts';
-import { synthesizeOverWebSocket, ttsFailureHint } from './tts-websocket.ts';
+import {
+  openBailianTtsStream,
+  synthesizeOverWebSocket,
+  ttsFailureHint,
+  type BailianWsTtsCompletion,
+} from './tts-websocket.ts';
 
 /**
  * 百炼语音接口。
@@ -576,4 +581,63 @@ export async function tryHandleBailianSpecialChat(
     text: `【语音合成完成】音频地址：${tts.audioUrl ?? '（见二进制响应）'}`,
     characters: tts.characters,
   };
+}
+
+// ---------- 流式 TTS ----------
+
+export interface BailianTtsStreamHandle {
+  chunks: AsyncGenerator<Uint8Array, void, undefined>;
+  completion: Promise<BailianWsTtsCompletion>;
+  /** 实际下发的音频类型，按请求的格式定（WebSocket 不给类型信息）。 */
+  contentType: string;
+  /** 实际用上的音色，供响应头回显——客户端不传时我们会替它选一个。 */
+  voice?: string;
+}
+
+/**
+ * 开一路流式合成。只有 WebSocket 那三族有增量音频源。
+ *
+ * Qwen-TTS 走 HTTP、只给一个下载地址，没有分片可言；调用方要模拟流式就自己
+ * 缓冲再整块发出（见 /v1/audio/speech），那样线上格式仍然合法，只是首包没改善。
+ */
+export async function openBailianTtsAudioStream(
+  provider: ProviderRow,
+  apiKey: string,
+  options: BailianTtsOptions & { maxBufferedBytes?: number; idleTimeoutMs?: number },
+): Promise<BailianTtsStreamHandle> {
+  const route = resolveBailianAudioRoute(options.model);
+  if (!route.supported) throw new UpstreamError(400, `模型 "${options.model}" 不可用：${route.reason}`);
+  if (route.kind !== 'ws-tts') {
+    throw new UpstreamError(400, `模型 "${options.model}" 没有增量音频源，无法流式`);
+  }
+
+  const voice = options.voice ?? defaultVoiceFor(options.model);
+  const format = options.format === 'opus' ? 'mp3' : (options.format ?? 'mp3');
+  const stream = await openBailianTtsStream(provider.workspaceId, apiKey, {
+    model: options.model,
+    text: options.text,
+    voice,
+    format,
+    sampleRate: options.sampleRate,
+    volume: options.volume,
+    rate: options.rate,
+    pitch: options.pitch,
+    signal: options.signal,
+    connect: options.connect,
+    maxBufferedBytes: options.maxBufferedBytes,
+    idleTimeoutMs: options.idleTimeoutMs,
+  });
+
+  return {
+    chunks: stream.chunks,
+    completion: stream.completion,
+    contentType: WS_CONTENT_TYPES[format] ?? 'application/octet-stream',
+    voice,
+  };
+}
+
+/** 这个模型有没有增量音频源。没有就只能缓冲之后再整块发。 */
+export function canStreamBailianTts(modelId: string): boolean {
+  const route = resolveBailianAudioRoute(modelId);
+  return route.supported && route.kind === 'ws-tts';
 }

@@ -11,6 +11,7 @@ import { fetchUpstream } from './forward';
 import type { FetchFailure } from './forward';
 import { writeRequestLog } from './logger';
 import { observeReadableStream } from './stream-observer';
+import { SSE_HEADERS } from './stream-headers';
 import { resolveModel } from './router';
 import { extractReasoning, planReasoning } from './reasoning';
 import type { RouteTarget } from './router';
@@ -73,11 +74,6 @@ export interface PipelineInput {
   /** 由入口 User-Agent 归一化出的客户端来源。 */
   source?: string;
 }
-
-const SSE_HEADERS = {
-  'Content-Type': 'text/event-stream; charset=utf-8',
-  'Cache-Control': 'no-cache',
-} as const;
 
 /** 原生透传非流式响应的 usage 提取（按入口协议解析）。 */
 function passthroughUsageFromJson(entry: EntryProtocol, json: Json): UsageInfo | null {

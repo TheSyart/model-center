@@ -1,14 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { checkGatewayAuth } from '@/lib/gateway/auth';
 import { openaiErrorResponse } from '@/lib/gateway/errors';
-import { runModalityRequest } from '@/lib/gateway/modality-pipeline';
+import { modalityStreamDone, runModalityRequest } from '@/lib/gateway/modality-pipeline';
+import { audioChunksToRawStream, audioChunksToSseStream } from '@/lib/gateway/audio-stream';
+import { observeReadableStream } from '@/lib/gateway/stream-observer';
+import { SSE_HEADERS, audioStreamHeaders } from '@/lib/gateway/stream-headers';
 import { withRawCapture } from '@/lib/raw-capture/capture';
 import { normalizeRequestSource } from '@/lib/services/usage-metrics';
+import { UpstreamError } from '@/lib/upstream-error';
 import {
   acceptsBailianTts,
   bailianAudioRejectMessage,
   callBailianTts,
+  canStreamBailianTts,
+  openBailianTtsAudioStream,
 } from '@/lib/vendors/bailian/audio';
+import type { BailianWsTtsCompletion } from '@/lib/vendors/bailian/tts-websocket';
 
 const FORMATS = ['wav', 'mp3', 'opus', 'pcm'] as const;
 type SpeechFormat = (typeof FORMATS)[number];
@@ -22,6 +29,18 @@ const CONTENT_TYPES: Record<SpeechFormat, string> = {
   // pcm 是裸采样，不是 WAV 容器；按 audio/wav 下发会让客户端当容器去解析。
   pcm: 'audio/L16',
 };
+
+/**
+ * OpenAI 的 stream_format：`audio` 直接分块下发字节，`sse` 走事件。
+ * 不传就是缓冲整包——今天的行为，一字节不变。
+ */
+const STREAM_FORMATS = ['audio', 'sse'] as const;
+type StreamFormat = (typeof STREAM_FORMATS)[number];
+
+/** 单片下发 buffer，让「没有增量音频源的模型」也能满足流式契约。 */
+async function* singleChunk(buffer: Buffer): AsyncGenerator<Uint8Array, void, undefined> {
+  yield new Uint8Array(buffer);
+}
 
 // POST /api/v1/audio/speech（对外经 rewrite 暴露为 /v1/audio/speech）
 async function handlePost(req: NextRequest): Promise<Response> {
@@ -49,10 +68,111 @@ async function handlePost(req: NextRequest): Promise<Response> {
   const format: SpeechFormat = FORMATS.includes(body.response_format as SpeechFormat)
     ? (body.response_format as SpeechFormat)
     : 'wav';
+  const streamFormat: StreamFormat | null = STREAM_FORMATS.includes(body.stream_format as StreamFormat)
+    ? (body.stream_format as StreamFormat)
+    // `stream: true` 是参考文档里的写法，等价于 stream_format: "audio"。
+    : body.stream === true
+      ? 'audio'
+      : null;
   const voice = typeof body.voice === 'string' ? body.voice.trim() : undefined;
   const speed = typeof body.speed === 'number' ? body.speed : undefined;
   // Qwen-TTS 的 language_type（如 Chinese / English）；其它族忽略。
   const languageType = typeof body.language === 'string' ? body.language.trim() : undefined;
+
+  /** 流式分支。到 openBailianTtsAudioStream 解析为止都还能变成 HTTP 4xx。 */
+  async function streamSpeech({
+    target,
+    apiKey,
+    signal,
+    startedAt,
+  }: {
+    target: { provider: any; modelId: string };
+    apiKey: string;
+    signal: AbortSignal;
+    startedAt: number;
+  }) {
+    let chunks: AsyncGenerator<Uint8Array, void, undefined>;
+    let completion: Promise<BailianWsTtsCompletion>;
+    let contentType: string;
+    let buffered = false;
+
+    if (canStreamBailianTts(target.modelId)) {
+      const opened = await openBailianTtsAudioStream(target.provider, apiKey, {
+        model: target.modelId,
+        text,
+        voice,
+        format,
+        rate: speed,
+        languageType,
+        signal,
+      });
+      chunks = opened.chunks;
+      completion = opened.completion;
+      contentType = opened.contentType;
+    } else {
+      /**
+       * Qwen-TTS 走 HTTP，只给一个下载地址，没有分片可言。
+       *
+       * 仍然按流式形状下发，而不是对半个语音目录拒绝 stream_format——线上格式
+       * 一样合法，SDK 用起来没有区别，只是首包时间没有改善。用一个响应头把这件事
+       * 说清楚，免得调用方以为流式没生效。
+       */
+      const tts = await callBailianTts(target.provider, apiKey, {
+        model: target.modelId,
+        text,
+        voice,
+        format,
+        rate: speed,
+        languageType,
+        signal,
+      });
+      if (!tts.audioBuffer) {
+        throw new UpstreamError(502, '百炼 TTS 未能生成音频');
+      }
+      buffered = true;
+      chunks = singleChunk(tts.audioBuffer);
+      completion = Promise.resolve({
+        reason: 'finished' as const,
+        characters: tts.characters,
+        requestId: tts.requestId,
+      });
+      contentType = tts.contentType ?? CONTENT_TYPES[format];
+    }
+
+    let settled: BailianWsTtsCompletion | null = null;
+    void completion.then((c) => { settled = c; });
+
+    const body =
+      streamFormat === 'sse'
+        ? audioChunksToSseStream(chunks, completion, () => {})
+        : audioChunksToRawStream(chunks, () => {});
+    const observed = observeReadableStream(body, startedAt);
+
+    const headers: Record<string, string> = {
+      ...(streamFormat === 'sse' ? SSE_HEADERS : audioStreamHeaders(contentType)),
+      'X-Model-Center-Upstream-Model': target.modelId,
+    };
+    if (buffered) headers['X-Model-Center-Stream'] = 'buffered';
+
+    return {
+      response: new Response(observed.stream, { status: 200, headers }),
+      stream: {
+        done: modalityStreamDone(observed.timing, () => {
+          const reason = settled?.reason;
+          if (!reason || reason === 'finished') return null;
+          /**
+           * 走到这里状态码已经定死 200，日志是唯一还能说出真相的地方。
+           *
+           * 客户端挂断也要在这里说：断连是以异常的形式从**读取**路径回来的，
+           * 而 observeReadableStream 只有在自己的 cancel() 被调用时才标 cancelled，
+           * 所以光靠 timing.cancelled 看不出来。
+           */
+          if (reason === 'cancelled') return '客户端中断流';
+          return `上游流异常: ${reason}`;
+        }),
+      },
+    };
+  }
 
   return runModalityRequest({
     entry: 'openai',
@@ -63,7 +183,11 @@ async function handlePost(req: NextRequest): Promise<Response> {
     accepts: acceptsBailianTts,
     rejectMessage: (target) => bailianAudioRejectMessage('TTS', target.modelId, target.provider),
     errorResponse: (status, message, code) => openaiErrorResponse(status, message, { code }),
-    execute: async ({ target, apiKey, signal }) => {
+    execute: async ({ target, apiKey, signal, startedAt }) => {
+      if (streamFormat) {
+        return streamSpeech({ target, apiKey, signal, startedAt });
+      }
+
       const tts = await callBailianTts(target.provider, apiKey, {
         model: target.modelId,
         text,

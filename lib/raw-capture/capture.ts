@@ -56,8 +56,12 @@ async function failSession(session: RawCaptureSession, error: unknown): Promise<
   }
 }
 
-function isStreamingResponse(contentType: string | null): boolean {
-  return contentType?.split(';', 1)[0]?.trim().toLowerCase() === 'text/event-stream';
+function isStreamingResponse(contentType: string | null, headers: Headers): boolean {
+  const kind = contentType?.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+  if (kind === 'text/event-stream') return true;
+  // 分块下发的音频没有 Content-Length，缓冲路径一定写了——以此区分二者，
+  // 否则抓包列表会把流式语音标成非流式。
+  return kind.startsWith('audio/') && !headers.has('content-length');
 }
 
 async function captureEnabledRequest(
@@ -90,7 +94,7 @@ async function captureEnabledRequest(
   }
 
   const contentType = response.headers.get('content-type');
-  const stream = isStreamingResponse(contentType);
+  const stream = isStreamingResponse(contentType, response.headers);
   const completion = {
     status: response.status,
     stream,
