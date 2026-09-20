@@ -50,6 +50,7 @@ function estimateCost(providerId: string | null, modelId: string | null, usage: 
       output: m.outputPrice,
       cacheRead: m.cacheReadPrice,
       cacheWrite: m.cacheWritePrice,
+      currency: m.pricingCurrency,
     },
   });
 }

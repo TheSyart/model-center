@@ -33,6 +33,7 @@ test('pricing migration preserves manual rows and applies bundled four-class pri
     id: 'auto', provider_id: 'p1', model_id: 'auto-model', input_price: 1, output_price: 2,
     cache_read_price: 0.1, cache_write_price: 0.5, pricing_source: 'cc-switch-global',
     pricing_source_ref: 'commit-a', pricing_synced_at: 1234,
+    pricing_tiers_json: null, pricing_currency: null,
   });
   assert.equal(rows[1]?.input_price, 9);
   assert.equal(rows[1]?.output_price, 10);
@@ -49,4 +50,45 @@ test('pricing migration preserves manual rows and applies bundled four-class pri
   assert.equal(removed.cache_read_price, null);
   assert.equal(removed.pricing_source, null);
   sqlite.close();
+});
+
+test('boot-time re-resolution never clobbers vendor-official pricing', () => {
+  const sqlite = database();
+  migrateModelPricingSchema(sqlite, () => null, 'commit-a', 1234);
+  // 模拟一次百炼官方目录同步的结果。
+  sqlite
+    .prepare(
+      `UPDATE models SET pricing_source = 'aliyun-modelstudio', pricing_tiers_json = ?, pricing_currency = ?
+       WHERE id = 'auto'`,
+    )
+    .run('[{"range_name":"Default"}]', 'CNY');
+
+  // 再启动一次：cc-switch 查不到这个模型，原逻辑会把七个字段全部清空。
+  migrateModelPricingSchema(sqlite, () => null, 'commit-b', 5678);
+
+  const row = sqlite.prepare("SELECT * FROM models WHERE id = 'auto'").get() as Record<string, unknown>;
+  assert.equal(row.pricing_source, 'aliyun-modelstudio');
+  assert.equal(row.pricing_tiers_json, '[{"range_name":"Default"}]');
+  assert.equal(row.pricing_currency, 'CNY');
+});
+
+test('boot-time re-resolution leaves every non-cc-switch source alone', () => {
+  // 订阅账号写入的行（lib/subscriptions/store.ts）此前也会被开机重算清空。
+  for (const source of ['subscription', 'aliyun-modelstudio', 'some-future-source']) {
+    const sqlite = database();
+    migrateModelPricingSchema(sqlite, () => null, 'commit-a', 1234);
+    sqlite.prepare("UPDATE models SET pricing_source = ?, input_price = 7 WHERE id = 'auto'").run(source);
+
+    migrateModelPricingSchema(
+      sqlite,
+      () => ({ input: 1, output: 2, cacheRead: null, cacheWrite: null, source: 'cc-switch-global' as const }),
+      'commit-b',
+      5678,
+    );
+
+    const row = sqlite.prepare("SELECT pricing_source, input_price FROM models WHERE id = 'auto'").get() as Record<string, unknown>;
+    assert.equal(row.pricing_source, source, `${source} 不应被 cc-switch 覆盖`);
+    assert.equal(row.input_price, 7, `${source} 的单价不应被 cc-switch 覆盖`);
+    sqlite.close();
+  }
 });

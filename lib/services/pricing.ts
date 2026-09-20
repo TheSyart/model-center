@@ -5,6 +5,8 @@ export interface TokenPricing {
   output: number | null;
   cacheRead: number | null;
   cacheWrite: number | null;
+  /** 币种。空表示未知（按既有的 cc-switch 美元表处理）；非美元不参与成本计算。 */
+  currency?: string | null;
 }
 
 function tokenCount(value: unknown): number {
@@ -18,6 +20,9 @@ function pricedCost(tokens: number, price: number | null): number | null {
 }
 
 export function calculateRequestCost({ usage, pricing }: { usage: UsageInfo; pricing: TokenPricing }): number | null {
+  // 单价表以美元计。把人民币等其它币种按美元折算是静默错账，
+  // 宁可返回"成本未知"（界面显示 —）也不给出错误金额。
+  if (pricing.currency && pricing.currency.toUpperCase() !== 'USD') return null;
   const classes = usage.cache_metrics_observed
     ? [
         [tokenCount(usage.uncached_input_tokens), pricing.input],
@@ -38,12 +43,21 @@ export function calculateRequestCost({ usage, pricing }: { usage: UsageInfo; pri
   return Number(total.toFixed(12));
 }
 
+export type PricingSource =
+  | 'manual'
+  | 'aliyun-modelstudio'
+  | 'cc-switch-provider'
+  | 'cc-switch-global';
+
+/** 优先级：手动 > 厂商官方价格 > cc-switch 厂商价 > cc-switch 全局价 > 未定价。 */
 export function resolveModelPricing(input: {
   manual?: TokenPricing | null;
+  official?: TokenPricing | null;
   providerSpecific?: TokenPricing | null;
   global?: TokenPricing | null;
-}): { source: 'manual' | 'cc-switch-provider' | 'cc-switch-global'; pricing: TokenPricing } | null {
+}): { source: PricingSource; pricing: TokenPricing } | null {
   if (input.manual) return { source: 'manual', pricing: input.manual };
+  if (input.official) return { source: 'aliyun-modelstudio', pricing: input.official };
   if (input.providerSpecific) return { source: 'cc-switch-provider', pricing: input.providerSpecific };
   if (input.global) return { source: 'cc-switch-global', pricing: input.global };
   return null;

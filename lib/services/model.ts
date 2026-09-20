@@ -94,6 +94,9 @@ export function createModel(input: ModelInput): ModelRow | 'conflict' | 'alias_c
     pricingSource: subscription ? 'subscription' : hasManualPricing ? 'manual' : (bundled?.source ?? null),
     pricingSourceRef: bundled ? CC_SWITCH_PRICING_SOURCE_REF : null,
     pricingSyncedAt: bundled ? Date.now() : null,
+    // 官方阶梯价由同步流程写入，手动新增的模型没有
+    pricingTiersJson: null,
+    pricingCurrency: null,
     contextWindow: input.context_window ?? null,
     synced: 0,
     reasoningJson: null,

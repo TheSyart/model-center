@@ -75,6 +75,10 @@ export const models = sqliteTable(
     pricingSource: text('pricing_source'),
     pricingSourceRef: text('pricing_source_ref'),
     pricingSyncedAt: integer('pricing_synced_at'),
+    // 厂商官方价格：prices[] 全部阶梯与非 Token 计费项原样保存
+    pricingTiersJson: text('pricing_tiers_json'),
+    // 币种；空表示未知。非美元不参与成本计算（lib/services/pricing.ts）
+    pricingCurrency: text('pricing_currency'),
     contextWindow: integer('context_window'),
     synced: integer('synced').notNull().default(0),
     // JSON ModelReasoning (lib/gateway/reasoning.ts): levels, variants, legacy names

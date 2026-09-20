@@ -73,6 +73,8 @@ CREATE TABLE IF NOT EXISTS models (
   pricing_source TEXT,
   pricing_source_ref TEXT,
   pricing_synced_at INTEGER,
+  pricing_tiers_json TEXT,
+  pricing_currency TEXT,
   context_window INTEGER,
   synced        INTEGER NOT NULL DEFAULT 0,
   reasoning_json TEXT

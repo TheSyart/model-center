@@ -61,3 +61,23 @@ test('loads the repaired DeepSeek pricing from the pinned CC Switch snapshot', (
     source: 'cc-switch-provider',
   });
 });
+
+test('non-USD pricing yields an unknown cost instead of a wrong one', () => {
+  const usage = { prompt_tokens: 1_000_000, completion_tokens: 0, total_tokens: 1_000_000, cache_metrics_observed: false };
+  // 同样的数字，币种不同：美元照算，人民币拒绝折算。
+  assert.equal(calculateRequestCost({ usage, pricing: { input: 4, output: 4, cacheRead: null, cacheWrite: null, currency: 'USD' } }), 4);
+  assert.equal(calculateRequestCost({ usage, pricing: { input: 4, output: 4, cacheRead: null, cacheWrite: null, currency: 'CNY' } }), null);
+  // 币种未知时沿用既有行为（cc-switch 表就是美元）。
+  assert.equal(calculateRequestCost({ usage, pricing: { input: 4, output: 4, cacheRead: null, cacheWrite: null, currency: null } }), 4);
+  assert.equal(calculateRequestCost({ usage, pricing: { input: 4, output: 4, cacheRead: null, cacheWrite: null } }), 4);
+});
+
+test('official vendor pricing outranks the bundled catalog but never the manual override', () => {
+  const official = { input: 5, output: 6, cacheRead: null, cacheWrite: null, currency: 'CNY' };
+  const bundled = { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.5 };
+  assert.equal(resolveModelPricing({ official, providerSpecific: bundled, global: bundled })?.source, 'aliyun-modelstudio');
+  assert.equal(
+    resolveModelPricing({ manual: { input: 9, output: 9, cacheRead: 9, cacheWrite: 9 }, official, global: bundled })?.source,
+    'manual',
+  );
+});
