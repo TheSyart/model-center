@@ -3,17 +3,17 @@ import { NextResponse } from 'next/server';
 import { handleDashScopePassthrough } from '@/lib/gateway/dashscope-passthrough';
 import { withRawCapture } from '@/lib/raw-capture/capture';
 import {
-  acceptsBailianTts,
+  acceptsBailianSpeechSynthesizer,
   bailianAudioRejectMessage,
-  getBailianTtsEndpoint,
+  getBailianSpeechSynthesizerEndpoint,
 } from '@/lib/vendors/bailian/audio';
 
 // DashScope 原生语音合成，路径与阿里云官方一致。
 function handlePost(req: NextRequest): Promise<Response> {
   return handleDashScopePassthrough(req, {
-    accepts: acceptsBailianTts,
-    rejectMessage: (target) => bailianAudioRejectMessage('TTS', target.modelId, target.provider.slug),
-    endpointFor: (provider) => getBailianTtsEndpoint(provider.workspaceId),
+    accepts: acceptsBailianSpeechSynthesizer,
+    rejectMessage: (target) => bailianAudioRejectMessage('TTS', target.modelId, target.provider),
+    endpointFor: (provider) => getBailianSpeechSynthesizerEndpoint(provider.workspaceId),
   });
 }
 

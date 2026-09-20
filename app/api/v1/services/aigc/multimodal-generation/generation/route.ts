@@ -3,17 +3,17 @@ import { NextResponse } from 'next/server';
 import { handleDashScopePassthrough } from '@/lib/gateway/dashscope-passthrough';
 import { withRawCapture } from '@/lib/raw-capture/capture';
 import {
-  acceptsBailianAsr,
+  acceptsBailianMultimodalAudio,
   bailianAudioRejectMessage,
-  getBailianAsrEndpoint,
+  getBailianMultimodalEndpoint,
 } from '@/lib/vendors/bailian/audio';
 
 // DashScope 原生多模态生成（语音识别走这条），路径与阿里云官方一致。
 function handlePost(req: NextRequest): Promise<Response> {
   return handleDashScopePassthrough(req, {
-    accepts: acceptsBailianAsr,
-    rejectMessage: (target) => bailianAudioRejectMessage('ASR', target.modelId, target.provider.slug),
-    endpointFor: (provider) => getBailianAsrEndpoint(provider.workspaceId),
+    accepts: acceptsBailianMultimodalAudio,
+    rejectMessage: (target) => bailianAudioRejectMessage('ASR', target.modelId, target.provider),
+    endpointFor: (provider) => getBailianMultimodalEndpoint(provider.workspaceId),
   });
 }
 

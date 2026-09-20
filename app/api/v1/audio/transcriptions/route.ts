@@ -58,7 +58,7 @@ async function handlePost(req: NextRequest): Promise<Response> {
     source: normalizeRequestSource(req.headers.get('user-agent')),
     clientSignal: req.signal,
     accepts: acceptsBailianAsr,
-    rejectMessage: (target) => bailianAudioRejectMessage('ASR', target.modelId, target.provider.slug),
+    rejectMessage: (target) => bailianAudioRejectMessage('ASR', target.modelId, target.provider),
     errorResponse: (status, message, code) => openaiErrorResponse(status, message, { code }),
     execute: async ({ target, apiKey, signal }) => {
       // 只有确认要发给百炼之后才把文件读进内存。

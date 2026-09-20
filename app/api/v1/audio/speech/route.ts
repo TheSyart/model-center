@@ -13,11 +13,13 @@ import {
 const FORMATS = ['wav', 'mp3', 'opus', 'pcm'] as const;
 type SpeechFormat = (typeof FORMATS)[number];
 
-// pcm 是裸采样，不是 WAV 容器；此前一并按 audio/wav 下发会让客户端按容器去解析。
+// 客户端请求的格式只是**期望**：Qwen-TTS 的请求体不收 format，实测固定返回 WAV。
+// 所以响应头以实际拿到的音频为准，拿不到才退回这张表。
 const CONTENT_TYPES: Record<SpeechFormat, string> = {
   wav: 'audio/wav',
   mp3: 'audio/mpeg',
   opus: 'audio/opus',
+  // pcm 是裸采样，不是 WAV 容器；按 audio/wav 下发会让客户端当容器去解析。
   pcm: 'audio/L16',
 };
 
@@ -49,6 +51,8 @@ async function handlePost(req: NextRequest): Promise<Response> {
     : 'wav';
   const voice = typeof body.voice === 'string' ? body.voice.trim() : undefined;
   const speed = typeof body.speed === 'number' ? body.speed : undefined;
+  // Qwen-TTS 的 language_type（如 Chinese / English）；其它族忽略。
+  const languageType = typeof body.language === 'string' ? body.language.trim() : undefined;
 
   return runModalityRequest({
     entry: 'openai',
@@ -57,7 +61,7 @@ async function handlePost(req: NextRequest): Promise<Response> {
     source: normalizeRequestSource(req.headers.get('user-agent')),
     clientSignal: req.signal,
     accepts: acceptsBailianTts,
-    rejectMessage: (target) => bailianAudioRejectMessage('TTS', target.modelId, target.provider.slug),
+    rejectMessage: (target) => bailianAudioRejectMessage('TTS', target.modelId, target.provider),
     errorResponse: (status, message, code) => openaiErrorResponse(status, message, { code }),
     execute: async ({ target, apiKey, signal }) => {
       const tts = await callBailianTts(target.provider, apiKey, {
@@ -66,6 +70,7 @@ async function handlePost(req: NextRequest): Promise<Response> {
         voice,
         format,
         rate: speed,
+        languageType,
         signal,
       });
 
@@ -73,7 +78,7 @@ async function handlePost(req: NextRequest): Promise<Response> {
         return {
           response: new Response(new Uint8Array(tts.audioBuffer), {
             headers: {
-              'Content-Type': CONTENT_TYPES[format],
+              'Content-Type': tts.contentType ?? CONTENT_TYPES[format],
               'Content-Length': String(tts.audioBuffer.byteLength),
             },
           }),

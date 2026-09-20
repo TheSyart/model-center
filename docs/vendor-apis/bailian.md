@@ -101,33 +101,72 @@
 
 本项目把展示类字段与 token 上限一并存进 `models.capabilities_json`。
 
-## 语音接口（本项目的实现是坏的，2026-09-20 实测）
+## 语音接口（2026-09-20 用真实密钥逐族实测）
 
-`lib/vendors/bailian/audio.ts` 把**所有** TTS 模型指向 `SpeechSynthesizer`、所有 ASR 模型指向
-`multimodal-generation/generation`。用真实密钥（workspace `llm-a5kyboh5x4q9inqe`）逐族实测，
-**没有一个模型能跑通**：
+**端点按模型族分，不能混用。** 打错端点上游回 `url error, please check url`。
+本项目的路由在 `lib/vendors/bailian/audio.ts` 的 `resolveBailianAudioRoute`。
 
-| 模型族 | 实测样本 | 上游返回 |
+| 模型族 | 端点 | 请求体 | 实测 |
+|---|---|---|---|
+| **Qwen-TTS**：`qwen-tts`、`qwen-tts-latest`、`qwen3-tts-flash`、`qwen3-tts-instruct-flash` | `/api/v1/services/aigc/multimodal-generation/generation` | `{model, input:{text, voice, language_type?}}` | ✅ 已跑通 |
+| **同步 ASR**：`qwen3-asr-flash` | 同上 | `{model, input:{messages:[{role,content:[{audio}]}]}}` | ✅ 已跑通 |
+| **CosyVoice / Sambert** | `/api/v1/services/audio/tts/SpeechSynthesizer` | `{model, input:{text, voice, format, sample_rate}}` | ❌ 见下 |
+
+### 两个反直觉的点
+
+1. **Qwen-TTS 不在 `SpeechSynthesizer` 上**，而在多模态生成端点上——和 ASR 同一个端点。
+   这是此前实现全线失败的根因。
+2. **音色表不通用。** 给 Qwen-TTS 传 CosyVoice 的 `longxiaochun_v3` 会被拒：
+   `Invalid voice specified, the requested voice does not exist or is not licensed for use`。
+   实测可用的默认值：Qwen-TTS → `Cherry`；CosyVoice → `longxiaochun_v3`。
+
+### ASR 的请求体（踩过的坑）
+
+正确形状是 `input.messages[].content[].audio`，**不是** OpenAI 的
+`{type:'input_audio', input_audio:{data}}`。后者发到这个端点会被拒：
+
+```
+Input should be a valid string: input.messages.0.content.str
+  & Input should be a valid string: input.messages.0.content.list[union[str,…
+```
+
+那个形状属于 `/compatible-mode/v1/chat/completions`，两条路都能用但请求体不同，别混。
+
+音频来源 **base64 data URI 与公网 URL 都实测可用**。响应在
+`output.choices[0].message.content[0].text`；无语音内容时 `content` 是空数组。
+
+端到端验证：用 `qwen3-tts-flash` 合成「模型中心语音链路验收通过」，下载后喂给
+`qwen3-asr-flash`，原样读回，文字完全一致。
+
+### HTTP 走不通的几类（已本地拦截，不再白跑上游）
+
+| 模型 | 上游回应 | 本项目处理 |
 |---|---|---|
-| `qwen-tts` / `qwen3-tts-*` | `qwen-tts`、`qwen3-tts-flash` | `InvalidParameter: url error, please check url` |
-| `sambert-*` | `sambert-zhichu-v1` | `InvalidParameter: current user api does not support http call` |
-| `cosyvoice-*` | `cosyvoice-v3.5-flash` | `InvalidParameter: [cosyvoice:]Engine return error code: 418` |
-| ASR | `qwen3-asr-flash-2026-02-10` | `InternalError.Algo.InvalidParameter: Input should be a valid string: input.messages.0.content…` |
+| `*-realtime`（如 `qwen3-tts-flash-realtime`） | `current user api does not support http call` | 本地 400，说明只有 WebSocket |
+| `*-filetrans` | —— | 本地 400；录音文件转写走 `/api/v1/services/audio/asr/transcription` 的异步提交+轮询，未实现 |
+| `sambert-*` | `current user api does not support http call` | 放行到上游，原样回传其错误 |
+| `cosyvoice-v3.5-*` | `[cosyvoice:]Engine return error code: 418` | 放行到上游，原样回传其错误 |
+| `qwen-audio-3.0-asr-flash` | `400 {}`（空错误体） | 放行到上游，原样回传其错误 |
 
-三条不同的结论：
+> **未核实**：CosyVoice 的 418 与 `qwen-audio-3.0-asr-flash` 的空 400 是什么原因。
+> 端点是官方文档指定的那个（发到别处会回 `url error`，这条已排除），换音色、换
+> `cosyvoice-v3.5-plus`、把参数挪进 `parameters` 都试过，报错不变。疑似模型未开通
+> 或该 workspace 无权限，但**没有证据**，别照猜去改。
 
-1. **Qwen-TTS 系列的端点不是 `SpeechSynthesizer`。** `url error` 是「这个模型不在这个端点上」，
-   多半应走多模态生成端点，但**未验证**，不要照猜的改。
-2. **Sambert 只支持 WebSocket。** `does not support http call` 说得很直接，HTTP 这条路走不通。
-3. **ASR 的请求体结构不对。** 上游明确指出 `input.messages[0].content` 的类型不符合预期，
-   `callBailianAsr` 构造的多模态 messages 与实际契约有出入。
+### 计价口径：语音不是按 token 计价
 
-**未核实**：各族正确的端点与请求体。修之前必须先拿官方文档逐族确认，别按错误信息猜。
+这解释了为什么语音请求的成本列是空的——不是漏了，是不适用：
 
-参考：https://help.aliyun.com/zh/model-studio/error-code#error-url
+| 模型 | 官方计价 |
+|---|---|
+| `qwen3-tts-flash`、`cosyvoice-*` | `cosy_tts_number` ¥0.8 **每万字符** |
+| `qwen3-asr-flash` | `content_duration` ¥0.00022 **每秒** |
+| `qwen-tts` | `text_input_token` ¥1.6/百万 + `qwen_tts_multi_output_token` ¥10/百万 |
 
-> 网关侧的安全性与记账已经是对的（准入守卫、令牌限额、抓包、超时、上游状态码透传、不编造成本），
-> 坏的只是与上游的契约本身。见 `lib/gateway/modality-pipeline.ts`。
+`models` 的扁平价列是「每百万 tokens」口径，装不下前两种，所以为空；阶梯原文完整
+保存在 `pricing_tiers_json` 里。上游在响应里给的是 `usage.characters`（TTS）与
+`usage.seconds` / `audio_tokens`（ASR），都不是扁平列能直接相乘的东西，因此日志的
+`usage` 留空、成本显示「—」，而不是编一个对不上账的数字。
 
 ## 模型限流 `GET /api/v1/models/limits`（未实现）
 
