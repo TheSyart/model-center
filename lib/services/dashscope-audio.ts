@@ -1,4 +1,4 @@
-import { normalizeBailianWorkspaceId } from './bailian-catalog.ts';
+import { isOfficialBailianCatalogProvider, normalizeBailianWorkspaceId } from './bailian-catalog.ts';
 import type { ProviderRow } from './provider.ts';
 
 export function isBailianAsrModel(modelId: string): boolean {
@@ -18,6 +18,26 @@ export function isBailianTtsModel(modelId: string): boolean {
     lower.includes('cosyvoice') ||
     lower.includes('sambert')
   );
+}
+
+/**
+ * 语音接口的准入判定。
+ *
+ * 两条都必须成立才放行。上面的 getBailian*Endpoint 把阿里云主机写死在代码里、
+ * 完全不读 provider.baseUrl，所以只要模型名里含 tts/asr 子串就放行，
+ * 等于把任意服务商的 API Key 发到阿里云去。
+ */
+export function acceptsBailianAsr(target: { provider: ProviderRow; modelId: string }): boolean {
+  return isOfficialBailianCatalogProvider(target.provider) && isBailianAsrModel(target.modelId);
+}
+
+export function acceptsBailianTts(target: { provider: ProviderRow; modelId: string }): boolean {
+  return isOfficialBailianCatalogProvider(target.provider) && isBailianTtsModel(target.modelId);
+}
+
+/** 被拒时给客户端的说明，四个入口统一措辞。 */
+export function bailianAudioRejectMessage(kind: 'ASR' | 'TTS', modelId: string, providerSlug: string): string {
+  return `模型 "${modelId}"（服务商 ${providerSlug}）不是百炼官方目录下的${kind === 'ASR' ? '语音识别' : '语音合成'}模型；该接口只转发百炼 DashScope，不会把其它服务商的凭据发往阿里云。`;
 }
 
 export function getBailianAsrEndpoint(workspaceId?: string | null): string {
@@ -43,6 +63,8 @@ export interface BailianAsrOptions {
   sampleRate?: number | string;
   languageHints?: string[];
   contextMessages?: Array<{ role: 'user' | 'assistant'; text: string }>;
+  /** 客户端断连与超时；不传就既不会中止也没有上限。 */
+  signal?: AbortSignal;
 }
 
 export interface BailianAsrResponse {
@@ -111,6 +133,7 @@ export async function callBailianAsr(
       'X-DashScope-SSE': 'disable',
     },
     body: JSON.stringify(body),
+    signal: options.signal,
   });
 
   if (!res.ok) {
@@ -135,6 +158,8 @@ export interface BailianTtsOptions {
   volume?: number;
   rate?: number;
   pitch?: number;
+  /** 客户端断连与超时；不传就既不会中止也没有上限。 */
+  signal?: AbortSignal;
 }
 
 export interface BailianTtsResponse {
@@ -182,6 +207,7 @@ export async function callBailianTts(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
+    signal: options.signal,
   });
 
   if (!res.ok) {
@@ -196,7 +222,7 @@ export async function callBailianTts(
 
   let audioBuffer: Buffer | undefined;
   if (audioUrl) {
-    const audioRes = await fetchImpl(audioUrl);
+    const audioRes = await fetchImpl(audioUrl, { signal: options.signal });
     if (audioRes.ok) {
       const arrayBuf = await audioRes.arrayBuffer();
       audioBuffer = Buffer.from(arrayBuf);
@@ -214,7 +240,7 @@ export async function tryHandleBailianSpecialChat(
   apiKey: string,
   modelId: string,
   rawBody: Record<string, any>,
-  requestedModel: string,
+  signal?: AbortSignal,
 ): Promise<{ text: string; duration?: number; characters?: number } | null> {
   const isAsr = isBailianAsrModel(modelId);
   const isTts = isBailianTtsModel(modelId);
@@ -266,6 +292,7 @@ export async function tryHandleBailianSpecialChat(
       model: modelId,
       audioDataUriOrUrl,
       contextMessages: contextMsgs,
+      signal,
     });
 
     return { text: asrRes.text, duration: asrRes.duration };
@@ -293,6 +320,7 @@ export async function tryHandleBailianSpecialChat(
     const ttsRes = await callBailianTts(provider, apiKey, {
       model: modelId,
       text: lastUserText,
+      signal,
     });
 
     return {

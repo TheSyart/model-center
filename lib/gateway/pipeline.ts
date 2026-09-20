@@ -242,19 +242,17 @@ export async function runGatewayPipeline(input: PipelineInput): Promise<Response
         apiKey,
         firstTarget.modelId,
         rawBody,
-        requestedModel,
+        clientSignal,
       );
       if (specialResult) {
-        const id = `chatcmpl-${crypto.randomUUID()}`;
-        const created = Math.floor(Date.now() / 1000);
-        const promptTokens = specialResult.duration
-          ? Math.round(specialResult.duration * 10)
-          : specialResult.characters ?? 0;
-        const completionTokens = specialResult.text.length;
+        // 语音的计量是时长与字符数，不是 token。此前按 duration*10 与 text.length
+        // 伪造出 token 数再乘以每百万 token 单价，会在仪表盘上得到一个无法与
+        // 官方账单对账的成本；宁可不给，和非美元币种返回 null 是同一条原则。
+        // 响应体里也一并省略 usage——OpenAI 各官方 SDK 都按可选字段处理。
         const responseJson = {
-          id,
+          id: `chatcmpl-${crypto.randomUUID()}`,
           object: 'chat.completion',
-          created,
+          created: Math.floor(Date.now() / 1000),
           model: requestedModel,
           choices: [
             {
@@ -263,21 +261,11 @@ export async function runGatewayPipeline(input: PipelineInput): Promise<Response
               finish_reason: 'stop',
             },
           ],
-          usage: {
-            prompt_tokens: promptTokens,
-            completion_tokens: completionTokens,
-            total_tokens: promptTokens + completionTokens,
-          },
         };
-        const latencyMs = Date.now() - startedAt;
         log(logBase, {
           status: 200,
-          latencyMs,
-          usage: {
-            prompt_tokens: promptTokens,
-            completion_tokens: completionTokens,
-            total_tokens: promptTokens + completionTokens,
-          },
+          latencyMs: Date.now() - startedAt,
+          usage: null,
           error: null,
         });
         return Response.json(responseJson);

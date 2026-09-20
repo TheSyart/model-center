@@ -1,106 +1,88 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { checkGatewayAuth } from '@/lib/gateway/auth';
-import { resolveModel } from '@/lib/gateway/router';
-import { decrypt } from '@/lib/crypto';
-import { callBailianAsr, isBailianAsrModel } from '@/lib/services/dashscope-audio';
-import { isOfficialBailianCatalogProvider } from '@/lib/services/bailian-catalog';
-import { writeRequestLog } from '@/lib/gateway/logger';
+import { openaiErrorResponse } from '@/lib/gateway/errors';
+import { runModalityRequest } from '@/lib/gateway/modality-pipeline';
+import { withRawCapture } from '@/lib/raw-capture/capture';
+import { normalizeRequestSource } from '@/lib/services/usage-metrics';
+import {
+  acceptsBailianAsr,
+  bailianAudioRejectMessage,
+  callBailianAsr,
+} from '@/lib/services/dashscope-audio';
 
-export async function POST(req: NextRequest) {
-  const start = Date.now();
+/**
+ * 网关自身的内存护栏，不是上游的限制。
+ *
+ * 音频要整个读进内存再 base64 成 data URI（约 1.37 倍），没有上限的话
+ * 一个大文件就能把进程撑爆。25 MiB 取自 OpenAI 转写接口的同名限制，
+ * 对照着用最不容易让客户端意外。
+ */
+const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
+
+// POST /api/v1/audio/transcriptions（对外经 rewrite 暴露为 /v1/audio/transcriptions）
+async function handlePost(req: NextRequest): Promise<Response> {
   const auth = checkGatewayAuth(req);
   if (!auth.ok) {
-    return NextResponse.json({ error: { message: auth.message, type: auth.code } }, { status: 401 });
+    return openaiErrorResponse(401, auth.message, { type: 'authentication_error', code: auth.code });
   }
 
+  let formData: FormData;
   try {
-    const formData = await req.formData();
-    const file = formData.get('file');
-    const model = (formData.get('model') as string | null)?.trim();
-    const language = (formData.get('language') as string | null)?.trim();
-    const prompt = (formData.get('prompt') as string | null)?.trim();
+    formData = await req.formData();
+  } catch {
+    return openaiErrorResponse(400, '请求体不是合法的 multipart/form-data', { code: 'invalid_form_data' });
+  }
 
-    if (!file || !(file instanceof Blob)) {
-      return NextResponse.json(
-        { error: { message: '缺少必需的音频文件 (file)', type: 'invalid_request_error' } },
-        { status: 400 },
-      );
-    }
-    if (!model) {
-      return NextResponse.json(
-        { error: { message: '缺少必需的模型参数 (model)', type: 'invalid_request_error' } },
-        { status: 400 },
-      );
-    }
-
-    const route = resolveModel(model);
-    const target = route.targets[0];
-    if (!target) {
-      return NextResponse.json(
-        { error: { message: `未找到可用模型: ${model}`, type: 'model_not_found' } },
-        { status: 404 },
-      );
-    }
-
-    const arrayBuffer = await file.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    const mimeType = file.type || 'audio/wav';
-    const audioDataUri = `data:${mimeType};base64,${buffer.toString('base64')}`;
-
-    const apiKey = decrypt(target.provider.apiKeyEnc);
-    const asrRes = await callBailianAsr(target.provider, apiKey, {
-      model: target.modelId,
-      audioDataUriOrUrl: audioDataUri,
-      languageHints: language ? [language] : undefined,
-      contextMessages: prompt ? [{ role: 'user', text: prompt }] : undefined,
-    });
-
-    const latencyMs = Date.now() - start;
-    writeRequestLog({
-      ts: Date.now(),
-      providerId: target.provider.id,
-      modelId: target.modelId,
-      alias: route.alias,
-      tokenId: auth.token?.id,
-      tokenName: auth.token?.name,
-      tokenPrefix: auth.token?.prefix,
-      entryProtocol: 'openai',
-      upstreamProtocol: target.provider.protocol,
-      status: 200,
-      latencyMs,
-      usage: asrRes.duration
-        ? {
-            prompt_tokens: Math.round(asrRes.duration * 10),
-            completion_tokens: asrRes.text.length,
-            total_tokens: Math.round(asrRes.duration * 10) + asrRes.text.length,
-          }
-        : null,
-      error: null,
-      stream: false,
-    });
-
-    return NextResponse.json({ text: asrRes.text });
-  } catch (err: any) {
-    const latencyMs = Date.now() - start;
-    writeRequestLog({
-      ts: Date.now(),
-      providerId: null,
-      modelId: null,
-      alias: null,
-      tokenId: auth.token?.id,
-      tokenName: auth.token?.name,
-      tokenPrefix: auth.token?.prefix,
-      entryProtocol: 'openai',
-      status: 500,
-      latencyMs,
-      usage: null,
-      error: err instanceof Error ? err.message : String(err),
-      stream: false,
-    });
-
-    return NextResponse.json(
-      { error: { message: err instanceof Error ? err.message : String(err), type: 'internal_error' } },
-      { status: 500 },
+  const file = formData.get('file');
+  if (!file || !(file instanceof Blob)) {
+    return openaiErrorResponse(400, '缺少必需的音频文件 (file)', { param: 'file' });
+  }
+  if (file.size > MAX_AUDIO_BYTES) {
+    return openaiErrorResponse(
+      413,
+      `音频文件 ${(file.size / 1024 / 1024).toFixed(1)}MB 超出上限 ${MAX_AUDIO_BYTES / 1024 / 1024}MB`,
+      { param: 'file', code: 'file_too_large' },
     );
   }
+
+  const model = (formData.get('model') as string | null)?.trim();
+  if (!model) return openaiErrorResponse(400, '缺少必需的模型参数 (model)', { param: 'model' });
+
+  const language = (formData.get('language') as string | null)?.trim();
+  const prompt = (formData.get('prompt') as string | null)?.trim();
+
+  return runModalityRequest({
+    entry: 'openai',
+    requestedModel: model,
+    token: auth.token,
+    source: normalizeRequestSource(req.headers.get('user-agent')),
+    clientSignal: req.signal,
+    accepts: acceptsBailianAsr,
+    rejectMessage: (target) => bailianAudioRejectMessage('ASR', target.modelId, target.provider.slug),
+    errorResponse: (status, message, code) => openaiErrorResponse(status, message, { code }),
+    execute: async ({ target, apiKey, signal }) => {
+      // 只有确认要发给百炼之后才把文件读进内存。
+      const buffer = Buffer.from(await file.arrayBuffer());
+      const audioDataUri = `data:${file.type || 'audio/wav'};base64,${buffer.toString('base64')}`;
+
+      const asr = await callBailianAsr(target.provider, apiKey, {
+        model: target.modelId,
+        audioDataUriOrUrl: audioDataUri,
+        languageHints: language ? [language] : undefined,
+        contextMessages: prompt ? [{ role: 'user', text: prompt }] : undefined,
+        signal,
+      });
+
+      return { response: NextResponse.json({ text: asr.text }) };
+    },
+  });
+}
+
+export const POST = withRawCapture(
+  { entry: 'audio-transcriptions', path: '/v1/audio/transcriptions' },
+  handlePost,
+);
+
+export function GET() {
+  return openaiErrorResponse(405, 'Method not allowed');
 }

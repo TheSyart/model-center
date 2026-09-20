@@ -1,119 +1,99 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { checkGatewayAuth } from '@/lib/gateway/auth';
-import { resolveModel } from '@/lib/gateway/router';
-import { decrypt } from '@/lib/crypto';
-import { callBailianTts, isBailianTtsModel } from '@/lib/services/dashscope-audio';
-import { writeRequestLog } from '@/lib/gateway/logger';
+import { openaiErrorResponse } from '@/lib/gateway/errors';
+import { runModalityRequest } from '@/lib/gateway/modality-pipeline';
+import { withRawCapture } from '@/lib/raw-capture/capture';
+import { normalizeRequestSource } from '@/lib/services/usage-metrics';
+import {
+  acceptsBailianTts,
+  bailianAudioRejectMessage,
+  callBailianTts,
+} from '@/lib/services/dashscope-audio';
 
-export async function POST(req: NextRequest) {
-  const start = Date.now();
+const FORMATS = ['wav', 'mp3', 'opus', 'pcm'] as const;
+type SpeechFormat = (typeof FORMATS)[number];
+
+// pcm 是裸采样，不是 WAV 容器；此前一并按 audio/wav 下发会让客户端按容器去解析。
+const CONTENT_TYPES: Record<SpeechFormat, string> = {
+  wav: 'audio/wav',
+  mp3: 'audio/mpeg',
+  opus: 'audio/opus',
+  pcm: 'audio/L16',
+};
+
+// POST /api/v1/audio/speech（对外经 rewrite 暴露为 /v1/audio/speech）
+async function handlePost(req: NextRequest): Promise<Response> {
   const auth = checkGatewayAuth(req);
   if (!auth.ok) {
-    return NextResponse.json({ error: { message: auth.message, type: auth.code } }, { status: 401 });
+    return openaiErrorResponse(401, auth.message, { type: 'authentication_error', code: auth.code });
   }
 
+  let body: Record<string, unknown>;
   try {
-    const body = await req.json();
-    const model = typeof body.model === 'string' ? body.model.trim() : '';
-    const text = typeof body.input === 'string' ? body.input.trim() : '';
-    const voice = typeof body.voice === 'string' ? body.voice.trim() : undefined;
-    const format = (['wav', 'mp3', 'opus', 'pcm'].includes(body.response_format)
-      ? body.response_format
-      : 'wav') as 'wav' | 'mp3' | 'opus' | 'pcm';
-    const speed = typeof body.speed === 'number' ? body.speed : undefined;
-
-    if (!model) {
-      return NextResponse.json(
-        { error: { message: '缺少必需的模型参数 (model)', type: 'invalid_request_error' } },
-        { status: 400 },
-      );
-    }
-    if (!text) {
-      return NextResponse.json(
-        { error: { message: '缺少必需的待合成文本 (input)', type: 'invalid_request_error' } },
-        { status: 400 },
-      );
-    }
-
-    const route = resolveModel(model);
-    const target = route.targets[0];
-    if (!target) {
-      return NextResponse.json(
-        { error: { message: `未找到可用模型: ${model}`, type: 'model_not_found' } },
-        { status: 404 },
-      );
-    }
-
-    const apiKey = decrypt(target.provider.apiKeyEnc);
-    const ttsRes = await callBailianTts(target.provider, apiKey, {
-      model: target.modelId,
-      text,
-      voice,
-      format,
-      rate: speed,
-    });
-
-    const latencyMs = Date.now() - start;
-    writeRequestLog({
-      ts: Date.now(),
-      providerId: target.provider.id,
-      modelId: target.modelId,
-      alias: route.alias,
-      tokenId: auth.token?.id,
-      tokenName: auth.token?.name,
-      tokenPrefix: auth.token?.prefix,
-      entryProtocol: 'openai',
-      upstreamProtocol: target.provider.protocol,
-      status: 200,
-      latencyMs,
-      usage: ttsRes.characters
-        ? {
-            prompt_tokens: ttsRes.characters,
-            completion_tokens: 0,
-            total_tokens: ttsRes.characters,
-          }
-        : null,
-      error: null,
-      stream: false,
-    });
-
-    if (ttsRes.audioBuffer) {
-      const contentType = format === 'mp3' ? 'audio/mpeg' : format === 'opus' ? 'audio/opus' : 'audio/wav';
-      return new Response(new Uint8Array(ttsRes.audioBuffer), {
-        headers: {
-          'Content-Type': contentType,
-          'Content-Length': String(ttsRes.audioBuffer.byteLength),
-        },
-      });
-    }
-
-    if (ttsRes.audioUrl) {
-      // 若无本地 buffer 则重定向到生成的临时音频地址
-      return NextResponse.redirect(ttsRes.audioUrl);
-    }
-
-    return NextResponse.json({ error: { message: '百炼 TTS 未能生成音频', type: 'internal_error' } }, { status: 502 });
-  } catch (err: any) {
-    const latencyMs = Date.now() - start;
-    writeRequestLog({
-      ts: Date.now(),
-      providerId: null,
-      modelId: null,
-      alias: null,
-      tokenId: auth.token?.id,
-      tokenName: auth.token?.name,
-      tokenPrefix: auth.token?.prefix,
-      entryProtocol: 'openai',
-      status: 500,
-      latencyMs,
-      usage: null,
-      error: err instanceof Error ? err.message : String(err),
-      stream: false,
-    });
-
-    return NextResponse.json(
-      { error: { message: err instanceof Error ? err.message : String(err), type: 'internal_error' } },
-      { status: 500 },
-    );
+    body = await req.json();
+  } catch {
+    return openaiErrorResponse(400, '请求体不是合法 JSON', { code: 'invalid_json' });
   }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return openaiErrorResponse(400, '请求体必须是 JSON 对象', { code: 'invalid_json' });
+  }
+
+  const model = typeof body.model === 'string' ? body.model.trim() : '';
+  if (!model) return openaiErrorResponse(400, '缺少必需的模型参数 (model)', { param: 'model' });
+
+  const text = typeof body.input === 'string' ? body.input.trim() : '';
+  if (!text) return openaiErrorResponse(400, '缺少必需的待合成文本 (input)', { param: 'input' });
+
+  const format: SpeechFormat = FORMATS.includes(body.response_format as SpeechFormat)
+    ? (body.response_format as SpeechFormat)
+    : 'wav';
+  const voice = typeof body.voice === 'string' ? body.voice.trim() : undefined;
+  const speed = typeof body.speed === 'number' ? body.speed : undefined;
+
+  return runModalityRequest({
+    entry: 'openai',
+    requestedModel: model,
+    token: auth.token,
+    source: normalizeRequestSource(req.headers.get('user-agent')),
+    clientSignal: req.signal,
+    accepts: acceptsBailianTts,
+    rejectMessage: (target) => bailianAudioRejectMessage('TTS', target.modelId, target.provider.slug),
+    errorResponse: (status, message, code) => openaiErrorResponse(status, message, { code }),
+    execute: async ({ target, apiKey, signal }) => {
+      const tts = await callBailianTts(target.provider, apiKey, {
+        model: target.modelId,
+        text,
+        voice,
+        format,
+        rate: speed,
+        signal,
+      });
+
+      if (tts.audioBuffer) {
+        return {
+          response: new Response(new Uint8Array(tts.audioBuffer), {
+            headers: {
+              'Content-Type': CONTENT_TYPES[format],
+              'Content-Length': String(tts.audioBuffer.byteLength),
+            },
+          }),
+        };
+      }
+      if (tts.audioUrl) {
+        // 合成成功但音频没下载下来时，把上游的临时地址交给客户端自取。
+        return { response: NextResponse.redirect(tts.audioUrl) };
+      }
+      const message = '百炼 TTS 未能生成音频';
+      return {
+        response: openaiErrorResponse(502, message, { type: 'api_error', code: 'upstream_no_audio' }),
+        error: message,
+      };
+    },
+  });
+}
+
+export const POST = withRawCapture({ entry: 'audio-speech', path: '/v1/audio/speech' }, handlePost);
+
+export function GET() {
+  return openaiErrorResponse(405, 'Method not allowed');
 }
