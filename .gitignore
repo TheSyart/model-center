@@ -2,8 +2,9 @@
 /node_modules
 
 # next.js
-/.next/
-/.next-playwright-data/
+# 通配所有产物目录：next.config.ts 的 MODEL_CENTER_NEXT_DIST_DIR 可以指向
+# .next-buildcheck、.next-acceptance 等任意变体，逐个列举必然漏。
+/.next*/
 /out/
 /.playwright-data/
 /playwright-report/
