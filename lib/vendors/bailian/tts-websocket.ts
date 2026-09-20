@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
 import { WebSocket } from 'undici';
+import { createPushStream } from '../../protocols/push-stream.ts';
+import { deferred } from '../../protocols/sse.ts';
 import { UpstreamError } from '../../upstream-error.ts';
 
 /**
@@ -12,8 +14,8 @@ import { UpstreamError } from '../../upstream-error.ts';
  *
  * 契约 2026-09-20 用真实密钥实测；协议细节见 docs/vendor-apis/bailian.md。
  *
- * 这里只做「一次性合成」：把文本发完、收齐音频、关连接，对外仍是一个普通的
- * HTTP 响应。网关暂不对外提供流式语音，所以没必要把 WebSocket 的分片暴露出去。
+ * 对外有两条路：openBailianTtsStream 边收边交（分片本来就是逐帧到的），
+ * synthesizeOverWebSocket 读到底再拼成整包。后者就是前者的缓冲包装。
  */
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -113,57 +115,139 @@ async function toBuffer(data: unknown): Promise<Buffer | null> {
   return null;
 }
 
-export function synthesizeOverWebSocket(
+export type BailianTtsFinishReason = 'finished' | 'failed' | 'cancelled' | 'truncated';
+
+export interface BailianWsTtsCompletion {
+  reason: BailianTtsFinishReason;
+  /** 只有 task-finished 才知道；那时音频字节早已发走，所以必须走这条旁路。 */
+  characters?: number;
+  requestId?: string;
+  /** reason==='failed' 时的原始错误，写日志用；不会再 reject 一次。 */
+  error?: Error;
+}
+
+export interface BailianWsTtsStream {
+  chunks: AsyncGenerator<Uint8Array, void, undefined>;
+  /**
+   * 正常结束、上游报错、客户端取消都 **resolve**，永不 reject。
+   * 日志的 after() 等它——悬挂就是永久泄漏（同 lib/protocols/responses.ts 的不变量）。
+   */
+  completion: Promise<BailianWsTtsCompletion>;
+  /** 首个音频分片的毫秒耗时。 */
+  firstChunkMs: number;
+}
+
+export interface BailianWsTtsStreamOptions extends BailianWsTtsOptions {
+  /** 排队上限，默认 16 MiB。 */
+  maxBufferedBytes?: number;
+  /** 首片之后，两片之间的最大间隔。默认 120s。 */
+  idleTimeoutMs?: number;
+}
+
+/**
+ * 开一路流式合成。
+ *
+ * 返回的 Promise **等到第一个音频分片（或上游报错）才 resolve**，因为在那之前
+ * 还来得及把错误变成一个正经的 HTTP 4xx——音色不对这类问题全都发生在任何音频
+ * 之前。一旦开始出音频，HTTP 状态码就定死是 200 了，错误只能体现为流的异常结束。
+ *
+ * 超时语义也因此改变：`timeoutMs` 只约束**首包**，帧与帧之间由 `idleTimeoutMs`
+ * 约束，**没有总时长上限**。合成一段 5000 字的长文本本来就可能超过两分钟，
+ * 用一个墙钟把它砍掉是错的；能区分「慢」和「挂」的只有帧间隔。
+ */
+export function openBailianTtsStream(
   workspaceId: string | null | undefined,
   apiKey: string,
-  options: BailianWsTtsOptions,
+  options: BailianWsTtsStreamOptions,
   timeoutMs = DEFAULT_TIMEOUT_MS,
-): Promise<BailianWsTtsResult> {
+): Promise<BailianWsTtsStream> {
   const url = bailianTtsWebSocketUrl(workspaceId);
   const streaming = streamingModeFor(options.model);
   const taskId = crypto.randomUUID();
+  const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const startedAt = Date.now();
 
-  return new Promise<BailianWsTtsResult>((resolve, reject) => {
-    const chunks: Buffer[] = [];
+  return new Promise<BailianWsTtsStream>((resolveOpen, rejectOpen) => {
+    const push = createPushStream({ maxBufferedBytes: options.maxBufferedBytes });
     /**
      * 二进制帧转 Buffer 是异步的（Blob.arrayBuffer），而 task-finished 是同步事件。
-     * 不把它们排进同一条链，最后一个分片就可能在 resolve 之后才落地，音频缺尾。
+     * 不把它们排进同一条链，最后一个分片就可能在收口之后才落地，音频缺尾。
      */
     let pending: Promise<unknown> = Promise.resolve();
     let characters: number | undefined;
     let requestId: string | undefined;
+    let opened = false;
     let settled = false;
+    let chunkCount = 0;
     let socket: WebSocketLike;
 
-    const finish = (fn: () => void) => {
+    const completion = deferred<BailianWsTtsCompletion>();
+    let firstTimer: ReturnType<typeof setTimeout> | undefined;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const clearTimers = () => {
+      if (firstTimer) clearTimeout(firstTimer);
+      if (idleTimer) clearTimeout(idleTimer);
+      firstTimer = undefined;
+      idleTimer = undefined;
+    };
+
+    const settle = (reason: BailianTtsFinishReason, error?: Error) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      clearTimers();
       options.signal?.removeEventListener('abort', onAbort);
       try {
         socket?.close();
       } catch {
         // 连接可能已经断了，关不上无所谓。
       }
-      fn();
+      completion.resolve({ reason, characters, requestId, error });
     };
 
-    const fail = (status: number, message: string) => finish(() => reject(new UpstreamError(status, message)));
-    // 等所有在途分片都入列再收口。
-    const succeed = () => {
-      void pending.then(() => finish(() => resolve({ audio: Buffer.concat(chunks), characters, requestId })));
+    /**
+     * 在出第一个音频分片之前失败：还能变成 HTTP 状态码。之后就只能中断流。
+     *
+     * `reason` 区分的是「谁的责任」：上游拒绝是 failed，客户端走开是 cancelled。
+     * 两者在日志里的含义完全不同——后者不是故障。
+     */
+    const fail = (status: number, message: string, reason: BailianTtsFinishReason = 'failed') => {
+      const error = new UpstreamError(status, message);
+      push.fail(error);
+      settle(reason, error);
+      if (!opened) rejectOpen(error);
     };
 
-    const timer = setTimeout(
-      () => fail(504, `百炼 TTS 失败：WebSocket 无响应，已超过 ${timeoutMs}ms 上限`),
+    const armIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(
+        () => fail(504, `百炼 TTS 失败：已 ${idleTimeoutMs}ms 没有新的音频分片`),
+        idleTimeoutMs,
+      );
+    };
+
+    const onFirstChunk = () => {
+      if (opened) return;
+      opened = true;
+      if (firstTimer) clearTimeout(firstTimer);
+      firstTimer = undefined;
+      armIdle();
+      resolveOpen({ chunks: push.chunks, completion: completion.promise, firstChunkMs: Date.now() - startedAt });
+    };
+
+    firstTimer = setTimeout(
+      () => fail(504, `百炼 TTS 失败：WebSocket 在 ${timeoutMs}ms 内没有返回任何音频`),
       timeoutMs,
     );
-    const onAbort = () => fail(499, '百炼 TTS 中止：客户端已断开连接');
+    const onAbort = () => fail(499, '百炼 TTS 中止：客户端已断开连接', 'cancelled');
     options.signal?.addEventListener('abort', onAbort);
     if (options.signal?.aborted) {
       onAbort();
       return;
     }
+
+    // 下游不读了（客户端断开、或响应被取消）→ 关掉上游，别继续合成继续计费。
+    push.onCancel(() => settle('cancelled'));
 
     const header = (action: string) => ({ action, task_id: taskId, streaming });
     const parameters: Record<string, unknown> = {
@@ -206,7 +290,11 @@ export function synthesizeOverWebSocket(
       if (typeof event.data !== 'string') {
         pending = pending.then(async () => {
           const buf = await toBuffer(event.data);
-          if (buf) chunks.push(buf);
+          if (!buf || settled) return;
+          chunkCount += 1;
+          push.push(buf);
+          onFirstChunk();
+          armIdle();
         });
         return;
       }
@@ -231,11 +319,23 @@ export function synthesizeOverWebSocket(
       } else if (kind === 'task-finished') {
         const n = message?.payload?.usage?.characters;
         if (typeof n === 'number') characters = n;
-        succeed();
+        // 等在途分片入列再收口，否则尾音会丢。
+        void pending.then(() => {
+          push.close();
+          settle('finished');
+          // 一个字节音频都没有也算成功结束，交给调用方判空。
+          if (!opened) {
+            opened = true;
+            clearTimers();
+            resolveOpen({ chunks: push.chunks, completion: completion.promise, firstChunkMs: Date.now() - startedAt });
+          }
+        });
       } else if (kind === 'task-failed') {
         const code = message?.header?.error_code ?? 'unknown';
         const text = message?.header?.error_message ?? '（上游未给出原因）';
-        fail(400, `百炼 TTS 失败 (${code}): ${text}${ttsFailureHint(options.model, options.voice, text)}`);
+        void pending.then(() =>
+          fail(400, `百炼 TTS 失败 (${code}): ${text}${ttsFailureHint(options.model, options.voice, text)}`),
+        );
       }
     });
 
@@ -244,9 +344,36 @@ export function synthesizeOverWebSocket(
     });
 
     socket.addEventListener('close', () => {
-      // 正常结束时 task-finished 已经 resolve 过了；走到这里说明连接先断了。
-      if (chunks.length > 0) succeed();
-      else fail(502, '百炼 TTS 失败：WebSocket 在返回音频前就关闭了');
+      if (settled) return;
+      void pending.then(() => {
+        if (settled) return;
+        if (chunkCount > 0) {
+          // 收到过音频但没等到 task-finished：音频多半是截断的。
+          // 此前这条路径被当作成功且无声无息，现在它在日志里有名字。
+          push.close();
+          settle('truncated');
+        } else {
+          fail(502, '百炼 TTS 失败：WebSocket 在返回音频前就关闭了');
+        }
+      });
     });
   });
+}
+
+/**
+ * 一次性合成：把流读到底再拼成整包。
+ *
+ * 非流式的四条路仍然走这里，签名与行为都不变。
+ */
+export async function synthesizeOverWebSocket(
+  workspaceId: string | null | undefined,
+  apiKey: string,
+  options: BailianWsTtsOptions,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<BailianWsTtsResult> {
+  const stream = await openBailianTtsStream(workspaceId, apiKey, options, timeoutMs);
+  const parts: Buffer[] = [];
+  for await (const chunk of stream.chunks) parts.push(Buffer.from(chunk));
+  const done = await stream.completion;
+  return { audio: Buffer.concat(parts), characters: done.characters, requestId: done.requestId };
 }
