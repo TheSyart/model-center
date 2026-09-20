@@ -38,6 +38,12 @@ import {
 import { normalizeOpenAIUsage } from '@/lib/services/usage-metrics';
 import { sqlite } from '@/lib/db';
 import { listProviderEndpointModelObservations, listProviderEndpoints } from '@/lib/services/provider-endpoint';
+import { isOfficialBailianCatalogProvider } from '@/lib/services/bailian-catalog';
+import {
+  isBailianAsrModel,
+  isBailianTtsModel,
+  tryHandleBailianSpecialChat,
+} from '@/lib/services/dashscope-audio';
 
 type Json = Record<string, any>;
 
@@ -220,6 +226,61 @@ export async function runGatewayPipeline(input: PipelineInput): Promise<Response
       logBase.promptId = prompt.id;
       if (rendered.missing.length > 0) {
         console.warn(`[gateway] 提示词 "${prompt.name}" 有未替换变量（保留原样）: ${rendered.missing.join(', ')}`);
+      }
+    }
+
+    // 1.8 百炼 DashScope 特殊请求兼容（ASR/TTS 模型由专属客户端与协议处理）
+    const firstTarget = route.targets[0];
+    if (
+      entry === 'openai' &&
+      isOfficialBailianCatalogProvider(firstTarget.provider) &&
+      (isBailianAsrModel(firstTarget.modelId) || isBailianTtsModel(firstTarget.modelId))
+    ) {
+      const apiKey = decrypt(firstTarget.provider.apiKeyEnc);
+      const specialResult = await tryHandleBailianSpecialChat(
+        firstTarget.provider,
+        apiKey,
+        firstTarget.modelId,
+        rawBody,
+        requestedModel,
+      );
+      if (specialResult) {
+        const id = `chatcmpl-${crypto.randomUUID()}`;
+        const created = Math.floor(Date.now() / 1000);
+        const promptTokens = specialResult.duration
+          ? Math.round(specialResult.duration * 10)
+          : specialResult.characters ?? 0;
+        const completionTokens = specialResult.text.length;
+        const responseJson = {
+          id,
+          object: 'chat.completion',
+          created,
+          model: requestedModel,
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: specialResult.text },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: {
+            prompt_tokens: promptTokens,
+            completion_tokens: completionTokens,
+            total_tokens: promptTokens + completionTokens,
+          },
+        };
+        const latencyMs = Date.now() - startedAt;
+        log(logBase, {
+          status: 200,
+          latencyMs,
+          usage: {
+            prompt_tokens: promptTokens,
+            completion_tokens: completionTokens,
+            total_tokens: promptTokens + completionTokens,
+          },
+          error: null,
+        });
+        return Response.json(responseJson);
       }
     }
 
