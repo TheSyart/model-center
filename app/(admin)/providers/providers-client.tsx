@@ -494,7 +494,7 @@ export default function ProvidersClient({ initialProviders }: { initialProviders
                     </div>
                     </TabsContent>
                     <TabsContent value="models" className="mt-0">
-                      <ModelTable providerId={p.id} models={models.filter((m) => m.provider_id === p.id)} onChanged={load} onToast={notify} />
+                      <ModelTable provider={p} providerId={p.id} models={models.filter((m) => m.provider_id === p.id)} onChanged={load} onToast={notify} />
                     </TabsContent>
                   </Tabs>
                 )}
