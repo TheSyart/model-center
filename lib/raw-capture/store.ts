@@ -37,6 +37,7 @@ import type {
   RawCaptureSession,
   RawCaptureStatus,
 } from './types.ts';
+import { isRawCaptureEntry } from './types.ts';
 
 const CREATE_TABLES_SQL = `
 CREATE TABLE IF NOT EXISTS raw_capture_records (
@@ -274,10 +275,6 @@ function combineCaptureErrors(...messages: Array<string | null | undefined>): st
   return values.length > 0 ? values.join('；') : null;
 }
 
-function isEntry(value: unknown): value is RawCaptureEntry {
-  return value === 'openai' || value === 'anthropic' || value === 'responses' || value === 'security-lab-anthropic';
-}
-
 function isFiniteNumberOrNull(value: unknown): value is number | null {
   return value === null || (typeof value === 'number' && Number.isFinite(value));
 }
@@ -291,7 +288,7 @@ function recordFromMetadata(value: unknown, day: string, id: string): RawCapture
     || typeof record.startedAt !== 'number'
     || !Number.isFinite(record.startedAt)
     || typeof record.path !== 'string'
-    || !isEntry(record.entryProtocol)
+    || !isRawCaptureEntry(record.entryProtocol)
     || !isFiniteNumberOrNull(record.completedAt)
     || !isFiniteNumberOrNull(record.status)
     || typeof record.stream !== 'boolean'

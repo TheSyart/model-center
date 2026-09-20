@@ -22,6 +22,10 @@ const protocolLabels: Record<RawCaptureRecord['entryProtocol'], string> = {
   openai: 'Chat',
   responses: 'Responses',
   'security-lab-anthropic': 'Security Lab',
+  'audio-speech': '语音合成',
+  'audio-transcriptions': '语音识别',
+  'dashscope-asr': 'DashScope ASR',
+  'dashscope-tts': 'DashScope TTS',
 };
 
 function formatBytes(bytes: number): string {

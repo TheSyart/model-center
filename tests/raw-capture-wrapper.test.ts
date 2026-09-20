@@ -6,7 +6,7 @@ import {
   type RawCaptureDependencies,
   type RawCaptureRouteHandler,
 } from '../lib/raw-capture/capture.ts';
-import type { RawCaptureRecord, RawCaptureSession } from '../lib/raw-capture/types.ts';
+import type { RawCaptureEntry, RawCaptureRecord, RawCaptureSession } from '../lib/raw-capture/types.ts';
 
 function bytes(value: string): Uint8Array {
   return new TextEncoder().encode(value);
@@ -71,7 +71,7 @@ function harness(enabled: boolean) {
     beginCalls: number;
     archiveCalls: number;
     beginInput?: {
-      entryProtocol: 'openai' | 'anthropic' | 'responses' | 'security-lab-anthropic';
+      entryProtocol: RawCaptureEntry;
       path: string;
       requestBody: Uint8Array;
     };

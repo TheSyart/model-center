@@ -28,6 +28,7 @@ import {
 } from './paths.ts';
 import type { RawCaptureStore } from './store.ts';
 import type { RawCaptureArchive, RawCaptureEntry, RawCaptureRecord } from './types.ts';
+import { RAW_CAPTURE_ENTRY_PATHS, isRawCaptureEntry } from './types.ts';
 
 const ARCHIVE_PARTS = ['metadata.json', 'request.body', 'response.body'] as const;
 const METADATA_LIMIT_BYTES = 1024 * 1024;
@@ -76,13 +77,6 @@ function errorMessage(error: unknown): string {
   return error instanceof Error && error.message ? error.message : String(error);
 }
 
-function isEntry(value: unknown): value is RawCaptureEntry {
-  return value === 'openai'
-    || value === 'anthropic'
-    || value === 'responses'
-    || value === 'security-lab-anthropic';
-}
-
 function isSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
@@ -92,10 +86,7 @@ function isFiniteStatus(value: unknown): value is number {
 }
 
 function expectedPath(entry: RawCaptureEntry): string {
-  if (entry === 'openai') return '/v1/chat/completions';
-  if (entry === 'anthropic') return '/v1/messages';
-  if (entry === 'responses') return '/v1/responses';
-  return '/security-lab/v1/messages';
+  return RAW_CAPTURE_ENTRY_PATHS[entry];
 }
 
 function parseArchivedMetadata(
@@ -140,7 +131,7 @@ function parseArchivedMetadata(
     || value.day !== expectedDay
     || !isSafeInteger(value.startedAt)
     || !isSafeInteger(value.completedAt)
-    || !isEntry(value.entryProtocol)
+    || !isRawCaptureEntry(value.entryProtocol)
     || value.path !== expectedPath(value.entryProtocol)
     || !isFiniteStatus(value.status)
     || typeof value.stream !== 'boolean'
