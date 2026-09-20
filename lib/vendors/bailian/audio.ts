@@ -1,7 +1,7 @@
 import { isOfficialBailianCatalogProvider, normalizeBailianWorkspaceId } from './catalog.ts';
 import type { ProviderRow } from '../../services/provider.ts';
 import { UpstreamError } from '../../upstream-error.ts';
-import { synthesizeOverWebSocket } from './tts-websocket.ts';
+import { synthesizeOverWebSocket, ttsFailureHint } from './tts-websocket.ts';
 
 /**
  * 百炼语音接口。
@@ -216,6 +216,7 @@ export async function callBailianAsr(
     body.parameters = { asr_options: { language: options.languageHints[0], enable_lid: true } };
   }
 
+  // qwen3-tts-vc / -vd 走 HTTP，失败时也要给出「需要自建音色」的提示。
   const json = await post(
     getBailianMultimodalEndpoint(provider.workspaceId),
     apiKey,
@@ -342,21 +343,31 @@ export async function callBailianTts(
     };
   }
 
-  const json = await post(
-    getBailianMultimodalEndpoint(provider.workspaceId),
-    apiKey,
-    {
-      model: options.model,
-      input: {
-        text: options.text,
-        voice,
-        ...(options.languageType ? { language_type: options.languageType } : {}),
+  let json: Record<string, any>;
+  try {
+    json = await post(
+      getBailianMultimodalEndpoint(provider.workspaceId),
+      apiKey,
+      {
+        model: options.model,
+        input: {
+          text: options.text,
+          voice,
+          ...(options.languageType ? { language_type: options.languageType } : {}),
+        },
       },
-    },
-    'TTS',
-    options.signal,
-    fetchImpl,
-  );
+      'TTS',
+      options.signal,
+      fetchImpl,
+    );
+  } catch (e) {
+    // qwen3-tts-vc / -vd 走的是 HTTP，它们「需要自建音色」的提示也要在这条路上给出。
+    if (e instanceof UpstreamError) {
+      const hint = ttsFailureHint(options.model, voice, e.message);
+      if (hint) throw new UpstreamError(e.status, `${e.message}${hint}`);
+    }
+    throw e;
+  }
   const audioUrl = json.output?.audio?.url;
   const characters = json.usage?.characters;
 

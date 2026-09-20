@@ -203,14 +203,27 @@ GET  {transcription_url}   ← 文本在这里，不在轮询响应里
 替客户端上传，所以 `/v1/audio/transcriptions` 对这类模型要求传 `file_url` 字段
 而不是 `file`。
 
-### 仍然不可用的
+### 全目录实测结果（74 个语音模型，2026-09-20）
 
-| 模型 | 上游回应 | 处理 |
+**54 个可用。** 其余 20 个分两类：
+
+**本地拦截 10 个**——`*-realtime`。它们用另一套实时协议，在同步推理的 WebSocket
+端点上是 `Model not found`。网关不外发，直接返回 400 并说明原因。
+
+**上游拒绝 10 个**：
+
+| 模型 | 上游回应 | 原因 |
 |---|---|---|
-| `*-realtime` | WebSocket 端点上 `Model not found` | 本地 400；它们用另一套实时协议，网关未实现 |
-| `cosyvoice-v3.5-*` | `418` | 放行到上游，附上音色不匹配的提示 |
-| `qwen-audio-3.1-tts-flash` | `Engine error [411]` | 放行到上游，原样回传 |
-| `qwen-audio-3.0-asr-flash` | `400 {}`（空错误体） | 放行到上游，原样回传 |
+| `qwen3-tts-vc-*` | `TTS speak request failed, please verify your input` | 官方简介：「可对 **qwen-voice-enrollment** 服务复刻的声音进行高保真实时语音合成」——必须传复刻音色 ID |
+| `qwen3-tts-vd-*` | 同上 | 官方简介：「可对 **qwen3-voice-design** 服务设计的声音进行…」——必须传设计音色 ID |
+| `cosyvoice-v3.5-flash/plus` | `418` | 所有预置音色都被拒；简介称其主打声音克隆与设计。**推断**需克隆音色，未实际创建验证 |
+| `qwen-audio-3.1-tts-flash` | `Engine error [411]: TTS speak operation failed` | **未核实** |
+| `qwen-audio-3.0-asr-flash` | `400 {}`（空错误体） | **未核实**；同一音频 `qwen3-asr-flash` 正常 |
+| `qwen-audio-3.0-asr-flash-filetrans` | `InvalidParameter.ParseError` | **未核实** |
+| `sambert-clara-v1`、`sambert-hanna-v1`、`sambert-zhishuo-v1` | `Model not exist.` | 官方目录列了但服务上没有；其余 41 个 sambert 全部可用 |
+
+前三类网关会把「需要自建音色」的原因附在错误后面——上游那句
+`please verify your input` 本身看不出任何线索。
 
 ### 计价口径：语音不是按 token 计价
 

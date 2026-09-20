@@ -16,7 +16,7 @@ import {
   callBailianAsr,
   callBailianTts,
 } from '../lib/vendors/bailian/audio.ts';
-import { streamingModeFor } from '../lib/vendors/bailian/tts-websocket.ts';
+import { streamingModeFor, ttsFailureHint } from '../lib/vendors/bailian/tts-websocket.ts';
 
 test('bailianCatalogUrl serializes query parameters correctly according to official docs', () => {
   const filter: BailianCatalogFilterOptions = {
@@ -265,4 +265,36 @@ test('an upstream non-2xx carries its status instead of becoming a gateway failu
       ),
     (e: any) => e.status === 400 && /InvalidParameter/.test(e.message),
   );
+});
+
+test('voice-clone and voice-design models explain what they need instead of echoing a vague error', async () => {
+  // 官方简介明写这两族只合成专门服务复刻/设计出来的声音，预置音色一定失败，
+  // 而上游只回一句「please verify your input」，对着它是猜不出来的。
+  const fetchImpl = (async () =>
+    new Response(
+      '{"code":"InvalidParameter","message":"TTS speak request failed, please verify your input."}',
+      { status: 400 },
+    )) as unknown as typeof fetch;
+
+  await assert.rejects(
+    () => callBailianTts({ workspaceId: 'ws' } as never, 'sk', { model: 'qwen3-tts-vc-2026-01-22', text: 'x' }, fetchImpl),
+    (e: any) => e.status === 400 && /qwen-voice-enrollment/.test(e.message),
+  );
+  await assert.rejects(
+    () => callBailianTts({ workspaceId: 'ws' } as never, 'sk', { model: 'qwen3-tts-vd-2026-01-26', text: 'x' }, fetchImpl),
+    (e: any) => e.status === 400 && /qwen3-voice-design/.test(e.message),
+  );
+});
+
+test('a 418 explains the voice table is per model version', () => {
+  assert.match(
+    ttsFailureHint('cosyvoice-v2', 'longanhuan', 'Engine return error code: 418'),
+    /_v2 后缀/,
+  );
+  assert.match(
+    ttsFailureHint('cosyvoice-v3-flash', 'longxiaochun_v2', 'Engine return error code: 418'),
+    /不带版本后缀/,
+  );
+  // 与音色无关的报错不要硬塞提示。
+  assert.equal(ttsFailureHint('cosyvoice-v2', 'longxiaochun_v2', 'some unrelated failure'), '');
 });

@@ -65,15 +65,27 @@ export function streamingModeFor(modelId: string): BailianTtsStreamingMode {
 }
 
 /**
- * 上游用 418 表示「这个音色不属于这个模型」——实测 cosyvoice-v2 只认 `*_v2`、
- * cosyvoice-v3-flash 只认无后缀那套，互换必 418。错误码本身看不出这层意思，
- * 补一句可操作的提示，别让人对着 418 猜。
+ * 把上游那些说不清原因的报错翻译成可操作的提示。
+ *
+ * 依据都来自实测或官方模型简介，不猜：
+ *  - 418 实测是「音色不属于这个模型」（cosyvoice-v2 只认 `*_v2`，v3 起只认无后缀，互换必 418）；
+ *  - vc / vd 两族的官方简介明写要用专门服务复刻或设计出来的声音。
  */
-function voiceHint(model: string, voice: string | undefined, upstreamMessage: string): string {
-  if (!/\b418\b/.test(upstreamMessage)) return '';
+export function ttsFailureHint(model: string, voice: string | undefined, upstreamMessage: string): string {
   const lower = model.toLowerCase();
+
+  // 官方简介原文：「可对 qwen-voice-enrollment 服务复刻的声音进行高保真实时语音合成」
+  if (/-vc-|-vc$/.test(lower)) {
+    return '（该模型只合成 qwen-voice-enrollment 服务复刻出来的声音，必须把复刻音色的 ID 作为 voice 传入，预置音色不适用。）';
+  }
+  // 官方简介原文：「可对 qwen3-voice-design 服务设计的声音进行高保真实时语音合成」
+  if (/-vd-|-vd$/.test(lower)) {
+    return '（该模型只合成 qwen3-voice-design 服务设计出来的声音，必须把设计音色的 ID 作为 voice 传入，预置音色不适用。）';
+  }
+
+  if (!/\b418\b/.test(upstreamMessage)) return '';
   if (/cosyvoice-v3\.5/.test(lower)) {
-    return `（418 表示音色与模型不匹配。cosyvoice-v3.5 系列是声音克隆/声音设计模型，实测所有预置音色都会被拒，需要先在百炼控制台创建克隆音色再把它的 ID 作为 voice 传入。）`;
+    return '（418 表示音色与模型不匹配。cosyvoice-v3.5 系列主打声音克隆与声音设计，实测所有预置音色都被拒，需先创建克隆音色再把其 ID 作为 voice 传入。）';
   }
   if (lower.startsWith('cosyvoice')) {
     const expected = /cosyvoice-v[12]\b/.test(lower) ? '带 _v2 后缀的一套' : '不带版本后缀的一套（如 longanhuan）';
@@ -213,7 +225,7 @@ export function synthesizeOverWebSocket(
       } else if (kind === 'task-failed') {
         const code = message?.header?.error_code ?? 'unknown';
         const text = message?.header?.error_message ?? '（上游未给出原因）';
-        fail(400, `百炼 TTS 失败 (${code}): ${text}${voiceHint(options.model, options.voice, text)}`);
+        fail(400, `百炼 TTS 失败 (${code}): ${text}${ttsFailureHint(options.model, options.voice, text)}`);
       }
     });
 
