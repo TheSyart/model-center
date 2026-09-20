@@ -10,6 +10,7 @@ import {
   bailianAudioRejectMessage,
   callBailianAsr,
   resolveBailianAudioRoute,
+  supportsBailianVocabulary,
 } from '@/lib/vendors/bailian/audio';
 import { callBailianFiletrans } from '@/lib/vendors/bailian/asr-filetrans';
 
@@ -46,6 +47,49 @@ async function handlePost(req: NextRequest): Promise<Response> {
    * 网关没有对象存储能替客户端上传，所以由客户端直接给地址。
    */
   const fileUrl = (formData.get('file_url') as string | null)?.trim();
+  /** 同样是扩展：热词。OpenAI 没有对应字段，不传就退回原样。 */
+  const vocabularyRaw = (formData.get('vocabulary') as string | null)?.trim();
+  const vocabularyId = (formData.get('vocabulary_id') as string | null)?.trim();
+
+  let vocabulary: Record<string, number> | undefined;
+  if (vocabularyRaw) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(vocabularyRaw);
+    } catch {
+      return openaiErrorResponse(400, 'vocabulary 必须是 JSON 对象字符串，例如 {"小单":5}', {
+        param: 'vocabulary',
+        code: 'invalid_vocabulary',
+      });
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return openaiErrorResponse(400, 'vocabulary 必须是「词 → 权重」的 JSON 对象，例如 {"小单":5}', {
+        param: 'vocabulary',
+        code: 'invalid_vocabulary',
+      });
+    }
+    const entries = Object.entries(parsed as Record<string, unknown>);
+    for (const [word, weight] of entries) {
+      if (typeof weight !== 'number' || !Number.isFinite(weight)) {
+        return openaiErrorResponse(400, `热词 "${word}" 的权重必须是数字（1-5，50 为超权重）`, {
+          param: 'vocabulary',
+          code: 'invalid_vocabulary',
+        });
+      }
+    }
+    vocabulary = Object.fromEntries(entries) as Record<string, number>;
+  }
+
+  if ((vocabulary || vocabularyId) && !supportsBailianVocabulary(model)) {
+    // 静默丢弃最坏：客户端以为热词生效了，其实一直没有。
+    return openaiErrorResponse(
+      400,
+      `模型 "${model}" 不支持热词。qwen3-asr 系列在官方规格里「热词」就是否，实测传了也不生效；` +
+        '请改用 qwen-audio-3.0-asr-flash（或它的 -filetrans 版本），那一族支持 vocabulary。',
+      { param: 'vocabulary', code: 'vocabulary_not_supported' },
+    );
+  }
+
   const route = resolveBailianAudioRoute(model);
   const isFiletrans = route.supported && route.kind === 'asr-filetrans';
   const file = formData.get('file');
@@ -92,6 +136,8 @@ async function handlePost(req: NextRequest): Promise<Response> {
         const result = await callBailianFiletrans(target.provider, apiKey, {
           model: target.modelId,
           fileUrl: fileUrl!,
+          vocabulary,
+          vocabularyId,
           languageHints: language ? [language] : undefined,
           signal,
         });
@@ -111,6 +157,8 @@ async function handlePost(req: NextRequest): Promise<Response> {
         // 角色必须是 system——user 会被上游以 InvalidParameter 拒掉，
         // 这正是 OpenAI 标准的 prompt 字段此前在网关上 400 的原因。
         contextMessages: prompt ? [{ role: 'system', text: prompt }] : undefined,
+        vocabulary,
+        vocabularyId,
         format: audioFormatFromName(mime, file instanceof File ? file.name : undefined),
         signal,
       });
